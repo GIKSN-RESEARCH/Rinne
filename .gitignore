@@ -1,0 +1,11 @@
+# Rust build output
+/target
+
+# Runtime blackboard (per-run state, logs, transcripts, artifacts)
+.rinne/
+
+# Local env / editor
+.env
+.DS_Store
+
+Cargo.lock

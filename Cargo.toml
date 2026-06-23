@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rinne-cli",
+    "crates/rinne-core",
+    "crates/rinne-conductor",
+    "crates/rinne-workers",
+    "crates/rinne-config",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rinne/rinne"
+
+[workspace.dependencies]
+# Internal crates
+rinne-core = { path = "crates/rinne-core" }
+rinne-conductor = { path = "crates/rinne-conductor" }
+rinne-workers = { path = "crates/rinne-workers" }
+rinne-config = { path = "crates/rinne-config" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Fuzzy picker + filesystem watch
+nucleo = "0.5"
+notify = "8"
+
+# Persistence
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+# Config
+figment = { version = "0.10", features = ["toml", "env"] }
+toml = "0.8"
+directories = "5"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
