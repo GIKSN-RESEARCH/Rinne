@@ -7,5 +7,6 @@
 # Local env / editor
 .env
 .DS_Store
+github.txt
 
 Cargo.lock
