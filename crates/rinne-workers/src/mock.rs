@@ -98,6 +98,7 @@ fn default_descriptor(name: &str) -> WorkerDescriptor {
         quota: QuotaModel::unlimited(),
         latency: LatencyProfile::Fast,
         transport: Transport::SubprocessJson,
+        models: Vec::new(),
     }
 }
 
