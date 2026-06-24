@@ -58,6 +58,9 @@ pub struct Constraints {
     pub session_id: Option<String>,
     /// Ambient steering text captured from the user mid-run (`CONTEXT.md` §11).
     pub steer: Option<String>,
+    /// Model the harness should run for this node, if selected. Passed to the
+    /// CLI as e.g. `--model sonnet` / `-m grok-build`.
+    pub model: Option<String>,
 }
 
 /// Everything a worker needs to do one unit of work (`CONTEXT.md` §8).
