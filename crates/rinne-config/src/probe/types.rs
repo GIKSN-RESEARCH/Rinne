@@ -48,6 +48,10 @@ pub struct DoctorReport {
     /// Run-level warnings not tied to a single worker.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Non-warning suggestions to improve the pool (e.g. a cheap second-family
+    /// evaluator key for a single-family setup).
+    #[serde(default)]
+    pub recommendations: Vec<String>,
 }
 
 impl DoctorReport {

@@ -77,10 +77,41 @@ pub async fn run(config: &Config, cached_installs: Option<&InstallMap>) -> Resul
         workers.push(probe_api(name, &provider.key_env));
     }
 
+    let recommendations = pool_recommendations(&workers);
+
     Ok(ProbeOutcome {
-        report: DoctorReport { workers, warnings },
+        report: DoctorReport {
+            workers,
+            warnings,
+            recommendations,
+        },
         installs,
     })
+}
+
+/// Suggest the single cheapest quality upgrade for a thin pool: when every
+/// available worker is the same vendor family, recommend a cheap second-family
+/// API key used purely as the evaluator (`CONTEXT.md` §7).
+fn pool_recommendations(workers: &[WorkerProbe]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    // Consider the pool Rinne will actually route to: enabled + available.
+    let families: BTreeSet<&str> = workers
+        .iter()
+        .filter(|w| w.enabled && w.status.is_available())
+        .map(|w| rinne_core::priors::family_of_worker(&w.name))
+        .filter(|f| *f != "unknown")
+        .collect();
+
+    if families.len() == 1 {
+        let fam = families.iter().next().copied().unwrap_or("one family");
+        vec![format!(
+            "Single-family pool ({fam}). For stronger evaluator independence, add a cheap \
+             second-family API key (e.g. DeepSeek or Gemini Flash) used only for the evaluator \
+             role — it restores blind-spot independence for pennies, and Rinne meters nothing."
+        )]
+    } else {
+        Vec::new()
+    }
 }
 
 /// The expensive, cacheable half: is the harness binary present and healthy?
@@ -175,9 +206,10 @@ mod tests {
     }
 }
 
-/// Probe an API worker: present and metered iff its key env var is set.
+/// Probe an API worker: present and metered iff a key is available (from the
+/// env var or the OS keychain).
 fn probe_api(name: &str, key_env: &str) -> WorkerProbe {
-    let key_set = std::env::var_os(key_env).is_some();
+    let key_set = crate::secrets::has_api_key(name, key_env);
     let status = if key_set {
         WorkerStatus::Available
     } else {
@@ -185,7 +217,9 @@ fn probe_api(name: &str, key_env: &str) -> WorkerProbe {
     };
     let mut warnings = Vec::new();
     if !key_set {
-        warnings.push(format!("key env var {key_env} is not set"));
+        warnings.push(format!(
+            "no key — set {key_env} or run `rinne connect {name} <key>`"
+        ));
     }
     WorkerProbe {
         name: name.to_string(),
