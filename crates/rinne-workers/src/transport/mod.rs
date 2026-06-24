@@ -7,5 +7,8 @@
 pub mod http;
 pub mod subprocess;
 
-pub use http::{ChatBackend, ChatMessage, ChatRequest, ChatResponse, OpenAiClient};
+pub use http::{
+    normalize_base_url, ChatBackend, ChatMessage, ChatRequest, ChatResponse, DiscoveredModel,
+    OpenAiClient,
+};
 pub use subprocess::{raw_lines, run, SubprocessOutput, SubprocessSpec};
