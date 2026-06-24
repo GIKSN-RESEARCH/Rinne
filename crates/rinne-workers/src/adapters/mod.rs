@@ -5,9 +5,13 @@
 //! `subprocess-json`), plus one OpenAI-compatible API worker (over `http`).
 //! More adapters (Cursor, Grok Build, Aider, Antigravity) are V2.
 
+pub mod aider;
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod common;
+pub mod cursor;
+pub mod grok;
 pub mod opencode;
 pub mod openai_api;
 
