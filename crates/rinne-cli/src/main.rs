@@ -5,7 +5,9 @@
 
 mod cli;
 mod commands;
+mod runner;
 mod telemetry;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -24,55 +26,46 @@ async fn main() -> Result<()> {
 
     // A `-p` prompt means one-shot headless mode regardless of subcommand.
     if let Some(task) = args.prompt.as_deref() {
-        return run_oneshot(task).await;
+        return run_oneshot(task, args.json).await;
     }
 
     match args.command {
         None => run_interactive().await,
         Some(Command::Doctor) => run_doctor().await,
-        Some(Command::Connect { backend }) => run_connect(&backend).await,
+        Some(Command::Run { plan }) => commands::run::run(&plan).await,
+        Some(Command::Connect { backend, key, models, base_url, add }) => {
+            commands::connect::run(&backend, key, models, base_url, add).await
+        }
+        Some(Command::Forget { provider }) => commands::forget::run(&provider).await,
+        Some(Command::Models { provider }) => commands::models::run(&provider).await,
         Some(Command::Status) => run_status().await,
-        Some(Command::Resume) => run_resume().await,
-        Some(Command::Config) => run_config().await,
+        Some(Command::Resume {
+            steer,
+            approve,
+            reject,
+        }) => commands::run::resume(steer, approve, reject).await,
+        Some(Command::Config { args }) => commands::config::run(&args).await,
         Some(Command::Logs) => run_logs().await,
     }
 }
 
-/// Marker used by every Phase 0 stub so the unimplemented surface is obvious
-/// and uniform at runtime.
-fn not_implemented(what: &str, phase: &str) -> Result<()> {
-    println!("rinne: `{what}` is not implemented yet (lands in {phase}).");
-    Ok(())
-}
-
 async fn run_interactive() -> Result<()> {
-    not_implemented("interactive TUI", "Phase 6")
+    tui::run().await
 }
 
-async fn run_oneshot(_task: &str) -> Result<()> {
-    not_implemented("one-shot headless (-p)", "Phase 4 / hardened in Phase 7")
+async fn run_oneshot(task: &str, json: bool) -> Result<()> {
+    commands::run::oneshot(task, json).await
 }
 
 async fn run_doctor() -> Result<()> {
     commands::doctor::run(false).await
 }
 
-async fn run_connect(backend: &str) -> Result<()> {
-    commands::connect::run(backend).await
-}
 
 async fn run_status() -> Result<()> {
-    not_implemented("status", "Phase 3")
-}
-
-async fn run_resume() -> Result<()> {
-    not_implemented("resume", "Phase 3")
-}
-
-async fn run_config() -> Result<()> {
-    commands::config::run().await
+    commands::status::run().await
 }
 
 async fn run_logs() -> Result<()> {
-    not_implemented("logs", "Phase 7")
+    commands::logs::run().await
 }
