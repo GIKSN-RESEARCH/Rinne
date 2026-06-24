@@ -47,16 +47,18 @@ fn descriptor() -> WorkerDescriptor {
         },
         latency: LatencyProfile::Medium,
         transport: Transport::SubprocessJson,
+        models: Vec::new(),
     }
 }
 
-fn build_args(prompt: &str) -> Vec<String> {
-    vec![
-        "run".into(),
-        prompt.into(),
-        "--format".into(),
-        "json".into(),
-    ]
+fn build_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = vec!["run".into(), prompt.into(), "--format".into(), "json".into()];
+    if let Some(m) = model {
+        // OpenCode takes `provider/model`; pass through as given.
+        args.push("--model".into());
+        args.push(m.into());
+    }
+    args
 }
 
 fn parse(out: &SubprocessOutput) -> ParsedHarness {
@@ -87,11 +89,11 @@ fn parse(out: &SubprocessOutput) -> ParsedHarness {
     }
 }
 
-fn line_mapper(line: &str) -> Option<WorkerEvent> {
+fn line_mapper(line: &str) -> Vec<WorkerEvent> {
     let t = line.trim();
     if t.is_empty() {
-        None
+        Vec::new()
     } else {
-        Some(WorkerEvent::Raw(t.to_string()))
+        vec![WorkerEvent::Raw(t.to_string())]
     }
 }
