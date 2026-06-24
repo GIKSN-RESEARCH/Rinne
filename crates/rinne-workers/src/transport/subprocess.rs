@@ -38,9 +38,10 @@ pub struct SubprocessOutput {
     pub wall_ms: u64,
 }
 
-/// Map a raw stdout line to a streamed event. Adapters pass their own mapper to
-/// turn structured CLI output into rich events; the default wraps the line raw.
-pub type LineMapper = fn(&str) -> Option<WorkerEvent>;
+/// Map a raw stdout line to zero or more streamed events. Adapters pass their
+/// own mapper to turn structured (e.g. NDJSON) output into rich live events; a
+/// single line may expand to several events (text + tool uses).
+pub type LineMapper = fn(&str) -> Vec<WorkerEvent>;
 
 /// Run a subprocess, streaming stdout lines via `mapper` and capturing output.
 pub async fn run(
@@ -115,7 +116,7 @@ pub async fn run(
                     Ok(Some(l)) => {
                         captured.push_str(&l);
                         captured.push('\n');
-                        if let Some(ev) = mapper(&l) {
+                        for ev in mapper(&l) {
                             emit(events, ev);
                         }
                     }
@@ -168,11 +169,11 @@ pub async fn run(
     })
 }
 
-/// The default line mapper: surface each line raw to the stream pane.
-pub fn raw_lines(line: &str) -> Option<WorkerEvent> {
+/// The default line mapper: surface each non-empty line raw to the stream pane.
+pub fn raw_lines(line: &str) -> Vec<WorkerEvent> {
     if line.trim().is_empty() {
-        None
+        Vec::new()
     } else {
-        Some(WorkerEvent::Raw(line.to_string()))
+        vec![WorkerEvent::Raw(line.to_string())]
     }
 }
