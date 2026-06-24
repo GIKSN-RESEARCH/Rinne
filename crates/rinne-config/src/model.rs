@@ -15,6 +15,17 @@ pub struct Config {
     pub loop_: LoopConfig,
     pub preferences: Preferences,
     pub backends: Backends,
+    /// Per-harness default model, e.g. `claude-code = "sonnet"`. Switchable
+    /// between sessions by editing config (`CONTEXT.md` §7).
+    pub models: ModelDefaults,
+}
+
+/// `[models]` — default model per worker name.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ModelDefaults {
+    #[serde(flatten)]
+    pub by_worker: std::collections::BTreeMap<String, String>,
 }
 
 /// `[conductor]` — the cheap, decoupled planning backend (`CONTEXT.md` §7).
@@ -25,6 +36,15 @@ pub struct ConductorConfig {
     pub backend: ConductorBackend,
     /// The model id on that backend.
     pub model: String,
+    /// Override the backend base URL (else a per-backend default is used).
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Override the env var holding the backend's API key.
+    #[serde(default)]
+    pub key_env: Option<String>,
+    /// Cloudflare account id, required to build its OpenAI-compatible URL.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 impl Default for ConductorConfig {
@@ -32,6 +52,9 @@ impl Default for ConductorConfig {
         Self {
             backend: ConductorBackend::Cloudflare,
             model: "@cf/moonshotai/kimi-k2.7-code".to_string(),
+            base_url: None,
+            key_env: None,
+            account_id: None,
         }
     }
 }
@@ -80,6 +103,8 @@ pub struct Preferences {
     pub prefer: PreferFamily,
     /// Optional per-role pins, e.g. `evaluator = "api:gpt-5.5"`.
     pub roles: std::collections::BTreeMap<String, String>,
+    /// Optional per-role model pins, e.g. `evaluator = "haiku"`.
+    pub models: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Preferences {
@@ -87,6 +112,7 @@ impl Default for Preferences {
         Self {
             prefer: PreferFamily::Harness,
             roles: std::collections::BTreeMap::new(),
+            models: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -124,6 +150,9 @@ impl Default for HarnessBackends {
                 "codex".to_string(),
                 "opencode".to_string(),
                 "grok".to_string(),
+                "cursor-agent".to_string(),
+                "aider".to_string(),
+                "antigravity".to_string(),
             ],
         }
     }
@@ -134,8 +163,10 @@ impl Default for HarnessBackends {
 /// Each provider names the environment variable that holds its key; Rinne never
 /// stores the key itself (`CONTEXT.md` §9).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ApiBackends {
+    // `flatten` collects each `[backends.api.<provider>]` table into the map;
+    // it is incompatible with `deny_unknown_fields`.
     #[serde(flatten)]
     pub providers: std::collections::BTreeMap<String, ApiProvider>,
 }
@@ -144,9 +175,22 @@ pub struct ApiBackends {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiProvider {
-    /// The env var holding this provider's key, e.g. `ANTHROPIC_API_KEY`.
+    /// The env var holding this provider's key, e.g. `OPENAI_API_KEY`. Rinne
+    /// reads the key from this var at call time and never stores it.
     pub key_env: String,
-    /// Optional base URL override for OpenAI-compatible providers.
+    /// Optional base URL override (else a per-provider default is used).
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Default model for this provider, e.g. `gpt-5-mini`.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional model ladder cheap→strong, powering tiering and the cascade.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Extra JSON merged into every chat request to this provider, for
+    /// provider-specific params (e.g. NVIDIA's
+    /// `chat_template_kwargs = { thinking = false }` to disable a reasoning
+    /// model's slow thinking mode). A TOML table here becomes request JSON.
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Value>,
 }
