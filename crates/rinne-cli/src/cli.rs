@@ -17,6 +17,11 @@ pub struct Cli {
     #[arg(short = 'p', long = "prompt", value_name = "TASK", global = true)]
     pub prompt: Option<String>,
 
+    /// With `-p`, emit a single JSON result (scriptable) instead of streaming
+    /// human-readable progress.
+    #[arg(long, global = true)]
+    pub json: bool,
+
     /// Increase log verbosity (repeatable). Logs go to a file in `.rinne/`,
     /// never to the TUI.
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
@@ -32,20 +37,81 @@ pub enum Command {
     /// Detect and report backends, auth mode, and quota.
     Doctor,
 
+    /// Load a plan file into the blackboard and run it to completion.
+    ///
+    /// A Phase 3 entry point: in Phase 4 the conductor generates plans from a
+    /// prompt, but this drives a hand-written `plan.json` directly.
+    Run {
+        /// Path to a `plan.json` describing the DAG.
+        plan: String,
+    },
+
     /// Run a native login or set a key for a backend, then re-check.
     Connect {
-        /// The backend to connect (e.g. `claude`, `codex`, `openai`).
+        /// The backend to connect (e.g. `claude-code`, `deepseek`, `openai`).
         backend: String,
+        /// For an API provider: the API key, stored securely in the OS keychain
+        /// (set once and forget). Omit to be told how to provide it.
+        key: Option<String>,
+        /// For an API provider: model id(s) to use (cheap→strong), e.g.
+        /// `--model deepseek-ai/deepseek-v4-pro`. Repeatable.
+        #[arg(long = "model", value_name = "ID")]
+        models: Vec<String>,
+        /// Override the API endpoint, so a custom provider name can point at any
+        /// OpenAI-compatible host (e.g. NVIDIA: https://integrate.api.nvidia.com/v1).
+        #[arg(long = "base-url", value_name = "URL")]
+        base_url: Option<String>,
+        /// Add the key to the provider's rotation pool instead of replacing it
+        /// (multiple keys are rotated across rate limits).
+        #[arg(long)]
+        add: bool,
+    },
+
+    /// Delete a stored API key from the OS keychain (undo `connect <p> <key>`).
+    Forget {
+        /// The API provider whose stored key to remove (e.g. `deepseek`).
+        provider: String,
+    },
+
+    /// List the models an API provider's key can access (`/v1/models`).
+    Models {
+        /// The configured API provider to query (e.g. `openrouter`).
+        provider: String,
     },
 
     /// Show the state of the current run (DAG, progress).
     Status,
 
     /// Resume an interrupted or parked run.
-    Resume,
+    ///
+    /// When a run is parked at a checkpoint or human evaluator, supply your
+    /// decision: `--steer` gives the missing guidance (it becomes the critique),
+    /// `--approve` accepts the current state, `--reject` replans from scratch.
+    Resume {
+        /// Inject guidance into the parked node; flows into the loop as critique.
+        #[arg(long, value_name = "TEXT")]
+        steer: Option<String>,
+        /// Accept the current state and move on.
+        #[arg(long)]
+        approve: bool,
+        /// Throw out this approach and replan.
+        #[arg(long)]
+        reject: bool,
+    },
 
-    /// Edit backends, conductor backend, and preferences.
-    Config,
+    /// View or edit configuration (conductor, loop, preferences, models).
+    ///
+    /// No args shows the resolved config. Subcommands edit a file in place,
+    /// defaulting to global (`--project` scopes to this repo). Examples:
+    ///   rinne config conductor groq llama-3.3-70b
+    ///   rinne config prefer api
+    ///   rinne config set loop.max_iterations_per_node 5
+    Config {
+        /// The subcommand and its arguments (e.g. `conductor groq`). Empty shows
+        /// the resolved config.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 
     /// View trajectory logs (local only).
     Logs,
