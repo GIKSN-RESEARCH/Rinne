@@ -6,10 +6,13 @@
 //! catching the Claude `ANTHROPIC_API_KEY` billing footgun.
 
 pub mod cache;
+pub mod known;
 pub mod load;
 pub mod model;
 pub mod paths;
 pub mod probe;
+pub mod secrets;
+pub mod write;
 
 pub use load::{load, load_cwd};
 pub use model::Config;
