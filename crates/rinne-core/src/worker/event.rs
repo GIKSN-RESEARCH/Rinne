@@ -12,6 +12,16 @@ use serde::{Deserialize, Serialize};
 pub enum WorkerEvent {
     /// A line of human-readable narration ("reading src/, editing app.ts").
     Message(String),
+    /// A raw streaming text delta from a token-streaming worker (API/HTTP, Grok).
+    /// Consumers concatenate these verbatim — fragments are often mid-word, so no
+    /// separator is inserted between them. This is what lets the UI reconstruct
+    /// and markdown-render any streamed model output regardless of the worker.
+    Token(String),
+    /// A reasoning ("thinking") delta from a reasoning model (e.g. DeepSeek-R1,
+    /// o-series). Streamed separately from [`Token`] content and never part of
+    /// the final answer, so the UI can show it dimmed without polluting the
+    /// result passed to the next node.
+    Thinking(String),
     /// The worker began reading a file/path.
     Reading(String),
     /// The worker edited a file/path.

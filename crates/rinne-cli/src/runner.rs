@@ -366,6 +366,11 @@ fn print_event(ev: EngineEvent) {
         EngineEvent::NodeStream { id, event } => {
             use rinne_core::worker::WorkerEvent::*;
             match event {
+                Token(t) | Thinking(t) => {
+                    use std::io::Write;
+                    print!("{t}");
+                    let _ = std::io::stdout().flush();
+                }
                 Message(m) | Reading(m) | Editing(m) | ToolUse(m) => {
                     println!("   {id}  {m}")
                 }

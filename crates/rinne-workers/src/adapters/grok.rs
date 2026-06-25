@@ -131,7 +131,7 @@ fn line_mapper(line: &str) -> Vec<WorkerEvent> {
         Some("text") => v
             .get("data")
             .and_then(|d| d.as_str())
-            .map(|d| vec![WorkerEvent::Message(d.to_string())])
+            .map(|d| vec![WorkerEvent::Token(d.to_string())])
             .unwrap_or_default(),
         Some("tool_use") | Some("tool") => {
             let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("tool");

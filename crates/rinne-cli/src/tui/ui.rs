@@ -28,11 +28,12 @@ pub fn flush_pending(
         return Ok(());
     }
     let width = terminal.get_frame().area().width.max(1) as usize;
+    let expand_thinking = app.expand_thinking;
     let entries = std::mem::take(&mut app.pending);
     // Insert one visual line at a time so an entry taller than the terminal is
     // never truncated — each line just scrolls into native scrollback.
     for entry in entries {
-        for line in render_entry((&entry).into(), width) {
+        for line in render_entry((&entry).into(), width, expand_thinking) {
             terminal.insert_before(1, move |buf| {
                 let area = buf.area;
                 Paragraph::new(line).render(area, buf);
@@ -57,9 +58,10 @@ pub fn draw_viewport(f: &mut Frame, app: &App) {
     ])
     .split(area);
 
+    let cursor_char = app.cursor_char();
     draw_status(f, chunks[0], app);
     draw_middle(f, chunks[1], app);
-    draw_prompt(f, chunks[2], app, &wrapped_input);
+    draw_prompt(f, chunks[2], app, &wrapped_input, cursor_char);
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
@@ -141,32 +143,42 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
             .border_style(Style::default().fg(Color::Cyan))
             .title(title);
         f.render_widget(List::new(items).block(block), area);
-    } else if !app.live_tail.is_empty() {
-        // The in-progress streamed line (token-level workers), bottom-aligned.
+    } else if !app.live_tail.is_empty() || !app.live_thinking.is_empty() {
+        // The in-progress streamed text, bottom-aligned. Show the answer once it
+        // starts; until then show the reasoning (dimmed) so thinking is visible.
         let node = app.live_node.as_deref().unwrap_or("");
-        let text = format!("{node}  {}", app.live_tail);
+        let answering = !app.live_tail.is_empty();
+        let body = if answering { &app.live_tail } else { &app.live_thinking };
+        let prefix = if answering { "" } else { "✻ " };
+        let text = format!("{node}  {prefix}{body}");
         let avail = area.width.saturating_sub(2).max(8) as usize;
         let wrapped = wrap(&text, avail);
         let rows = area.height as usize;
         let start = wrapped.len().saturating_sub(rows);
+        let style = if answering {
+            Style::default().fg(Color::Gray)
+        } else {
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
+        };
         let lines: Vec<Line> = wrapped[start..]
             .iter()
-            .map(|l| Line::from(Span::styled(format!(" {l}"), Style::default().fg(Color::Gray))))
+            .map(|l| Line::from(Span::styled(format!(" {l}"), style)))
             .collect();
         f.render_widget(Paragraph::new(lines), area);
     }
 }
 
-fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String]) {
+fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String], cursor_char: usize) {
     let hint = if app.parked.is_some() {
         "enter to steer · /approve · /reject"
     } else if app.running {
-        "esc to pause"
+        "esc pause · ctrl-o thinking"
     } else {
-        "@ files · /help · ctrl-q quit"
+        "@ files · /help · ctrl-o thinking · ctrl-q quit"
     };
 
-    let last = wrapped.len().saturating_sub(1);
+    // Locate the cursor (a char index) within the wrapped lines.
+    let (cline, ccol) = cursor_pos(wrapped, cursor_char);
     let lines: Vec<Line> = wrapped
         .iter()
         .enumerate()
@@ -176,9 +188,16 @@ fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String]) {
             } else {
                 Span::raw("  ")
             };
-            let mut spans = vec![lead, Span::styled(text.clone(), Style::default().fg(Color::White))];
-            if i == last {
+            let white = Style::default().fg(Color::White);
+            let mut spans = vec![lead];
+            if i == cline {
+                let before: String = text.chars().take(ccol).collect();
+                let after: String = text.chars().skip(ccol).collect();
+                spans.push(Span::styled(before, white));
                 spans.push(Span::styled("▏", Style::default().fg(Color::Cyan)));
+                spans.push(Span::styled(after, white));
+            } else {
+                spans.push(Span::styled(text.clone(), white));
             }
             Line::from(spans)
         })
@@ -193,7 +212,7 @@ fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String]) {
 }
 
 /// Render one transcript entry into styled, word-wrapped lines for scrollback.
-fn render_entry(entry: FeedEntryRef, width: usize) -> Vec<Line<'static>> {
+fn render_entry(entry: FeedEntryRef, width: usize, expand_thinking: bool) -> Vec<Line<'static>> {
     // A completed worker message: render it as terminal markdown, indented under
     // a single dim node gutter, instead of one raw line per token.
     if entry.kind == FeedKind::Markdown {
@@ -214,12 +233,44 @@ fn render_entry(entry: FeedEntryRef, width: usize) -> Vec<Line<'static>> {
         return out;
     }
 
+    // A reasoning block: dimmed and italic under a "✻ thinking" gutter. Collapsed
+    // by default to a single summary line; ctrl+o expands subsequent blocks.
+    if entry.kind == FeedKind::Thinking {
+        let node = entry.node.map(|n| format!("{n} ")).unwrap_or_default();
+        let dim_head = Style::default().fg(Color::DarkGray);
+        if !expand_thinking {
+            let n = entry.text.lines().filter(|l| !l.trim().is_empty()).count().max(1);
+            return vec![Line::from(Span::styled(
+                format!("  ✻ {node}thinking · {n} line{} · ctrl+o to show", if n == 1 { "" } else { "s" }),
+                dim_head,
+            ))];
+        }
+        let indent = 4usize;
+        let avail = width.saturating_sub(indent + 1).max(24);
+        let dim = dim_head.add_modifier(Modifier::ITALIC);
+        let mut out: Vec<Line<'static>> = Vec::new();
+        out.push(Line::from(Span::styled(format!("  ✻ {node}thinking"), dim_head)));
+        for seg in entry.text.split('\n') {
+            if seg.trim().is_empty() {
+                out.push(Line::default());
+                continue;
+            }
+            for chunk in wrap(seg, avail) {
+                out.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled(chunk, dim),
+                ]));
+            }
+        }
+        return out;
+    }
+
     let (glyph, color, bold) = match entry.kind {
         FeedKind::System => ("", Color::Gray, false),
         FeedKind::Conductor => ("· ", Color::Cyan, false),
         FeedKind::NodeStart => ("▶ ", Color::Blue, true),
         FeedKind::Stream => ("  ⎿ ", Color::DarkGray, false),
-        FeedKind::Markdown => unreachable!("handled above"),
+        FeedKind::Markdown | FeedKind::Thinking => unreachable!("handled above"),
         FeedKind::NodeOk => ("✔ ", Color::Green, false),
         FeedKind::NodeFail => ("✗ ", Color::Red, false),
         FeedKind::Parked => ("⏸ ", Color::Yellow, false),
@@ -343,6 +394,25 @@ impl App {
     fn input_str(&self) -> &str {
         &self.input
     }
+    /// The cursor as a char index into the input (for prompt rendering).
+    fn cursor_char(&self) -> usize {
+        self.input[..self.cursor].chars().count()
+    }
+}
+
+/// Map a cursor char index to its `(line, col)` within char-wrapped `lines`.
+fn cursor_pos(lines: &[String], cursor_char: usize) -> (usize, usize) {
+    let mut idx = cursor_char;
+    for (i, l) in lines.iter().enumerate() {
+        let lc = l.chars().count();
+        if idx <= lc {
+            return (i, idx);
+        }
+        idx -= lc;
+    }
+    // Past the end: park at the end of the last line.
+    let last = lines.len().saturating_sub(1);
+    (last, lines.last().map(|l| l.chars().count()).unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -364,8 +434,27 @@ mod tests {
             text: "- tip one\n- tip two\n- tip three".to_string(),
             node: None,
         };
-        let lines = render_entry((&entry).into(), 80);
+        let lines = render_entry((&entry).into(), 80, false);
         assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn thinking_collapses_to_summary_then_expands() {
+        let entry = FeedEntry {
+            kind: FeedKind::Thinking,
+            text: "first thought\nsecond thought\nthird".to_string(),
+            node: Some("n3".to_string()),
+        };
+        // Collapsed: a single summary line with the line count.
+        let collapsed = render_entry((&entry).into(), 80, false);
+        assert_eq!(collapsed.len(), 1);
+        let t: String = collapsed[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(t.contains("n3") && t.contains("thinking") && t.contains("3 lines") && t.contains("ctrl+o"), "{t:?}");
+        // Expanded: a header plus the body lines.
+        let expanded = render_entry((&entry).into(), 80, true);
+        assert!(expanded.len() > 3, "expected full body, got {}", expanded.len());
+        let all: String = expanded.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref().to_string()).collect();
+        assert!(all.contains("first thought") && all.contains("third"), "{all:?}");
     }
 
     #[test]
@@ -377,7 +466,7 @@ mod tests {
             text: "  /plan             show the current plan".to_string(),
             node: None,
         };
-        let lines = render_entry((&entry).into(), 80);
+        let lines = render_entry((&entry).into(), 80, false);
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(

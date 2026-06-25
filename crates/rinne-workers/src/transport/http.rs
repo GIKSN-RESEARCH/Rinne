@@ -206,9 +206,15 @@ impl OpenAiClient {
                     while let Some(nl) = buf.find('\n') {
                         let line = buf[..nl].trim().to_string();
                         buf.drain(..=nl);
-                        if let Some(delta) = parse_sse_line(&line, &mut usage, &mut finish_reason)? {
+                        let parsed = parse_sse_line(&line, &mut usage, &mut finish_reason)?;
+                        if let Some(reasoning) = parsed.reasoning {
+                            if !reasoning.is_empty() {
+                                emit(events, WorkerEvent::Thinking(reasoning));
+                            }
+                        }
+                        if let Some(delta) = parsed.content {
                             if !delta.is_empty() {
-                                emit(events, WorkerEvent::Message(delta.clone()));
+                                emit(events, WorkerEvent::Token(delta.clone()));
                                 content.push_str(&delta);
                             }
                         }
@@ -262,19 +268,27 @@ mod tests {
     }
 }
 
-/// Parse one SSE line. Returns the content delta (if any). Side-effects usage
-/// and finish_reason as they appear.
+/// The content + reasoning deltas extracted from one SSE chunk.
+#[derive(Default)]
+struct SseDelta {
+    content: Option<String>,
+    reasoning: Option<String>,
+}
+
+/// Parse one SSE line into its content and reasoning deltas. Side-effects usage
+/// and finish_reason as they appear. Reasoning is read from the de-facto fields
+/// (`reasoning_content` — DeepSeek; `reasoning` — OpenRouter and others).
 fn parse_sse_line(
     line: &str,
     usage: &mut Usage,
     finish_reason: &mut Option<String>,
-) -> Result<Option<String>> {
+) -> Result<SseDelta> {
     let Some(data) = line.strip_prefix("data:") else {
-        return Ok(None);
+        return Ok(SseDelta::default());
     };
     let data = data.trim();
     if data.is_empty() || data == "[DONE]" {
-        return Ok(None);
+        return Ok(SseDelta::default());
     }
 
     let chunk: ChatChunk =
@@ -285,16 +299,23 @@ fn parse_sse_line(
         usage.completion_tokens = u.completion_tokens;
     }
 
-    let mut delta_text = String::new();
+    let mut content = String::new();
+    let mut reasoning = String::new();
     for choice in chunk.choices {
         if let Some(fr) = choice.finish_reason {
             *finish_reason = Some(fr);
         }
         if let Some(c) = choice.delta.content {
-            delta_text.push_str(&c);
+            content.push_str(&c);
+        }
+        if let Some(r) = choice.delta.reasoning_content.or(choice.delta.reasoning) {
+            reasoning.push_str(&r);
         }
     }
-    Ok(Some(delta_text))
+    Ok(SseDelta {
+        content: (!content.is_empty()).then_some(content),
+        reasoning: (!reasoning.is_empty()).then_some(reasoning),
+    })
 }
 
 #[derive(Deserialize)]
@@ -316,6 +337,12 @@ struct ChunkChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// DeepSeek-style reasoning stream.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// OpenRouter/others-style reasoning stream.
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -12,7 +12,6 @@ mod markdown;
 mod picker;
 mod ui;
 
-use std::collections::HashSet;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,6 +37,9 @@ use picker::Picker;
 /// Guardrail: refuse a glob that expands past this before the conductor sees it.
 const GLOB_LIMIT: usize = 400;
 
+/// Cap on persisted history entries kept in memory / loaded from disk.
+const HISTORY_MAX: usize = 1000;
+
 /// A node as shown in the (printed) plan listing and progress count.
 #[derive(Clone)]
 pub struct NodeView {
@@ -56,6 +58,8 @@ pub enum FeedKind {
     Stream,
     /// A completed worker message, rendered as terminal markdown.
     Markdown,
+    /// A reasoning ("thinking") block from a reasoning model, rendered dimmed.
+    Thinking,
     NodeOk,
     NodeFail,
     Parked,
@@ -90,42 +94,57 @@ pub struct App {
     /// In-progress streamed text for the current node (token-level workers),
     /// shown live in the viewport until a boundary commits it to scrollback.
     live_tail: String,
+    /// In-progress reasoning text for the live node (reasoning models), shown
+    /// dimmed and committed just before the answer block.
+    live_thinking: String,
     live_node: Option<String>,
-    /// Workers that stream token-level fragments (API providers + grok), so the
-    /// feed accumulates their deltas into lines instead of one-fragment-per-line.
-    token_workers: HashSet<String>,
     input: String,
+    /// Cursor position in `input` as a byte index (always on a char boundary).
+    cursor: usize,
+    /// Submitted prompts, newest last, for up/down recall.
+    history: Vec<String>,
+    /// Current position while browsing history (`None` = editing a fresh line).
+    history_pos: Option<usize>,
+    /// The in-progress line saved when history browsing began, restored on exit.
+    draft: String,
+    /// File backing `history` across sessions (`.rinne/history`); `None` in tests.
+    history_path: Option<PathBuf>,
     running: bool,
     parked: Option<String>,
     picker: Option<Picker>,
     completion: Option<Completion>,
     index: FileIndex,
     spinner: usize,
+    /// Whether reasoning blocks render expanded (full) or collapsed (a summary
+    /// line). Toggled with ctrl+o; governs blocks committed from here on.
+    expand_thinking: bool,
     should_quit: bool,
     cancel: Option<CancellationToken>,
     tx: tokio::sync::mpsc::UnboundedSender<AppMsg>,
 }
 
 impl App {
-    fn new(
-        index: FileIndex,
-        tx: tokio::sync::mpsc::UnboundedSender<AppMsg>,
-        token_workers: HashSet<String>,
-    ) -> Self {
+    fn new(index: FileIndex, tx: tokio::sync::mpsc::UnboundedSender<AppMsg>) -> Self {
         let mut app = Self {
             goal: None,
             nodes: Vec::new(),
             pending: Vec::new(),
             live_tail: String::new(),
+            live_thinking: String::new(),
             live_node: None,
-            token_workers,
             input: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_pos: None,
+            draft: String::new(),
+            history_path: None,
             running: false,
             parked: None,
             picker: None,
             completion: None,
             index,
             spinner: 0,
+            expand_thinking: false,
             should_quit: false,
             cancel: None,
             tx,
@@ -140,9 +159,25 @@ impl App {
         self.pending.push(FeedEntry { kind, text: text.into(), node: None });
     }
 
+    /// Commit any accumulated reasoning as a dimmed thinking block. Reasoning
+    /// always precedes the answer, so this is flushed first.
+    fn commit_thinking(&mut self) {
+        if !self.live_thinking.trim().is_empty() {
+            let node = self.live_node.clone();
+            self.pending.push(FeedEntry {
+                kind: FeedKind::Thinking,
+                text: std::mem::take(&mut self.live_thinking).trim().to_string(),
+                node,
+            });
+        }
+        self.live_thinking.clear();
+    }
+
     /// Commit the accumulated worker message as one markdown block (rendered to
-    /// scrollback at flush time), tagged with its node for a gutter.
+    /// scrollback at flush time), tagged with its node for a gutter. Any pending
+    /// reasoning block is flushed first so thinking renders above the answer.
     fn commit_tail(&mut self) {
+        self.commit_thinking();
         if !self.live_tail.trim().is_empty() {
             let node = self.live_node.clone();
             self.pending.push(FeedEntry {
@@ -155,14 +190,40 @@ impl App {
         self.live_node = None;
     }
 
-    /// Append streamed text for `id`. The whole message accumulates (shown live
-    /// in the viewport) and is rendered as one markdown block when a boundary —
-    /// a node switch, a tool action, or completion — commits it. This is what
-    /// makes worker output read like Claude Code instead of one token per row.
-    fn stream_text(&mut self, id: &str, text: &str) {
+    /// Make `id` the live node, committing any previous node's block first.
+    fn ensure_live(&mut self, id: &str) {
         if self.live_node.as_deref() != Some(id) {
             self.commit_tail();
             self.live_node = Some(id.to_string());
+        }
+    }
+
+    /// Append a reasoning delta. Accumulates verbatim like content; shown dimmed
+    /// and committed just before the answer begins.
+    fn stream_thinking(&mut self, id: &str, text: &str) {
+        self.ensure_live(id);
+        self.live_thinking.push_str(text);
+    }
+
+    /// Append a raw streaming delta verbatim. Token fragments are often mid-word,
+    /// so they are concatenated with no separator; the whole message accumulates
+    /// and renders as one markdown block at the next boundary. This is what makes
+    /// any streamed model output read like Claude Code, not one token per row.
+    fn stream_token(&mut self, id: &str, text: &str) {
+        self.ensure_live(id);
+        // The answer has started — flush the reasoning block above it.
+        if !self.live_thinking.is_empty() {
+            self.commit_thinking();
+        }
+        self.live_tail.push_str(text);
+    }
+
+    /// Append a discrete line/block, ensuring it starts on its own line so
+    /// successive messages (e.g. Claude's blocks) don't run together.
+    fn stream_line(&mut self, id: &str, text: &str) {
+        self.ensure_live(id);
+        if !self.live_tail.is_empty() && !self.live_tail.ends_with('\n') {
+            self.live_tail.push('\n');
         }
         self.live_tail.push_str(text);
     }
@@ -248,6 +309,7 @@ impl App {
             }
             EngineEvent::NodeStream { id, event } => {
                 use rinne_core::worker::WorkerEvent::*;
+                let id = id.clone();
                 match event {
                     Done => {}
                     // Tool actions are discrete lines and break a text run.
@@ -258,26 +320,16 @@ impl App {
                             self.push(FeedKind::Stream, format!("{id}  {t}"));
                         }
                     }
-                    Message(m) | Raw(m) => {
-                        // Token-level workers (API providers, Grok) stream tiny
-                        // fragments — accumulate them and break on newlines.
-                        // Block-level workers (Claude) send whole semantic blocks,
-                        // so each is flushed as its own line.
-                        let worker = self
-                            .nodes
-                            .iter()
-                            .find(|n| n.id == id)
-                            .map(|n| n.worker.as_str())
-                            .unwrap_or("");
-                        let token_level =
-                            worker == "grok" || self.token_workers.contains(worker);
-                        let id = id.clone();
-                        self.stream_text(&id, &m);
-                        if !token_level {
-                            // Whole block: close the line so the next block starts fresh.
-                            self.commit_tail();
-                        }
-                    }
+                    // A reasoning delta from a reasoning model — accumulate it as
+                    // a dimmed thinking block shown above the answer.
+                    Thinking(t) => self.stream_thinking(&id, &t),
+                    // A raw streaming delta: concatenate verbatim (fragments are
+                    // mid-word). Any token-streaming worker — every API provider,
+                    // Grok — uses this, so rendering is correct regardless of name.
+                    Token(t) => self.stream_token(&id, &t),
+                    // A discrete line/block (Claude blocks, Codex/OpenCode lines):
+                    // place it on its own line within the accumulating block.
+                    Message(m) | Raw(m) => self.stream_line(&id, &m),
                 }
             }
             EngineEvent::NodeFinished { id, status } => {
@@ -306,6 +358,15 @@ impl App {
             && matches!(code, KeyCode::Char('c') | KeyCode::Char('q'))
         {
             self.should_quit = true;
+            return;
+        }
+
+        // Ctrl+O toggles reasoning verbosity for blocks committed from here on
+        // (scrollback is append-only, so already-printed blocks are unchanged).
+        if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('o')) {
+            self.expand_thinking = !self.expand_thinking;
+            let state = if self.expand_thinking { "expanded" } else { "collapsed" };
+            self.push(FeedKind::System, format!("thinking {state} (ctrl+o)"));
             return;
         }
 
@@ -357,13 +418,32 @@ impl App {
 
         match code {
             KeyCode::Char(c) => {
-                self.input.push(c);
+                self.input.insert(self.cursor, c);
+                self.cursor += c.len_utf8();
                 self.refresh_completions();
             }
             KeyCode::Backspace => {
-                self.input.pop();
-                self.refresh_completions();
+                if self.cursor > 0 {
+                    let prev = prev_boundary(&self.input, self.cursor);
+                    self.input.replace_range(prev..self.cursor, "");
+                    self.cursor = prev;
+                    self.refresh_completions();
+                }
             }
+            KeyCode::Delete => {
+                if self.cursor < self.input.len() {
+                    let next = next_boundary(&self.input, self.cursor);
+                    self.input.replace_range(self.cursor..next, "");
+                    self.refresh_completions();
+                }
+            }
+            KeyCode::Left => self.cursor = prev_boundary(&self.input, self.cursor),
+            KeyCode::Right => self.cursor = next_boundary(&self.input, self.cursor),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.input.len(),
+            // Up/Down recall history (overlays consumed these above).
+            KeyCode::Up => self.history_prev(),
+            KeyCode::Down => self.history_next(),
             // Re-summon completion (e.g. after Esc) on a slash line.
             KeyCode::Tab => self.refresh_completions(),
             KeyCode::Enter => self.submit(),
@@ -373,6 +453,78 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Replace the input line and park the cursor at its end. Recalled history is
+    /// shown as-is — no completion/picker popup steals the arrow keys; typing
+    /// afterward re-triggers completion as usual.
+    fn set_input(&mut self, text: String) {
+        self.cursor = text.len();
+        self.input = text;
+        self.picker = None;
+        self.completion = None;
+    }
+
+    /// Back `history` with a file and load any prior entries (newest last).
+    fn attach_history(&mut self, path: PathBuf) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            self.history = contents
+                .lines()
+                .map(str::to_string)
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            if self.history.len() > HISTORY_MAX {
+                self.history.drain(0..self.history.len() - HISTORY_MAX);
+            }
+        }
+        self.history_path = Some(path);
+    }
+
+    /// Append `entry` to the on-disk history, unless it carries a secret. API
+    /// keys and `--key` tokens must never be written to disk, so a line that
+    /// `redact_secret` would alter is kept in-session only and not persisted.
+    fn persist_history(&self, entry: &str) {
+        let Some(path) = &self.history_path else { return };
+        if redact_secret(entry) != entry {
+            return; // contains a key/token — never write it to disk
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{entry}");
+        }
+    }
+
+    /// Recall an older history entry (shell-style Up).
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_pos {
+            None => {
+                self.draft = self.input.clone(); // save the in-progress line
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(p) => p - 1,
+        };
+        self.history_pos = Some(next);
+        self.set_input(self.history[next].clone());
+    }
+
+    /// Move toward newer history, restoring the saved draft past the newest (Down).
+    fn history_next(&mut self) {
+        let Some(p) = self.history_pos else { return };
+        if p + 1 < self.history.len() {
+            self.history_pos = Some(p + 1);
+            self.set_input(self.history[p + 1].clone());
+        } else {
+            self.history_pos = None;
+            let draft = std::mem::take(&mut self.draft);
+            self.set_input(draft);
         }
     }
 
@@ -408,6 +560,7 @@ impl App {
         self.input.truncate(start);
         self.input.push_str(&value);
         self.input.push(' ');
+        self.cursor = self.input.len();
         self.completion = None;
         self.refresh_completions();
     }
@@ -427,16 +580,26 @@ impl App {
         self.input.push('@');
         self.input.push_str(&sel);
         self.input.push(' ');
+        self.cursor = self.input.len();
         self.picker = None;
     }
 
     fn submit(&mut self) {
         let text = self.input.trim().to_string();
         self.input.clear();
+        self.cursor = 0;
         self.picker = None;
         self.completion = None;
+        self.history_pos = None;
+        self.draft.clear();
         if text.is_empty() {
             return;
+        }
+        // Record for up-arrow recall, skipping consecutive duplicates. Persist
+        // across sessions (secret-bearing lines are filtered inside persist).
+        if self.history.last() != Some(&text) {
+            self.history.push(text.clone());
+            self.persist_history(&text);
         }
         // Echo the input, redacting an API key in a `connect` command so it
         // never lands in the transcript.
@@ -672,6 +835,16 @@ fn current_token(input: &str) -> &str {
     input.rsplit(char::is_whitespace).next().unwrap_or("")
 }
 
+/// The byte index of the char boundary just before `i` (clamped at 0).
+fn prev_boundary(s: &str, i: usize) -> usize {
+    s[..i].char_indices().next_back().map(|(b, _)| b).unwrap_or(0)
+}
+
+/// The byte index of the char boundary just after `i` (clamped at `s.len()`).
+fn next_boundary(s: &str, i: usize) -> usize {
+    s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
+}
+
 /// Parse `connect` arguments: `<provider> [key] [--base-url <url>] [--model <id>]`
 /// with positional models also allowed after the key. Returns
 /// `(provider, key, models, base_url)`.
@@ -874,13 +1047,9 @@ pub async fn run() -> Result<()> {
         }
     });
 
-    // API providers stream token-level fragments; tell the feed so it coalesces
-    // their deltas into lines (same as grok) instead of one fragment per row.
-    let token_workers: HashSet<String> = rinne_config::load_cwd()
-        .ok()
-        .map(|c| c.backends.api.providers.keys().cloned().collect())
-        .unwrap_or_default();
-    let mut app = App::new(index, tx, token_workers);
+    let mut app = App::new(index, tx);
+    // Persist prompt history across sessions under the project blackboard.
+    app.attach_history(cwd.join(rinne_core::BLACKBOARD_DIR).join("history"));
 
     // No alternate screen: the transcript stays in normal scrollback. A small
     // inline viewport at the bottom holds the live region.
@@ -949,7 +1118,7 @@ mod tests {
 
     fn app_for(dir: &std::path::Path) -> App {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        App::new(FileIndex::build(dir), tx, HashSet::new())
+        App::new(FileIndex::build(dir), tx)
     }
 
     #[test]
@@ -986,12 +1155,11 @@ mod tests {
         let dir = temp_dir("stream");
         let mut app = app_for(&dir);
         let before = app.pending.len(); // welcome lines
-        // Token-level workers stream tiny fragments (often mid-word). The whole
-        // message accumulates live, then commits as ONE markdown block tagged
-        // with its node — not one fragment (or line) per scrollback row.
-        app.stream_text("n1", "Hel");
-        app.stream_text("n1", "lo wor");
-        app.stream_text("n1", "ld\nsecond line");
+        // Token deltas (often mid-word) concatenate verbatim and commit as ONE
+        // markdown block tagged with its node — not one fragment per row.
+        app.stream_token("n1", "Hel");
+        app.stream_token("n1", "lo wor");
+        app.stream_token("n1", "ld\nsecond line");
         assert_eq!(app.pending.len(), before, "nothing should flush mid-stream");
         assert_eq!(app.live_tail, "Hello world\nsecond line");
         app.commit_tail();
@@ -1000,6 +1168,114 @@ mod tests {
         assert_eq!(entry.kind, FeedKind::Markdown);
         assert_eq!(entry.node.as_deref(), Some("n1"));
         assert_eq!(entry.text, "Hello world\nsecond line");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_moves_and_edits_midline() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let dir = temp_dir("cursor");
+        let mut app = app_for(&dir);
+        for c in "helo".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.cursor, 4);
+        // Move left to between 'e' and 'l', insert the missing 'l'.
+        app.on_key(KeyCode::Left, KeyModifiers::NONE);
+        app.on_key(KeyCode::Left, KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('l'), KeyModifiers::NONE);
+        assert_eq!(app.input, "hello");
+        assert_eq!(app.cursor, 3);
+        // Backspace deletes before the cursor, not at the end.
+        app.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(app.input, "helo");
+        // Home/End jump.
+        app.on_key(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(app.cursor, 0);
+        app.on_key(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(app.cursor, app.input.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn up_down_recall_history() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let dir = temp_dir("hist");
+        let mut app = app_for(&dir);
+        // Submit two harmless slash commands (no run spawned).
+        for cmd in ["/help", "/plan"] {
+            app.set_input(cmd.to_string());
+            app.submit();
+        }
+        assert_eq!(app.history, vec!["/help".to_string(), "/plan".to_string()]);
+        app.on_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.input, "/plan");
+        app.on_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.input, "/help");
+        app.on_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.input, "/plan");
+        app.on_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.input, "", "Down past newest restores the (empty) draft");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_persists_and_never_writes_secrets() {
+        let dir = temp_dir("histfile");
+        let path = dir.join(".rinne").join("history");
+        let mut app = app_for(&dir);
+        app.attach_history(path.clone());
+        app.persist_history("summarize the repo");
+        app.persist_history("/connect deepseek sk-SECRETKEY");
+        app.persist_history("/config conductor cloudflare --key TOKENABC");
+        app.persist_history("/help");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("summarize the repo") && contents.contains("/help"), "{contents:?}");
+        assert!(!contents.contains("sk-SECRETKEY"), "API key leaked to history file");
+        assert!(!contents.contains("TOKENABC"), "token leaked to history file");
+
+        // A fresh session loads the persisted (secret-free) entries.
+        let mut app2 = app_for(&dir);
+        app2.attach_history(path);
+        assert!(app2.history.contains(&"summarize the repo".to_string()));
+        assert!(app2.history.iter().all(|h| !h.contains("SECRETKEY") && !h.contains("TOKENABC")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reasoning_commits_before_the_answer() {
+        let dir = temp_dir("think");
+        let mut app = app_for(&dir);
+        let before = app.pending.len();
+        // Reasoning streams first…
+        app.stream_thinking("n1", "let me consider ");
+        app.stream_thinking("n1", "the options");
+        assert_eq!(app.pending.len(), before, "thinking shouldn't flush until the answer starts");
+        // …then the answer begins, flushing the thinking block above it.
+        app.stream_token("n1", "# Answer");
+        assert_eq!(app.pending.len(), before + 1);
+        let think = app.pending.last().unwrap();
+        assert_eq!(think.kind, FeedKind::Thinking);
+        assert_eq!(think.text, "let me consider the options");
+        assert_eq!(app.live_thinking, "");
+        // Finishing commits the answer as markdown after the thinking block.
+        app.commit_tail();
+        let answer = app.pending.last().unwrap();
+        assert_eq!(answer.kind, FeedKind::Markdown);
+        assert_eq!(answer.text, "# Answer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn block_messages_are_newline_separated() {
+        let dir = temp_dir("blocks");
+        let mut app = app_for(&dir);
+        // Discrete line/block events (Claude blocks) must not run together.
+        app.stream_line("n2", "model: sonnet");
+        app.stream_line("n2", "# Heading");
+        app.stream_line("n2", "body text");
+        assert_eq!(app.live_tail, "model: sonnet\n# Heading\nbody text");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

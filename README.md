@@ -394,6 +394,25 @@ Rinne authenticates nothing and stores no key in plaintext.
 - **Multiple keys** per provider are supported — `connect ... --add` appends to a rotation pool that rotates on rate limits.
 - `rinne config` reports the conductor key as `key present (env)` or `key present (keychain)` or `NO KEY`, without printing the secret. `(env)` means an exported variable is winning; store with `--key` and drop the export to get the persistent `(keychain)`.
 
+### How key storage works (the keychain)
+
+When you run `rinne connect <provider> <key>` (or `/config conductor <backend> --key <token>`), Rinne hands the key to your **operating system's keychain** — the same encrypted credential store your browser and OS use for passwords. It's the one place Rinne keeps a secret, and it's deliberately *not* Rinne's own file. Here's exactly what happens so nothing feels like a black box:
+
+- **Where it goes, per OS:**
+  - **macOS** → Keychain (Keychain Access app)
+  - **Linux** → Secret Service (GNOME Keyring / KWallet via libsecret)
+  - **Windows** → Credential Manager
+- **How to find it.** Every entry is stored under the service name **`rinne`** with the **account = the provider name** (e.g. `deepseek`, `openrouter`, `cloudflare`). So on macOS you can open **Keychain Access**, search `rinne`, and see one item per provider — labelled, but with the value hidden behind your login. Nothing is in cleartext anywhere Rinne controls.
+- **Encrypted by the OS, not by Rinne.** The key is sealed by your system's credential store and unlocked with your user login — Rinne just asks the OS for it at call time. Rinne never writes it to `config.toml`, logs, or the prompt history.
+- **Multiple keys.** `connect ... --add` stores a **pool** (a JSON array under the same entry) that Rinne rotates across rate limits. `connect` without `--add` replaces the pool.
+- **Resolution order.** At call time Rinne looks at the **environment variable first** (the `key_env` name, e.g. `DEEPSEEK_API_KEY`), then the **keychain**. So an exported env var transparently overrides the stored key for a one-off, and your existing env-var workflow is unchanged.
+- **Inspect without revealing.** `rinne config` and `rinne workers` report `key present (keychain)` / `(env)` / `NO KEY` — they confirm a key is found and *where from*, never the value itself. Transcript echoes of `connect`/`--key` are redacted to `***`.
+- **Remove it.** `rinne forget <provider>` deletes the entry from the keychain (or delete the `rinne` item directly in your OS keychain UI).
+- **No keychain available?** On a headless box with no Secret Service, storage fails gracefully — Rinne tells you and falls back to `export <KEY_ENV>=<value>`. Nothing breaks; you just lose the "set once and forget" convenience.
+- **Prompt history is safe too.** `.rinne/history` (used for ↑/↓ recall across sessions) filters out any command containing a key/token, so secrets never land there either.
+
+This is a deliberate, documented exception to the "Rinne holds no credentials" principle: it exists so you can set a key once and forget it, while the secret stays in an OS-managed encrypted vault rather than a plaintext config file.
+
 > **Billing footgun:** for `claude-code`, an `ANTHROPIC_API_KEY` in the environment overrides your subscription and bills the metered API account. `doctor` surfaces this; Rinne never silently bills.
 
 ## Routing & model selection
