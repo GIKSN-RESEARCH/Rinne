@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use rinne_core::worker::{
-    emit, EventSink, ExecStatus, ExecuteRequest, ExecuteResult, Usage, Worker, WorkerDescriptor,
-    WorkerEvent,
+    emit, EventSink, ExecStatus, ExecuteRequest, ExecuteResult, Role, Usage, Worker,
+    WorkerDescriptor, WorkerEvent,
 };
 use rinne_core::Result;
 
@@ -98,6 +98,12 @@ pub struct HarnessAdapter {
     pub descriptor: WorkerDescriptor,
     pub program: String,
     pub build_args: ArgsBuilder,
+    /// Lean argv used when the harness runs as the **planner** (`Role::Planner`):
+    /// a plain-text completion, not the agentic/streaming work invocation. When
+    /// set, planning reads the full stdout as the answer (more robust across CLI
+    /// versions than parsing a streaming format). `None` → planning reuses
+    /// `build_args` and the normal parser unchanged.
+    pub plan_args: Option<ArgsBuilder>,
     pub parse: OutputParser,
     pub line_mapper: LineMapper,
     /// Whether the prompt is piped via stdin (vs. passed as an argument).
@@ -125,11 +131,12 @@ impl Worker for HarnessAdapter {
             .unwrap_or(self.default_timeout);
 
         let model = request.constraints.model.as_deref();
-        let (args, stdin) = if self.prompt_via_stdin {
-            ((self.build_args)("", model), Some(prompt))
-        } else {
-            ((self.build_args)(&prompt, model), None)
-        };
+        let has_lean = self.plan_args.is_some();
+        // The lean plain-text invocation: used for the planner role, and as an
+        // automatic fallback when the rich/streaming invocation fails with no
+        // output (e.g. a CLI version that rejects the streaming flags). Planning
+        // starts lean so a work flag can't make the planner exit non-zero.
+        let mut lean = matches!(request.role, Role::Planner) && has_lean;
 
         // Retry transient failures (spawn errors, timeouts) once before giving
         // up — beta CLIs are flaky (`CONTEXT.md` §21). A cancelled run is not
@@ -138,19 +145,38 @@ impl Worker for HarnessAdapter {
         let mut attempt = 0;
         let out = loop {
             attempt += 1;
+            let builder = if lean { self.plan_args.unwrap() } else { self.build_args };
+            let mapper = if lean { subprocess::raw_lines } else { self.line_mapper };
+            let (args, stdin) = if self.prompt_via_stdin {
+                (builder("", model), Some(prompt.clone()))
+            } else {
+                (builder(&prompt, model), None)
+            };
             let spec = SubprocessSpec {
                 program: self.program.clone(),
-                args: args.clone(),
+                args,
                 workspace: request.workspace.clone(),
-                stdin: stdin.clone(),
+                stdin,
                 timeout: Some(timeout),
             };
-            match subprocess::run(spec, &events, &cancel, self.line_mapper).await {
+            match subprocess::run(spec, &events, &cancel, mapper).await {
                 Ok(out) => {
                     let timed_out = matches!(out.status, ExecStatus::TimedOut);
                     if timed_out && attempt < MAX_ATTEMPTS && !cancel.is_cancelled() {
                         emit(&events, WorkerEvent::Message(format!(
                             "{} timed out — retrying ({attempt}/{MAX_ATTEMPTS})",
+                            self.program
+                        )));
+                        continue;
+                    }
+                    // Rich invocation failed with nothing usable on stdout, and a
+                    // lean plain invocation is available → fall back to it once.
+                    let empty_fail = !matches!(out.status, ExecStatus::Success)
+                        && out.stdout.trim().is_empty();
+                    if empty_fail && !lean && has_lean && !cancel.is_cancelled() {
+                        lean = true;
+                        emit(&events, WorkerEvent::Message(format!(
+                            "{} failed in streaming mode — retrying in plain mode",
                             self.program
                         )));
                         continue;
@@ -170,7 +196,13 @@ impl Worker for HarnessAdapter {
                 }
             }
         };
-        let parsed = (self.parse)(&out);
+        // The lean invocation yields plain text (the answer / JSON DAG, possibly
+        // fenced); take full stdout and let the caller's tolerant parser read it.
+        let parsed = if lean {
+            ParsedHarness::raw(&out.stdout)
+        } else {
+            (self.parse)(&out)
+        };
 
         // Reconcile the transport-level status with the parsed error flag.
         let status = match out.status {

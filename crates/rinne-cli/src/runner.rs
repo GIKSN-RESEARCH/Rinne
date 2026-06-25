@@ -127,8 +127,15 @@ pub fn build_conductor(
         Err(e) => return Err(anyhow!(e.to_string())),
     }
 
-    if let Some(worker) = registry.first() {
-        backends.push(Box::new(HarnessBackend::new(worker, workspace)));
+    // Fallback planners, tried in order: every installed harness first (usually
+    // subscription/free), then API workers as a last resort. Chaining means one
+    // harness failing (e.g. `claude` exits 1) falls through to the next instead
+    // of killing the run.
+    use rinne_core::worker::WorkerFamily as Fam;
+    let mut fallbacks = registry.by_family(Fam::Harness);
+    fallbacks.extend(registry.by_family(Fam::Api));
+    for worker in fallbacks {
+        backends.push(Box::new(HarnessBackend::new(worker, workspace.clone())));
     }
 
     Conductor::new(backends).map_err(|e| {

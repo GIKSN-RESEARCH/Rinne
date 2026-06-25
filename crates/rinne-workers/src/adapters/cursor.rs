@@ -18,6 +18,7 @@ pub fn worker() -> HarnessAdapter {
         descriptor: descriptor(),
         program: "cursor-agent".to_string(),
         build_args,
+        plan_args: None,
         parse: parse_generic_json,
         line_mapper: raw_lines,
         prompt_via_stdin: false,

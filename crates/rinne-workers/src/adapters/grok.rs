@@ -21,6 +21,7 @@ pub fn worker() -> HarnessAdapter {
         descriptor: descriptor(),
         program: "grok".to_string(),
         build_args,
+        plan_args: None,
         parse,
         line_mapper,
         prompt_via_stdin: false,

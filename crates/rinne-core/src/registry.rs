@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::worker::{Capability, Worker};
+use crate::worker::{Capability, Worker, WorkerFamily};
 
 /// A set of available workers, in the user's preference order. The composition
 /// root (the CLI) builds this from config + `doctor`; the engine consumes it.
@@ -54,6 +54,16 @@ impl WorkerRegistry {
     /// harness-conductor fallback.
     pub fn first(&self) -> Option<std::sync::Arc<dyn Worker>> {
         self.workers.first().map(std::sync::Arc::clone)
+    }
+
+    /// All registered workers of `family`, in preference order. Used to build the
+    /// conductor's fallback chain so planning survives one harness failing.
+    pub fn by_family(&self, family: WorkerFamily) -> Vec<Arc<dyn Worker>> {
+        self.workers
+            .iter()
+            .filter(|w| w.descriptor().family == family)
+            .map(Arc::clone)
+            .collect()
     }
 
     /// Resolve a node's `needs` (and optional `prefer`) to a concrete worker.

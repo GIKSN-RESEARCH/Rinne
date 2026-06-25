@@ -21,11 +21,24 @@ pub fn worker() -> HarnessAdapter {
         descriptor: descriptor(),
         program: "claude".to_string(),
         build_args,
+        plan_args: Some(plan_args),
         parse,
         line_mapper,
         prompt_via_stdin: false,
         default_timeout: Duration::from_secs(600),
     }
+}
+
+/// Lean argv for the planner role: a plain `claude -p "<prompt>"` print, with no
+/// `stream-json`/`--verbose` (which some CLI versions reject, and which we don't
+/// need just to read a JSON plan). stdout is the answer text.
+fn plan_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = vec!["-p".into(), prompt.into()];
+    if let Some(m) = model {
+        args.push("--model".into());
+        args.push(m.into());
+    }
+    args
 }
 
 fn descriptor() -> WorkerDescriptor {

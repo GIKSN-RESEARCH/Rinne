@@ -105,14 +105,35 @@ impl PlanBackend for HarnessBackend {
             .execute(request, tx, CancellationToken::new())
             .await?;
         if !matches!(result.status, ExecStatus::Success) {
+            // Surface the worker's own output (stdout + stderr) so the failure is
+            // diagnosable — "exited 1" alone hides why (auth, a rejected flag…).
+            let detail = result.transcript.trim();
+            let snippet = tail(detail, 800);
+            let hint = if snippet.is_empty() {
+                format!(
+                    "no output — check `{0}` works standalone and is logged in (run `{0} -p hi`)",
+                    self.name()
+                )
+            } else {
+                snippet.to_string()
+            };
             return Err(RinneError::Conductor(format!(
-                "harness conductor `{}` failed: {:?}",
+                "harness conductor `{}` failed: {:?}\n{hint}",
                 self.name(),
                 result.status
             )));
         }
         Ok(result.result)
     }
+}
+
+/// Keep the last `max` chars of `s` (where the real error usually is).
+fn tail(s: &str, max: usize) -> &str {
+    if s.chars().count() <= max {
+        return s;
+    }
+    let start = s.char_indices().rev().nth(max - 1).map(|(i, _)| i).unwrap_or(0);
+    &s[start..]
 }
 
 /// The keychain provider name and env var a conductor backend authenticates

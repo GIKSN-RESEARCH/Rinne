@@ -174,7 +174,37 @@ The brain that plans and routes. It does no work itself and runs prompted on a *
 | `local` | (set one) | none | Ollama, fully offline |
 | `harness` | n/a | none | uses your cheapest installed harness as planner |
 
-**Resolution:** the configured backend is used **if its key resolves** (env first, then keychain); otherwise Rinne silently falls back to a harness planner. So if Cloudflare has no `account_id`/token, planning runs on a harness instead — check with `rinne config`.
+**Resolution:** the configured backend is used **if its key resolves** (env first, then keychain); otherwise Rinne falls back to a harness planner. The fallback **chains across every installed harness** in order — if the first (say `claude`) exits non-zero, it tries the next (say `antigravity`) before giving up, and only errors if all fail (with the failing worker's actual output, not a bare exit code). Check what's active with `rinne config`.
+
+### Use a model as the conductor (recommended)
+
+Relying on an installed harness to plan works, but it ties planning to a heavyweight CLI that can be slow, rate-limited, or fail for auth/flag reasons. **Point the conductor at a cheap or free model instead** — planning is small and frequent, so a fast small model is ideal and keeps your subscription/quota for the real work. Any OpenAI-compatible backend works; set it once and it's used for every run:
+
+```bash
+# Groq — free tier, very fast (good default for planning)
+rinne config conductor groq llama-3.3-70b-versatile --key <GROQ_API_KEY>
+
+# Cloudflare Workers AI — free daily tier
+rinne config set conductor.account_id <ACCOUNT_ID>
+rinne config conductor cloudflare @cf/meta/llama-3.3-70b-instruct-fp8-fast --key <CLOUDFLARE_API_TOKEN>
+
+# NVIDIA NIM — trial credits
+rinne config conductor nvidia <model-id> --key <NVIDIA_API_KEY>
+
+# Local Ollama — fully offline, no key
+rinne config conductor local qwen2.5-coder
+```
+
+The token goes to your OS keychain (never the config file). Custom OpenAI-compatible host? Set `base_url` and `key_env` directly:
+
+```bash
+rinne config set conductor.backend groq
+rinne config set conductor.base_url https://your-host/v1
+rinne config set conductor.model your-model
+rinne config key <TOKEN>          # stores it for the current conductor backend
+```
+
+After setting one, `rinne config` shows `Conductor … key present (keychain)` and planning runs there — independent of which harnesses you have installed.
 
 ## Requirements
 
@@ -277,44 +307,111 @@ rinne -p "list the public API of src/lib.rs" --json
 
 ## Command reference
 
-### CLI subcommands
+### Global
 
-| Command | What it does |
-|---------|--------------|
-| `rinne` | Open the interactive REPL/TUI |
-| `rinne -p "<task>"` | One-shot headless run (`--json` for structured output) |
-| `rinne doctor` | Detect workers, auth mode, and quota |
-| `rinne connect <backend> [key] [--model <id>]... [--base-url <url>] [--add]` | Set up a harness (native login) or API provider (key → keychain). `--add` appends to the key rotation pool |
-| `rinne forget <provider>` | Delete a stored API key from the keychain |
-| `rinne models <provider>` | List models a provider key can access (with pricing where reported) |
-| `rinne config [subcommand ...]` | View or edit configuration (see below) |
-| `rinne status` | Show the current run's DAG and progress |
-| `rinne resume [--steer <text>] [--approve] [--reject]` | Resume an interrupted or parked run |
-| `rinne run <plan.json>` | Load a hand-written plan DAG and run it |
-| `rinne logs` | View local trajectory logs |
+```bash
+rinne                       # interactive TUI
+rinne -p "<task>"           # headless one-shot, streams human-readable progress
+rinne -p "<task>" --json    # headless, emits one JSON result (scriptable)
+rinne --help                # all commands
+rinne <command> --help      # options for one command
+rinne --version
+```
 
-Global flags: `-p/--prompt`, `--json`, `-v/--verbose` (repeatable; logs go to `.rinne/`, never the TUI).
+Global flags (valid on any command): `-p/--prompt <task>`, `--json`, `-v/--verbose` (repeatable, e.g. `-vv`; logs go to `.rinne/logs/`, never the TUI).
+
+### `rinne doctor`
+
+```bash
+rinne doctor                # detect installed workers, auth mode, and quota
+```
+
+### `rinne connect` — set up a worker
+
+```
+rinne connect <backend> [key] [--model <id>]… [--base-url <url>] [--add]
+```
+
+| Form | What it does |
+|------|--------------|
+| `rinne connect claude-code` | Harness: print the native login hint (Rinne holds no harness creds) |
+| `rinne connect <provider> <key>` | API provider from the built-in catalog; key → OS keychain |
+| `rinne connect <provider> <key> --model <id>` | …and set the model |
+| `rinne connect <provider> <key> --model a --model b` | …a cheap→strong model ladder (repeat `--model`) |
+| `rinne connect <name> <key> --base-url <url> --model <id>` | Any OpenAI-compatible host under a custom name |
+| `rinne connect <provider> <key2> --add` | Add another key to the provider's rotation pool |
+| `rinne connect <provider>` | No key → printed instructions for providing one |
+
+```bash
+# examples
+rinne connect claude-code
+rinne connect deepseek sk-…                                   # catalog provider (base_url known)
+rinne connect openrouter sk-… --model openai/gpt-4o-mini
+rinne connect openrouter sk-… --model llama-3.1-8b --model llama-3.3-70b   # ladder
+rinne connect cloudflare <TOKEN> \
+  --base-url https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1 \
+  --model @cf/meta/llama-3.3-70b-instruct-fp8-fast            # custom host
+rinne connect mycorp <KEY> --base-url https://llm.mycorp.com/v1 --model my-model
+rinne connect deepseek sk-second --add                        # 2nd key for rotation
+```
+
+Built-in API providers (base URL + key env preset): `openai`, `deepseek`, `gemini`, `nvidia`, `groq`, `openrouter`, `mistral`, `together`, `xai`. Harnesses: `claude-code`, `codex`, `opencode`, `grok`, `cursor-agent`, `aider`, `antigravity`.
+
+### `rinne models` / `rinne forget`
+
+```bash
+rinne models openrouter     # list models the key can reach (cheapest first where priced)
+rinne forget deepseek       # delete a stored API key from the keychain
+```
+
+### `rinne status` / `resume` / `run` / `logs`
+
+```bash
+rinne status                          # current run's DAG + progress
+rinne resume --steer "use a 100/min window"   # inject guidance into a parked node
+rinne resume --approve                # accept the parked state and continue
+rinne resume --reject                 # throw out the approach and replan
+rinne run plan.json                   # load a hand-written plan DAG and run it
+rinne logs                            # view local trajectory logs
+```
+
+### `rinne config` — view/edit configuration
+
+See [Configuration](#configuration) for the full subcommand reference. Everything there works identically as `rinne config <sub>` (shell) and `/config <sub>` (TUI).
 
 ### TUI slash commands
 
+Inside the interactive harness, every CLI command above is also available as `/<command>`, plus run-control commands. Tab-completion suggests commands and `/config` subcommands as you type.
+
 | Command | What it does |
 |---------|--------------|
-| `/plan` | Show the current plan |
-| `/workers` (`/doctor`) | List workers + connected APIs and their auth |
-| `/connect <backend> [key] [--base-url <url>] [--model <id>]` | Connect a harness or API provider (key → keychain) |
-| `/forget <provider>` | Delete a stored API key |
+| `/connect <backend> [key] [--model <id>]… [--base-url <url>] [--add]` | Connect a harness or API provider (same as the CLI) |
 | `/models <provider>` | List the models a provider key can access |
-| `/config [subcommand ...]` | Show or edit configuration |
+| `/forget <provider>` | Delete a stored API key |
+| `/config [subcommand …]` | Show or edit configuration (see Configuration) |
+| `/workers` (`/doctor`) | List workers + connected APIs and their auth |
+| `/plan` | Show the current plan |
 | `/steer <text>` | Inject guidance into a parked node (or just type while parked) |
 | `/approve` · `/reject` | Accept the current state / throw it out and replan |
-| `/pause` · `/resume` | Pause (state is saved) / resume a paused run |
+| `/pause` · `/resume` | Pause (state saved) / resume a paused run |
 | `/budget <min>` | Adjust the time budget |
 | `/route <n> <worker>` | Pin a node to a worker |
 | `/logs` | Where logs are written (`.rinne/logs/`) |
 | `/help` | Command reference |
-| `/quit` (`ctrl-q`) | Exit |
+| `/quit` (`/q`) | Exit |
 
-**Keys:** `@` opens the fuzzy file picker; `Tab` completes a suggestion (and chains to the next argument); `↑/↓` move the highlight; `Esc` dismisses an overlay or pauses a run; `Enter` runs the line.
+### TUI keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `@` | Open the fuzzy file picker (`@path`, `@dir/`, `@glob`) |
+| `Tab` | Accept the highlighted completion / file (chains to the next argument) |
+| `↑` / `↓` | Recall previous / next prompt from history (persisted across sessions) |
+| `← / →`, `Home`, `End` | Move the cursor; `Backspace` / `Delete` edit in place |
+| `Ctrl+O` | Expand / collapse reasoning ("thinking") blocks |
+| `Esc` | Dismiss a popup, or pause a running loop |
+| `Ctrl+Q` / `Ctrl+C` | Quit |
+| `Enter` | Submit the line |
 
 ## Configuration
 
@@ -327,24 +424,79 @@ Config is layered, lowest to highest precedence:
 
 Later layers override earlier ones field-by-field. Run `rinne config` to see the resolved result and the exact file paths on your machine.
 
-### `/config` subcommands
+### `config` subcommands (`rinne config …` = `/config …`)
 
-Defaults to the **global** file; add `--project` to scope a change to the current repo. Edits are **format-preserving** (comments survive) and **validated** before write (a bad key, type, or enum value is rejected with the valid options listed — nothing is written).
+Every subcommand works identically from the shell (`rinne config <sub>`) and inside the TUI (`/config <sub>`). Writes default to the **global** file; add `--project` to scope to the current repo, or `--global` to force global. Edits are **format-preserving** (comments survive) and **validated** before write — a bad key, type, or enum value is rejected with the valid options listed, and nothing is written. Secrets never touch the file (tokens go to the keychain).
 
+| Subcommand | What it does |
+|------------|--------------|
+| `config` · `config show` | Print the resolved config, conductor key status, and file paths |
+| `config path` | Show the global + project config file locations |
+| `config init` | Scaffold a fully-commented config file |
+| `config edit` | Scaffold if needed, then open it in `$EDITOR` |
+| `config conductor <backend> [model]` | Set the planner backend (and optionally its model) |
+| `config conductor <backend> [model] --key <token>` | …and store its API token in the keychain |
+| `config key <token>` | Store the API token for the **current** conductor backend |
+| `config prefer <harness\|api\|balanced>` | Routing family order |
+| `config role <role> <worker>` | Pin a role to a worker |
+| `config model <worker> <model-id>` | Default model for a worker |
+| `config set <dotted.key> <value>` | Set any field (type inferred: bool / int / string) |
+| `config unset <dotted.key>` | Remove an override |
+
+Conductor backends: `cloudflare` · `groq` · `nvidia` · `local` · `harness`. Roles: `planner` · `generator` · `evaluator` · `synthesizer` · `fixer`.
+
+**Set up a conductor (all backends):**
+
+```bash
+# Cloudflare Workers AI (free daily tier) — needs the account id (for the URL) + token
+rinne config set conductor.account_id <ACCOUNT_ID>
+rinne config conductor cloudflare @cf/meta/llama-3.3-70b-instruct-fp8-fast --key <CLOUDFLARE_API_TOKEN>
+
+# Groq (free tier, fast — good default for planning)
+rinne config conductor groq llama-3.3-70b-versatile --key <GROQ_API_KEY>
+
+# NVIDIA NIM (trial credits)
+rinne config conductor nvidia <model-id> --key <NVIDIA_API_KEY>
+
+# Local Ollama (fully offline, no key)
+rinne config conductor local qwen2.5-coder
+
+# Cheapest installed harness as planner (no key; the default fallback)
+rinne config conductor harness
+
+# Any other OpenAI-compatible host
+rinne config set conductor.backend groq
+rinne config set conductor.base_url https://your-host/v1
+rinne config set conductor.model your-model
+rinne config key <TOKEN>          # stores it for the current conductor backend
 ```
-/config                              show resolved config + conductor key status + sources
-/config conductor <backend> [model]  set the planner backend (+ its model)
-/config conductor <backend> --key <token>   ...and store its API token in the keychain
-/config key <token>                  store the token for the current conductor backend
-/config prefer <harness|api|balanced>  routing family order
-/config role <role> <worker>         pin a role to a worker
-/config model <worker> <model-id>    default model for a worker
-/config set <dotted.key> <value>     set any field (types inferred: bool / int / string)
-/config unset <dotted.key>           remove an override
-/config init                         scaffold a fully-commented config file
-/config edit                         scaffold-if-needed + open it in your editor
-/config path                         show the config file locations
+
+**Every `config set` key:**
+
+```bash
+# [conductor]
+rinne config set conductor.backend groq          # cloudflare|groq|nvidia|local|harness
+rinne config set conductor.model llama-3.3-70b-versatile
+rinne config set conductor.base_url https://your-host/v1
+rinne config set conductor.account_id <ID>       # cloudflare only
+rinne config set conductor.key_env MY_TOKEN_ENV  # override which env var holds the key
+
+# [loop]
+rinne config set loop.max_iterations_per_node 8
+rinne config set loop.global_budget_minutes 120
+rinne config set loop.test_ratchet true
+rinne config set loop.stuck_loop_threshold 3
+
+# [preferences]
+rinne config prefer api                          # = set preferences.prefer (harness|api|balanced)
+rinne config role evaluator openrouter           # = set preferences.roles.evaluator
+rinne config set preferences.models.evaluator haiku
+
+# default model per worker
+rinne config model claude-code sonnet            # = set models.claude-code
 ```
+
+Scope any of the above to one repo with `--project` (e.g. `rinne config conductor groq --project`).
 
 ### Schema
 
