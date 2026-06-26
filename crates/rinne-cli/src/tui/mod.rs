@@ -17,8 +17,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyboardEnhancementFlags,
+    KeyCode, KeyEventKind, KeyModifiers, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
+use crossterm::cursor::MoveTo;
+use crossterm::execute;
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -118,6 +124,7 @@ pub struct App {
     /// Whether reasoning blocks render expanded (full) or collapsed (a summary
     /// line). Toggled with ctrl+o; governs blocks committed from here on.
     expand_thinking: bool,
+    clear_requested: bool,
     should_quit: bool,
     cancel: Option<CancellationToken>,
     tx: tokio::sync::mpsc::UnboundedSender<AppMsg>,
@@ -145,6 +152,7 @@ impl App {
             index,
             spinner: 0,
             expand_thinking: false,
+            clear_requested: false,
             should_quit: false,
             cancel: None,
             tx,
@@ -370,6 +378,11 @@ impl App {
             return;
         }
 
+        if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('l')) {
+            self.clear_requested = true;
+            return;
+        }
+
         if self.picker.is_some() {
             match code {
                 KeyCode::Up => {
@@ -417,9 +430,34 @@ impl App {
         }
 
         match code {
+            KeyCode::Char('w') if mods.contains(KeyModifiers::CONTROL) => {
+                let start = prev_word(&self.input, self.cursor);
+                self.input.replace_range(start..self.cursor, "");
+                self.cursor = start;
+                self.refresh_completions();
+            }
+            KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
+                self.input.replace_range(0..self.cursor, "");
+                self.cursor = 0;
+                self.refresh_completions();
+            }
+            KeyCode::Char('k') if mods.contains(KeyModifiers::CONTROL) => {
+                self.input.truncate(self.cursor);
+                self.refresh_completions();
+            }
+            KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) => self.cursor = 0,
+            KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => self.cursor = self.input.len(),
+            KeyCode::Left if mods.contains(KeyModifiers::ALT) => self.cursor = prev_word(&self.input, self.cursor),
+            KeyCode::Right if mods.contains(KeyModifiers::ALT) => self.cursor = next_word(&self.input, self.cursor),
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
+                self.refresh_completions();
+            }
+            KeyCode::Backspace if mods.contains(KeyModifiers::ALT) => {
+                let start = prev_word(&self.input, self.cursor);
+                self.input.replace_range(start..self.cursor, "");
+                self.cursor = start;
                 self.refresh_completions();
             }
             KeyCode::Backspace => {
@@ -446,6 +484,10 @@ impl App {
             KeyCode::Down => self.history_next(),
             // Re-summon completion (e.g. after Esc) on a slash line.
             KeyCode::Tab => self.refresh_completions(),
+            KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::ALT) => {
+                self.input.insert(self.cursor, '\n');
+                self.cursor += 1;
+            }
             KeyCode::Enter => self.submit(),
             KeyCode::Esc => {
                 if self.running {
@@ -454,6 +496,14 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn paste(&mut self, s: &str) {
+        self.picker = None;
+        self.completion = None;
+        self.input.insert_str(self.cursor, s);
+        self.cursor += s.len();
+        self.refresh_completions();
     }
 
     /// Replace the input line and park the cursor at its end. Recalled history is
@@ -694,6 +744,20 @@ impl App {
             "route" => self.push(FeedKind::System, format!("route override noted: {rest}")),
             "logs" => self.push(FeedKind::System, "logs: .rinne/logs/"),
             "quit" | "q" => self.should_quit = true,
+            "clear" | "new" => {
+                if self.running || self.parked.is_some() {
+                    self.push(FeedKind::System, "a run is active — /pause or wait for it to finish, then /clear");
+                } else {
+                    self.goal = None;
+                    self.nodes.clear();
+                    self.pending.clear();
+                    self.live_tail.clear();
+                    self.live_thinking.clear();
+                    self.live_node = None;
+                    self.parked = None;
+                    self.clear_requested = true;
+                }
+            }
             "" => {}
             other => self.push(
                 FeedKind::System,
@@ -845,6 +909,27 @@ fn next_boundary(s: &str, i: usize) -> usize {
     s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
 }
 
+/// Byte index of the start of the word before `i`: skip spaces left, then
+/// non-spaces left. If only spaces remain to the left, collapses to 0.
+fn prev_word(s: &str, mut i: usize) -> usize {
+    let bytes = s.as_bytes();
+    // Spaces are word delimiters; a newline is a hard stop word-motion never crosses.
+    while i > 0 && bytes[i - 1] == b' ' { i -= 1; }
+    while i > 0 && !matches!(bytes[i - 1], b' ' | b'\n') { i = prev_boundary(s, i); }
+    // If only spaces remain to the left of this logical line, collapse past them.
+    if i > 0 && bytes[i - 1] == b' ' && bytes[..i].iter().all(|&b| b == b' ') { i = 0; }
+    i
+}
+
+/// Byte index of the end of the word after `i`: skip spaces right, then
+/// non-spaces right. A newline is a hard stop word-motion never crosses.
+fn next_word(s: &str, mut i: usize) -> usize {
+    let bytes = s.as_bytes();
+    while i < s.len() && bytes[i] == b' ' { i += 1; }
+    while i < s.len() && !matches!(bytes[i], b' ' | b'\n') { i = next_boundary(s, i); }
+    i
+}
+
 /// Parse `connect` arguments: `<provider> [key] [--base-url <url>] [--model <id>]`
 /// with positional models also allowed after the key. Returns
 /// `(provider, key, models, base_url)`.
@@ -923,6 +1008,7 @@ fn help_text() -> String {
         ("/resume", "resume a paused run"),
         ("/budget <min>", "adjust the time budget"),
         ("/route <n> <w>", "pin a node to a worker"),
+        ("/clear", "wipe the screen and reset the session (ctrl-l = wipe only)"),
         ("/logs", "where logs are written (.rinne/logs/)"),
         ("/quit", "exit (or ctrl-q)"),
     ];
@@ -1054,20 +1140,38 @@ pub async fn run() -> Result<()> {
     // No alternate screen: the transcript stays in normal scrollback. A small
     // inline viewport at the bottom holds the live region.
     enable_raw_mode()?;
+    // Build the terminal BEFORE emitting any escape sequences, so a construction
+    // failure here returns early with only raw mode to undo — never a terminal
+    // left in bracketed-paste / keyboard-enhancement state.
     let rows = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
     let viewport_height = rows.saturating_sub(1).min(10).max(4);
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::with_options(
+    let mut terminal = match Terminal::with_options(
         backend,
         TerminalOptions {
             viewport: Viewport::Inline(viewport_height),
         },
-    )?;
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = disable_raw_mode();
+            return Err(e.into());
+        }
+    };
+    let mut out = io::stdout();
+    let _ = execute!(out, EnableBracketedPaste);
+    let kbd_enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+    if kbd_enhanced {
+        let _ = execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+    }
 
     let result = event_loop(&mut terminal, &mut app, &mut rx).await;
 
     // Leave the transcript intact; just drop the live region and free the line.
     let _ = terminal.clear();
+    let mut out = io::stdout();
+    if kbd_enhanced { let _ = execute!(out, PopKeyboardEnhancementFlags); }
+    let _ = execute!(out, DisableBracketedPaste);
     disable_raw_mode()?;
     println!();
     result
@@ -1082,6 +1186,16 @@ async fn event_loop(
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(120));
 
     loop {
+        if app.clear_requested {
+            app.clear_requested = false;
+            // `terminal.clear()` on an inline viewport only wipes the viewport
+            // region, leaving the scrollback transcript on screen. Emit the full
+            // screen + scrollback clear (like the shell `clear`), then let the
+            // draw below repaint the viewport. ratatui must re-sync afterwards so
+            // it doesn't assume the old buffer is still on screen.
+            let _ = execute!(io::stdout(), MoveTo(0, 0), Clear(ClearType::All), Clear(ClearType::Purge));
+            let _ = terminal.clear();
+        }
         ui::flush_pending(terminal, app)?;
         terminal.draw(|f| ui::draw_viewport(f, app))?;
         if app.should_quit {
@@ -1094,6 +1208,7 @@ async fn event_loop(
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         app.on_key(key.code, key.modifiers);
                     }
+                    Some(Ok(Event::Paste(text))) => app.paste(&text),
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => return Ok(()),
                 }
@@ -1333,5 +1448,143 @@ mod tests {
         let err = app.resolve_mentions("@*.txt do it").unwrap_err();
         assert!(err.contains("narrow"), "should warn to narrow: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn word_boundaries() {
+        assert_eq!(prev_word("foo bar", 7), 4);     // from end → start of "bar"
+        assert_eq!(prev_word("foo bar", 4), 0);     // skips trailing space → start of "foo"
+        assert_eq!(prev_word("  foo", 5), 0);       // leading spaces collapse to 0
+        assert_eq!(next_word("foo bar", 0), 3);     // end of "foo"
+        assert_eq!(next_word("foo bar", 3), 7);     // skips space → end of "bar"
+        assert_eq!(next_word("foo", 3), 3);         // at end stays
+        // Word motion must NOT cross a hard newline (multi-line input).
+        assert_eq!(prev_word("foo\nbar", 7), 4);    // deletes only "bar", stops at the '\n'
+        assert_eq!(prev_word("foo\nbar", 4), 4);    // already at line start → no move
+        assert_eq!(next_word("foo\nbar", 0), 3);    // stops before the '\n'
+        assert_eq!(next_word("foo\nbar", 3), 3);    // sitting on the '\n' → no move
+    }
+
+    #[test]
+    fn ctrl_w_deletes_word_back() {
+        let dir = temp_dir("ctrlw");
+        let mut app = app_for(&dir);
+        for c in "hello world".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        app.on_key(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(app.input, "hello ");
+        assert_eq!(app.cursor, app.input.len());
+    }
+
+    #[test]
+    fn ctrl_u_deletes_to_line_start_and_ctrl_a_e_move() {
+        let dir = temp_dir("ctrlu");
+        let mut app = app_for(&dir);
+        for c in "abc def".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        app.on_key(KeyCode::Char('a'), KeyModifiers::CONTROL); // line start
+        assert_eq!(app.cursor, 0);
+        app.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL); // line end
+        assert_eq!(app.cursor, app.input.len());
+        app.on_key(KeyCode::Char('u'), KeyModifiers::CONTROL); // delete to start
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn ctrl_k_truncates_forward() {
+        let dir = temp_dir("ctrlk");
+        let mut app = app_for(&dir);
+        for c in "hello world".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        app.on_key(KeyCode::Char('a'), KeyModifiers::CONTROL); // move to start
+        app.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(app.input, "");
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn alt_arrows_move_by_word() {
+        let dir = temp_dir("altarrow");
+        let mut app = app_for(&dir);
+        for c in "foo bar".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        app.on_key(KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(app.cursor, 4); // start of "bar" (space before it is preserved)
+        app.on_key(KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(app.cursor, 0); // start of "foo"
+        app.on_key(KeyCode::Right, KeyModifiers::ALT);
+        assert_eq!(app.cursor, 3); // end of "foo"
+    }
+
+    #[test]
+    fn clear_resets_session_when_idle_but_keeps_history() {
+        let mut app = app_for(&temp_dir("clear"));
+        app.history.push("prior goal".to_string());
+        app.goal = Some("a goal".to_string());
+        app.nodes.push(NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: "x".into() });
+        app.pending.push(FeedEntry { kind: FeedKind::System, text: "x".into(), node: None });
+        app.live_node = Some("n1".to_string());
+        app.slash("clear");
+        assert!(app.goal.is_none());
+        assert!(app.nodes.is_empty());
+        assert!(app.clear_requested);
+        assert!(app.pending.is_empty());
+        assert!(app.live_node.is_none());
+        assert_eq!(app.history, vec!["prior goal".to_string()]); // history preserved
+    }
+
+    #[test]
+    fn clear_refused_while_running() {
+        let mut app = app_for(&temp_dir("clearrun"));
+        app.running = true;
+        app.goal = Some("live".to_string());
+        app.slash("clear");
+        assert_eq!(app.goal, Some("live".to_string())); // untouched
+        assert!(!app.clear_requested);
+    }
+
+    #[test]
+    fn clear_refused_while_parked() {
+        let mut app = app_for(&temp_dir("clearparked"));
+        app.parked = Some("decide".to_string());
+        app.goal = Some("live".to_string());
+        app.slash("clear");
+        assert_eq!(app.goal, Some("live".to_string()));
+        assert!(!app.clear_requested);
+    }
+
+    #[test]
+    fn ctrl_l_sets_flag_without_reset() {
+        let mut app = app_for(&temp_dir("ctrll"));
+        app.goal = Some("keep".to_string());
+        app.on_key(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert!(app.clear_requested);
+        assert_eq!(app.goal, Some("keep".to_string())); // ctrl-l does NOT reset state
+    }
+
+    #[test]
+    fn paste_inserts_verbatim_including_newlines() {
+        let mut app = app_for(&temp_dir("paste"));
+        for c in "ab".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        app.cursor = 1; // between a and b
+        app.paste("X\nY");
+        assert_eq!(app.input, "aX\nYb");
+        assert_eq!(app.cursor, 4); // after the pasted run
+    }
+
+    #[test]
+    fn alt_backspace_deletes_word_back() {
+        let mut app = app_for(&temp_dir("altbs"));
+        for c in "one two".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        app.on_key(KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(app.input, "one ");
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_plain_enter_submits() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = app_for(&temp_dir("shiftenter"));
+        for c in "line1".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        app.on_key(KeyCode::Enter, KeyModifiers::SHIFT);
+        for c in "line2".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        assert_eq!(app.input, "line1\nline2");
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.input, "");
     }
 }

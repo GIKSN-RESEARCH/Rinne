@@ -459,8 +459,11 @@ mod tests {
         let dir = tmp("init");
         let out = edit_lines("init --project", &dir);
         assert!(out.iter().any(|l| l.contains("✔")), "{out:?}");
-        // The scaffolded file must parse back as a valid Config.
-        let cfg = rinne_config::load(&dir).unwrap();
+        // The scaffolded file must parse back as a valid Config. Load only the
+        // project file (no global config, no env) so the assertion is hermetic
+        // and not perturbed by the developer's machine-level config.
+        let project_file = rinne_config::paths::project_config_file(&dir);
+        let cfg = rinne_config::load::load_layered(None, Some(&project_file), false).unwrap();
         assert_eq!(cfg.conductor.backend, rinne_config::model::ConductorBackend::Cloudflare);
         // Re-running reports it already exists rather than clobbering.
         let again = edit_lines("init --project", &dir);

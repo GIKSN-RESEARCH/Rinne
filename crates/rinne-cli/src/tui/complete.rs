@@ -6,82 +6,88 @@
 //! overlay re-computes for the next argument, so `/config` → `conductor` → `groq`
 //! is a three-Tab flow with hints at every step.
 
+use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo::{Config, Matcher};
+
 /// Top-level slash commands, shown when completing the command name.
-const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("config", "view or edit configuration"),
-    ("connect", "connect a harness or API provider"),
-    ("workers", "list workers + connected APIs"),
-    ("models", "list an API provider's models"),
-    ("forget", "delete a stored API key"),
-    ("plan", "show the current plan"),
-    ("steer", "guide a parked node"),
-    ("approve", "accept the current state"),
-    ("reject", "throw out the approach and replan"),
-    ("pause", "pause the running loop"),
-    ("resume", "resume a paused run"),
-    ("budget", "adjust the time budget"),
-    ("route", "pin a node to a worker"),
-    ("logs", "where logs are written"),
-    ("help", "command reference"),
-    ("quit", "exit"),
+const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
+    ("config",  "[sub …]",                       "view or edit configuration"),
+    ("connect", "<backend> [key] [--model <id>]", "connect a harness or API provider"),
+    ("workers", "",                              "list workers + connected APIs"),
+    ("models",  "<provider>",                   "list an API provider's models"),
+    ("forget",  "<provider>",                   "delete a stored API key"),
+    ("plan",    "",                              "show the current plan"),
+    ("steer",   "<text>",                        "guide a parked node"),
+    ("approve", "",                              "accept the current state"),
+    ("reject",  "",                              "throw out the approach and replan"),
+    ("pause",   "",                              "pause the running loop"),
+    ("resume",  "",                              "resume a paused run"),
+    ("budget",  "<min>",                         "adjust the time budget"),
+    ("route",   "<node> <worker>",               "pin a node to a worker"),
+    ("logs",    "",                              "where logs are written"),
+    ("clear",   "",                              "wipe the screen and reset the session"),
+    ("new",     "",                              "alias for /clear"),
+    ("help",    "",                              "command reference"),
+    ("quit",    "",                              "exit"),
 ];
 
 /// `/config` subcommands.
-const CONFIG_SUBCOMMANDS: &[(&str, &str)] = &[
-    ("show", "print resolved config + sources"),
-    ("conductor", "set planner backend [+ model] [--key <token>]"),
-    ("key", "store the current conductor's token (keychain)"),
-    ("prefer", "routing family: harness|api|balanced"),
-    ("role", "pin a role to a worker"),
-    ("model", "default model for a worker"),
-    ("set", "set any field: <key> <value>"),
-    ("unset", "remove an override"),
-    ("init", "scaffold a commented config file"),
-    ("edit", "open the config file in your editor"),
-    ("path", "show config file paths"),
+const CONFIG_SUBCOMMANDS: &[(&str, &str, &str)] = &[
+    ("show",      "", "print resolved config + sources"),
+    ("conductor", "", "set planner backend [+ model] [--key <token>]"),
+    ("key",       "", "store the current conductor's token (keychain)"),
+    ("prefer",    "", "routing family: harness|api|balanced"),
+    ("role",      "", "pin a role to a worker"),
+    ("model",     "", "default model for a worker"),
+    ("set",       "", "set any field: <key> <value>"),
+    ("unset",     "", "remove an override"),
+    ("init",      "", "scaffold a commented config file"),
+    ("edit",      "", "open the config file in your editor"),
+    ("path",      "", "show config file paths"),
 ];
 
 /// Backends accepted by `/config conductor <backend>`.
-const CONDUCTOR_BACKENDS: &[(&str, &str)] = &[
-    ("cloudflare", "Workers AI (needs account_id)"),
-    ("groq", "fast + cheap"),
-    ("nvidia", "NIM endpoint"),
-    ("local", "Ollama, fully offline"),
-    ("harness", "use the cheapest installed harness"),
+const CONDUCTOR_BACKENDS: &[(&str, &str, &str)] = &[
+    ("cloudflare", "", "Workers AI (needs account_id)"),
+    ("groq",       "", "fast + cheap"),
+    ("nvidia",     "", "NIM endpoint"),
+    ("local",      "", "Ollama, fully offline"),
+    ("harness",    "", "use the cheapest installed harness"),
 ];
 
 /// Families accepted by `/config prefer <family>`.
-const PREFER_FAMILIES: &[(&str, &str)] = &[
-    ("harness", "prefer CLI harnesses"),
-    ("api", "prefer API workers"),
-    ("balanced", "mix by suitability"),
+const PREFER_FAMILIES: &[(&str, &str, &str)] = &[
+    ("harness",  "", "prefer CLI harnesses"),
+    ("api",      "", "prefer API workers"),
+    ("balanced", "", "mix by suitability"),
 ];
 
 /// Roles accepted by `/config role <role> <worker>`.
-const ROLES: &[(&str, &str)] = &[
-    ("planner", "decomposes the goal into the DAG"),
-    ("generator", "produces the work"),
-    ("evaluator", "grades the work"),
-    ("synthesizer", "merges parallel results"),
-    ("fixer", "addresses critique"),
+const ROLES: &[(&str, &str, &str)] = &[
+    ("planner",     "", "decomposes the goal into the DAG"),
+    ("generator",   "", "produces the work"),
+    ("evaluator",   "", "grades the work"),
+    ("synthesizer", "", "merges parallel results"),
+    ("fixer",       "", "addresses critique"),
 ];
 
 /// Common dotted keys for `/config set|unset <key>`.
-const CONFIG_KEYS: &[(&str, &str)] = &[
-    ("conductor.backend", "cloudflare|groq|nvidia|local|harness"),
-    ("conductor.model", "model id on that backend"),
-    ("conductor.base_url", "override the endpoint"),
-    ("conductor.account_id", "cloudflare account id"),
-    ("loop.max_iterations_per_node", "generator↔evaluator rounds"),
-    ("loop.global_budget_minutes", "wall-clock ceiling"),
-    ("loop.test_ratchet", "true|false — block test-weakening diffs"),
-    ("loop.stuck_loop_threshold", "failures before escalating to you"),
-    ("preferences.prefer", "harness|api|balanced"),
+const CONFIG_KEYS: &[(&str, &str, &str)] = &[
+    ("conductor.backend",              "", "cloudflare|groq|nvidia|local|harness"),
+    ("conductor.model",                "", "model id on that backend"),
+    ("conductor.base_url",             "", "override the endpoint"),
+    ("conductor.account_id",           "", "cloudflare account id"),
+    ("loop.max_iterations_per_node",   "", "generator↔evaluator rounds"),
+    ("loop.global_budget_minutes",     "", "wall-clock ceiling"),
+    ("loop.test_ratchet",              "", "true|false — block test-weakening diffs"),
+    ("loop.stuck_loop_threshold",      "", "failures before escalating to you"),
+    ("preferences.prefer",             "", "harness|api|balanced"),
 ];
 
-/// One suggestion: the value to insert plus a short description.
+/// One suggestion: the value to insert, its usage hint, plus a short description.
 pub struct CompletionItem {
     pub value: String,
+    pub usage: String,
     pub desc: String,
 }
 
@@ -145,36 +151,51 @@ pub fn suggest(input: &str) -> Option<Completion> {
     }
 }
 
-/// Filter a candidate table by `partial` (prefix first, then substring), build a
-/// [`Completion`], or `None` if nothing matches.
+/// Filter a candidate table by `partial` using nucleo fuzzy matching.
+///
+/// For an empty partial, returns all candidates in declared order. Otherwise
+/// ranks by nucleo score (best first) and truncates to 12.
 fn filter(
-    cands: &[(&str, &str)],
+    cands: &[(&str, &str, &str)],
     partial: &str,
     label: &str,
     token_start: usize,
 ) -> Option<Completion> {
-    let p = partial.to_lowercase();
-    let mut items: Vec<CompletionItem> = cands
-        .iter()
-        .filter(|(v, _)| p.is_empty() || v.to_lowercase().starts_with(&p))
-        .map(|(v, d)| CompletionItem { value: v.to_string(), desc: d.to_string() })
-        .collect();
-    if items.is_empty() && !p.is_empty() {
-        items = cands
+    let mut items: Vec<CompletionItem> = if partial.is_empty() {
+        cands
             .iter()
-            .filter(|(v, _)| v.to_lowercase().contains(&p))
-            .map(|(v, d)| CompletionItem { value: v.to_string(), desc: d.to_string() })
-            .collect();
-    }
+            .map(|(v, u, d)| CompletionItem {
+                value: v.to_string(),
+                usage: u.to_string(),
+                desc: d.to_string(),
+            })
+            .collect()
+    } else {
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(partial, CaseMatching::Ignore, Normalization::Smart);
+        let names: Vec<&str> = cands.iter().map(|(name, _, _)| *name).collect();
+        let scored = pattern.match_list(names.iter().copied(), &mut matcher);
+        scored
+            .into_iter()
+            .map(|(matched_name, _score)| {
+                let (v, u, d) = cands
+                    .iter()
+                    .find(|(name, _, _)| *name == matched_name)
+                    .copied()
+                    .expect("match_list returned a name not in cands");
+                CompletionItem {
+                    value: v.to_string(),
+                    usage: u.to_string(),
+                    desc: d.to_string(),
+                }
+            })
+            .collect()
+    };
     if items.is_empty() {
         return None;
     }
-    Some(Completion {
-        items,
-        selected: 0,
-        token_start,
-        label: label.to_string(),
-    })
+    items.truncate(12);
+    Some(Completion { items, selected: 0, token_start, label: label.to_string() })
 }
 
 #[cfg(test)]
@@ -232,5 +253,20 @@ mod tests {
         assert_eq!(&"/config co"[c.token_start..], "co");
         let c2 = suggest("/config ").unwrap();
         assert_eq!(c2.token_start, "/config ".len());
+    }
+
+    #[test]
+    fn fuzzy_matches_subsequence() {
+        let v = values("/cfg");
+        assert!(v.contains(&"config".to_string()), "{v:?}");
+        let v2 = values("/wk");
+        assert!(v2.contains(&"workers".to_string()), "{v2:?}");
+    }
+
+    #[test]
+    fn items_carry_usage_hints() {
+        let c = suggest("/connect").unwrap();
+        let it = c.items.iter().find(|i| i.value == "connect").unwrap();
+        assert!(it.usage.contains("<backend>"), "{:?}", it.usage);
     }
 }

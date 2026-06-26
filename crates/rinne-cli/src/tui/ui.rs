@@ -61,7 +61,7 @@ pub fn draw_viewport(f: &mut Frame, app: &App) {
     let cursor_char = app.cursor_char();
     draw_status(f, chunks[0], app);
     draw_middle(f, chunks[1], app);
-    draw_prompt(f, chunks[2], app, &wrapped_input, cursor_char);
+    draw_prompt(f, chunks[2], app, &wrapped_input, cursor_char, prompt_inner_w);
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
@@ -131,8 +131,14 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
+                let usage_style = if selected {
+                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {:<28}", it.value), val_style),
+                    Span::styled(format!(" {:<14}", it.value), val_style),
+                    Span::styled(format!("{:<24}", it.usage), usage_style),
                     Span::styled(it.desc.clone(), desc_style),
                 ]))
             })
@@ -168,17 +174,18 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String], cursor_char: usize) {
+fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String], cursor_char: usize, width: usize) {
     let hint = if app.parked.is_some() {
         "enter to steer · /approve · /reject"
     } else if app.running {
         "esc pause · ctrl-o thinking"
     } else {
-        "@ files · /help · ctrl-o thinking · ctrl-q quit"
+        "@ files · /help · /clear · shift-enter newline · ctrl-q quit"
     };
 
-    // Locate the cursor (a char index) within the wrapped lines.
-    let (cline, ccol) = cursor_pos(wrapped, cursor_char);
+    // Locate the cursor in 2-D using the original text so hard newlines and
+    // width-wraps are distinguished correctly.
+    let (cline, ccol) = cursor_pos_in_text(app.input_str(), width, cursor_char);
     let lines: Vec<Line> = wrapped
         .iter()
         .enumerate()
@@ -361,21 +368,23 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Char-preserving wrap for the input field: keeps every space so the cursor
-/// tracks typing.
+/// Char-preserving wrap for the input field: splits on hard `\n` first, then
+/// width-wraps each logical line so spaces and cursor positions are preserved.
 fn wrap_input(text: &str, width: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
     }
     let mut lines = Vec::new();
-    let mut cur = String::new();
-    for c in text.chars() {
-        if cur.chars().count() == width {
-            lines.push(std::mem::take(&mut cur));
+    for logical in text.split('\n') {
+        let mut cur = String::new();
+        for c in logical.chars() {
+            if cur.chars().count() == width {
+                lines.push(std::mem::take(&mut cur));
+            }
+            cur.push(c);
         }
-        cur.push(c);
+        lines.push(cur);
     }
-    lines.push(cur);
     lines
 }
 
@@ -400,19 +409,26 @@ impl App {
     }
 }
 
-/// Map a cursor char index to its `(line, col)` within char-wrapped `lines`.
-fn cursor_pos(lines: &[String], cursor_char: usize) -> (usize, usize) {
-    let mut idx = cursor_char;
-    for (i, l) in lines.iter().enumerate() {
-        let lc = l.chars().count();
-        if idx <= lc {
-            return (i, idx);
+/// Map a cursor char index to its `(line, col)` in the 2-D rendered space,
+/// accounting for both hard `\n` breaks and width-wrap boundaries.
+fn cursor_pos_in_text(text: &str, width: usize, cursor_char: usize) -> (usize, usize) {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (n, c) in text.chars().enumerate() {
+        if n == cursor_char {
+            return (line, col);
         }
-        idx -= lc;
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else if col == width {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
     }
-    // Past the end: park at the end of the last line.
-    let last = lines.len().saturating_sub(1);
-    (last, lines.last().map(|l| l.chars().count()).unwrap_or(0))
+    (line, col)
 }
 
 #[cfg(test)]
@@ -473,5 +489,27 @@ mod tests {
             text.contains("/plan             show"),
             "column padding was collapsed: {text:?}"
         );
+    }
+
+    #[test]
+    fn wrap_input_splits_on_newline() {
+        assert_eq!(wrap_input("a\nb", 80), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(wrap_input("a\n", 80), vec!["a".to_string(), String::new()]);
+        assert_eq!(
+            wrap_input("abcdef\nx", 3),
+            vec!["abc".to_string(), "def".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn cursor_pos_tracks_hard_newlines_and_width_wrap() {
+        // Hard newline: positions across "ab\ncd" at a wide width.
+        assert_eq!(cursor_pos_in_text("ab\ncd", 80, 0), (0, 0));
+        assert_eq!(cursor_pos_in_text("ab\ncd", 80, 2), (0, 2)); // on the '\n'
+        assert_eq!(cursor_pos_in_text("ab\ncd", 80, 3), (1, 0)); // first char after '\n'
+        assert_eq!(cursor_pos_in_text("ab\ncd", 80, 5), (1, 2)); // end
+        // Width wrap and the trailing-empty-line case must agree with wrap_input.
+        assert_eq!(cursor_pos_in_text("abcdef", 3, 3), (0, 3)); // at the wrap boundary
+        assert_eq!(cursor_pos_in_text("a\n", 80, 2), (1, 0));   // cursor on the new empty line
     }
 }
