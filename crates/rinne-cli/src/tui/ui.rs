@@ -73,7 +73,7 @@ pub fn intro_lines(intro: &super::IntroState) -> Vec<Line<'static>> {
 /// Render the intro. With `intro.banner`, the full startup intro (gradient
 /// wordmark + tagline + workers table + prompt hints); otherwise just the
 /// workers table (mid-session `/models`). `spin` is the spinner for checking rows.
-pub fn intro_render(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>> {
+fn intro_render(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>> {
     if !intro.banner {
         let mut out = vec![Line::default()];
         out.extend(workers_table_lines(intro, spin));
@@ -104,7 +104,7 @@ pub fn intro_render(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>>
 /// per worker (status glyph · name · model ladder), sorted available-first, and
 /// the conductor line. Used by `/models` (no provider) for a clean standalone
 /// block, and composed into the full startup intro.
-pub fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>> {
+fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>> {
     use super::WorkerAvail;
     let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::from(Span::styled(

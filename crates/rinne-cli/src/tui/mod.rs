@@ -941,6 +941,9 @@ impl App {
                     self.goal = None;
                     self.nodes.clear();
                     self.pending.clear();
+                    // Drop any intro banner staged by commit_intro this submit, so
+                    // the screen wipe isn't immediately undone by re-printing it.
+                    self.pending_intro = None;
                     self.live_tail.clear();
                     self.live_thinking.clear();
                     self.live_node = None;
@@ -1429,6 +1432,8 @@ async fn event_loop(
             // it doesn't assume the old buffer is still on screen.
             let _ = execute!(io::stdout(), MoveTo(0, 0), Clear(ClearType::All), Clear(ClearType::Purge));
             let _ = terminal.clear();
+            // A staged intro banner must not survive a screen wipe.
+            app.pending_intro = None;
         }
         // Commit the dismissed intro banner (styled) before other pending lines,
         // so it lands above the first prompt in scrollback.
@@ -1766,6 +1771,20 @@ mod tests {
         assert!(app.pending.is_empty());
         assert!(app.live_node.is_none());
         assert_eq!(app.history, vec!["prior goal".to_string()]); // history preserved
+    }
+
+    #[test]
+    fn clear_drops_staged_intro_banner() {
+        // Regression: `/clear` as the first command must not leave a committed
+        // intro banner staged, which the event loop would re-print after wiping.
+        let mut cfg = rinne_config::Config::default();
+        cfg.backends.harness.enabled = vec!["claude-code".into()];
+        let mut app = app_for(&temp_dir("clearintro"));
+        app.set_intro(&cfg, true);
+        app.commit_intro(); // simulates the commit_intro() submit() runs before slash routing
+        assert!(app.pending_intro.is_some(), "precondition: banner staged");
+        app.slash("clear");
+        assert!(app.pending_intro.is_none(), "staged banner must be dropped on /clear");
     }
 
     #[test]

@@ -155,9 +155,14 @@ fn resolve_endpoint(config: &rinne_config::Config, name: &str) -> Result<(String
         let base = rinne_conductor::conductor_base_url(cond).ok_or_else(|| {
             format!("`{name}` (conductor) has no endpoint — set [conductor].base_url or account_id.")
         })?;
-        let key = rinne_conductor::conductor_credential(cond)
-            .and_then(|(provider, env)| rinne_config::secrets::resolve_api_key(&provider, &env))
-            .ok_or_else(|| format!("no key for the `{name}` conductor backend."))?;
+        // A keyless backend (e.g. local Ollama) has no credential — query it with
+        // an empty key. A backend that DOES expect a key but has none configured
+        // is a real error.
+        let key = match rinne_conductor::conductor_credential(cond) {
+            None => String::new(),
+            Some((provider, env)) => rinne_config::secrets::resolve_api_key(&provider, &env)
+                .ok_or_else(|| format!("no key for the `{name}` conductor backend."))?,
+        };
         return Ok((base, key));
     }
 
