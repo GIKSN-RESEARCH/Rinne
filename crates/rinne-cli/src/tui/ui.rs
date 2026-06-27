@@ -82,7 +82,13 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(status, Style::default().fg(color)),
     ];
     if total > 0 {
-        spans.push(Span::styled(format!("  · {done}/{total}"), Style::default().fg(Color::DarkGray)));
+        let active = app.nodes.iter().filter(|n| matches!(n.status, NodeStatus::Running | NodeStatus::Parked)).count();
+        let summary = if app.nodes.len() == 1 {
+            format!("  · {done}/{total} done")
+        } else {
+            format!("  · {active} agent{} active · {done}/{total} done", if active == 1 { "" } else { "s" })
+        };
+        spans.push(Span::styled(summary, Style::default().fg(Color::DarkGray)));
     }
     if let Some(goal) = app.goal.as_deref() {
         spans.push(Span::styled("  · ", Style::default().fg(Color::DarkGray)));
@@ -93,6 +99,28 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
+        return;
+    }
+    if app.picker.is_none() && app.completion.is_none() && app.running && !app.nodes.is_empty() {
+        let spin = SPINNER[app.spinner % SPINNER.len()];
+        // Pre-wrap the focused stream (answer preferred, else thinking).
+        let answering = !app.live_tail.is_empty();
+        let body = if answering { &app.live_tail } else { &app.live_thinking };
+        let avail = area.width.saturating_sub(4).max(8) as usize;
+        let tail: Vec<String> = if body.is_empty() { Vec::new() } else {
+            let w = wrap(body, avail);
+            let start = w.len().saturating_sub(2);
+            w[start..].to_vec()
+        };
+        let lines = render_agents_flow(
+            &app.nodes,
+            &app.live_actions,
+            app.live_node.as_deref(),
+            spin,
+            &tail,
+            area.height as usize,
+        );
+        f.render_widget(Paragraph::new(lines), area);
         return;
     }
     if let Some(picker) = &app.picker {
@@ -278,7 +306,6 @@ fn render_entry(entry: FeedEntryRef, width: usize, expand_thinking: bool) -> Vec
         FeedKind::System => ("", Color::Gray, false),
         FeedKind::Conductor => ("· ", Color::Cyan, false),
         FeedKind::NodeStart => ("▶ ", Color::Blue, true),
-        FeedKind::Stream => ("  ⎿ ", Color::DarkGray, false),
         FeedKind::Markdown | FeedKind::Thinking => unreachable!("handled above"),
         FeedKind::NodeOk => ("✔ ", Color::Green, false),
         FeedKind::NodeFail => ("✗ ", Color::Red, false),
@@ -488,7 +515,6 @@ fn render_agents_flow(
                 format!("  … +{} more agents", left),
                 Style::default().fg(Color::DarkGray),
             )));
-            shown += 1;
             break;
         }
         if shown >= body_budget { break; }
@@ -557,6 +583,9 @@ mod tests {
         assert_eq!(status_glyph(NodeStatus::Failed, id, "⠹", false), ("✗".into(), Color::Red));
         assert_eq!(status_glyph(NodeStatus::Running, id, "⠹", false).0, "●".to_string());
         assert_eq!(status_glyph(NodeStatus::Running, id, "⠹", true).0, "⠹".to_string());
+        assert_eq!(status_glyph(NodeStatus::Parked, id, "⠹", false), ("⏸".into(), Color::Yellow));
+        assert_eq!(status_glyph(NodeStatus::Pending, id, "⠹", false), ("○".into(), Color::DarkGray));
+        assert_eq!(status_glyph(NodeStatus::Running, id, "⠹", false).1, id); // identity color on unfocused running dot
     }
 
     #[test]
@@ -569,7 +598,7 @@ mod tests {
     #[test]
     fn feed_entry_preserves_newlines() {
         let entry = FeedEntry {
-            kind: FeedKind::Stream,
+            kind: FeedKind::System,
             text: "- tip one\n- tip two\n- tip three".to_string(),
             node: None,
         };

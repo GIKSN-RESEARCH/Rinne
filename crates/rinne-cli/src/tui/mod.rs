@@ -98,7 +98,6 @@ pub enum FeedKind {
     System,
     Conductor,
     NodeStart,
-    Stream,
     /// A completed worker message, rendered as terminal markdown.
     Markdown,
     /// A reasoning ("thinking") block from a reasoning model, rendered dimmed.
