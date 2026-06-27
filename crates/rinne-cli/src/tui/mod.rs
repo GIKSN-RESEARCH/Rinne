@@ -84,21 +84,23 @@ fn viewport_height_for(rows: u16) -> u16 {
 }
 
 /// A capabilities block appended after the intro once the background registry
-/// build finishes: which workers are actually usable now, and for each worker
-/// that exposes more than one model, its full cascade ladder (cheap→strong).
-/// `names` are the registered (available) worker names; `ladders` maps a worker
-/// name to its model ladder.
+/// build finishes: every worker that is actually usable now, one per line, each
+/// with its model ladder when the adapter declares one (cheap→strong) or a
+/// "uses its own default" note otherwise — so every available worker is visible,
+/// not just the ones with an explicit ladder. `names` are the registered
+/// (available) worker names in preference order; `ladders` maps a worker name to
+/// its model ladder.
 fn capabilities_block(names: &[String], ladders: &std::collections::HashMap<String, Vec<String>>) -> String {
     if names.is_empty() {
         return "no workers available yet — run `rinne doctor` or /connect to set one up".to_string();
     }
-    let mut s = format!("✔ available: {}", names.join(" · "));
-    // One line per worker that has a real ladder, sorted for stable output.
-    let mut keyed: Vec<(&String, &Vec<String>)> = ladders.iter().collect();
-    keyed.sort_by(|a, b| a.0.cmp(b.0));
-    for (worker, ladder) in keyed {
-        if ladder.len() > 1 {
-            s.push_str(&format!("\n  {worker}: {}", ladder.join(" · ")));
+    let mut s = String::from("✔ available workers");
+    for name in names {
+        match ladders.get(name) {
+            Some(ladder) if ladder.len() > 1 => {
+                s.push_str(&format!("\n  {name}: {}", ladder.join(" · ")));
+            }
+            _ => s.push_str(&format!("\n  {name}: uses its own default model")),
         }
     }
     s
@@ -1761,11 +1763,10 @@ mod tests {
         ladders.insert("claude-code".into(), vec!["haiku".into(), "sonnet".into(), "opus".into()]);
         ladders.insert("codex".into(), vec!["gpt-5-codex".into()]); // single → no ladder row
         let block = super::capabilities_block(&names, &ladders);
-        assert!(block.contains("✔ available: claude-code · codex"), "{block}");
-        // Multi-model harness shows its full ladder on its own line.
+        // Every available worker appears on its own line.
         assert!(block.contains("claude-code: haiku · sonnet · opus"), "{block}");
-        // Single-model worker does NOT get a ladder line.
-        assert!(!block.contains("codex: gpt-5-codex"), "{block}");
+        // A worker without a real ladder still appears, with the default note.
+        assert!(block.contains("codex: uses its own default model"), "{block}");
 
         let empty = super::capabilities_block(&[], &HashMap::new());
         assert!(empty.contains("no workers available"), "{empty}");
