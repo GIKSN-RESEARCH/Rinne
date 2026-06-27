@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
             commands::connect::run(&backend, key, models, base_url, add).await
         }
         Some(Command::Forget { provider }) => commands::forget::run(&provider).await,
-        Some(Command::Models { provider }) => commands::models::run(&provider).await,
+        Some(Command::Models { provider }) => commands::models::run(provider.as_deref()).await,
         Some(Command::Status) => run_status().await,
         Some(Command::Resume {
             steer,

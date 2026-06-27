@@ -4,6 +4,9 @@
 # Runtime blackboard (per-run state, logs, transcripts, artifacts)
 .rinne/
 
+# Claude-generated docs (specs, mockups, brainstorming output)
+docs/superpowers/
+
 # Local env / editor
 .env
 .DS_Store

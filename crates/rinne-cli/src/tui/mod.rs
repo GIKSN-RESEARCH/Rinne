@@ -46,6 +46,77 @@ const GLOB_LIMIT: usize = 400;
 /// Cap on persisted history entries kept in memory / loaded from disk.
 const HISTORY_MAX: usize = 1000;
 
+/// Recent actions kept per agent in the live view.
+const ACTIONS_PER_AGENT: usize = 4;
+
+/// Whether an engine narration line is internal routing jargon that the user
+/// view should hide (the role-named flow shows this information cleanly). The
+/// engine still emits these for logs; we only suppress them in the TUI.
+fn is_internal_narration(line: &str) -> bool {
+    let l = line.trim_start();
+    // "routed n1 (Generator) to claude-code [harness]"
+    l.starts_with("routed ") || looks_like_node_routing(l)
+}
+
+/// Heuristic: a bare "<id> on <worker>:<model>" routing line — a single-token id
+/// before " on ", and a single-token "worker:model" after it.
+fn looks_like_node_routing(l: &str) -> bool {
+    match l.split_once(" on ") {
+        Some((head, tail)) => {
+            let head_is_id = head.split_whitespace().count() == 1 && !head.is_empty();
+            let tail_is_worker_model = tail.contains(':') && tail.split_whitespace().count() == 1;
+            head_is_id && tail_is_worker_model
+        }
+        None => false,
+    }
+}
+
+/// Height of the inline live viewport for a terminal of `rows` rows. The viewport
+/// is bottom-anchored, so when idle it still reads as a compact footer (the
+/// internal layout pushes status+prompt to the bottom); the extra rows give the
+/// live agents flow room to grow when a run is active. Capped at ~60% of the
+/// terminal so the transcript above stays visible, with a sensible floor.
+fn viewport_height_for(rows: u16) -> u16 {
+    let sixty_pct = (rows as u32 * 6 / 10) as u16;
+    // Prefer 60% (clamped to a 6..=24 band), but never exceed the terminal.
+    let preferred = sixty_pct.clamp(6, 24);
+    preferred.min(rows.saturating_sub(1)).max(1)
+}
+
+/// Map a worker action event to a friendly, verb-first label (Claude-Code
+/// style). Returns `None` for non-action events. Adapter payloads already carry
+/// human text; this only normalises the leading verb and strips redundant
+/// adapter prefixes.
+fn action_label(ev: &rinne_core::worker::WorkerEvent) -> Option<String> {
+    use rinne_core::worker::WorkerEvent::*;
+    let strip = |s: &str, p: &str| s.strip_prefix(p).map(str::trim).map(str::to_string);
+    match ev {
+        Reading(m) => Some(format!("Read {}", m.trim())),
+        Editing(m) => {
+            if let Some(rest) = strip(m, "writing ") {
+                Some(format!("Wrote {rest}"))
+            } else if let Some(rest) = strip(m, "editing ") {
+                Some(format!("Edited {rest}"))
+            } else {
+                Some(format!("Edited {}", m.trim()))
+            }
+        }
+        ToolUse(m) => {
+            let m = m.trim();
+            if let Some(rest) = strip(m, "grep ") {
+                Some(format!("Searched {rest}"))
+            } else if let Some(rest) = strip(m, "glob ") {
+                Some(format!("Listed {rest}"))
+            } else if let Some(rest) = strip(m, "subagent: ") {
+                Some(format!("Delegated {rest}"))
+            } else {
+                Some(m.to_string())
+            }
+        }
+        Token(_) | Thinking(_) | Message(_) | Raw(_) | Done => None,
+    }
+}
+
 /// A node as shown in the (printed) plan listing and progress count.
 #[derive(Clone)]
 pub struct NodeView {
@@ -61,7 +132,6 @@ pub enum FeedKind {
     System,
     Conductor,
     NodeStart,
-    Stream,
     /// A completed worker message, rendered as terminal markdown.
     Markdown,
     /// A reasoning ("thinking") block from a reasoning model, rendered dimmed.
@@ -80,6 +150,37 @@ pub struct FeedEntry {
     pub node: Option<String>,
 }
 
+/// Availability of a worker in the intro table.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum WorkerAvail {
+    Checking,
+    Available,
+    NotInstalled,
+}
+
+/// One row in the intro workers table.
+#[derive(Clone)]
+pub struct WorkerRow {
+    pub name: String,
+    pub avail: WorkerAvail,
+    /// Model ladder (cheap→strong) if the adapter declares one; else empty.
+    pub ladder: Vec<String>,
+}
+
+/// The startup intro shown live in the viewport until the first submit, then
+/// committed to scrollback. Its worker rows fill in `✔`/`·` as a background
+/// probe resolves availability.
+#[derive(Clone)]
+pub struct IntroState {
+    pub workers: Vec<WorkerRow>,
+    pub conductor: String,
+    /// True once the background capability probe has reported.
+    pub resolved: bool,
+    /// Whether to render the wordmark/tagline/prompt-hint chrome (startup intro)
+    /// or just the workers table (mid-session `/models`).
+    pub banner: bool,
+}
+
 /// Messages delivered to the app loop from background runs.
 pub enum AppMsg {
     Engine(EngineEvent),
@@ -89,6 +190,11 @@ pub enum AppMsg {
     Reindex,
     /// A block of informational lines (e.g. `/workers`, `/connect` output).
     Note(String),
+    /// Background probe result: available worker names + per-worker ladders.
+    Capabilities {
+        available: Vec<String>,
+        ladders: std::collections::HashMap<String, Vec<String>>,
+    },
 }
 
 /// The TUI application state.
@@ -104,6 +210,15 @@ pub struct App {
     /// dimmed and committed just before the answer block.
     live_thinking: String,
     live_node: Option<String>,
+    /// Recent friendly actions per node (newest last), shown under the agent's
+    /// heading in the live view. Capped at `ACTIONS_PER_AGENT`.
+    live_actions: std::collections::HashMap<String, Vec<String>>,
+    /// The startup intro table, shown live in the viewport until the first
+    /// submit (then committed to scrollback). `None` once dismissed.
+    intro: Option<IntroState>,
+    /// Styled intro lines staged for the event loop to flush into scrollback
+    /// (set by `commit_intro`; the gradient can't go through the text feed).
+    pending_intro: Option<Vec<ratatui::text::Line<'static>>>,
     input: String,
     /// Cursor position in `input` as a byte index (always on a char boundary).
     cursor: usize,
@@ -132,13 +247,16 @@ pub struct App {
 
 impl App {
     fn new(index: FileIndex, tx: tokio::sync::mpsc::UnboundedSender<AppMsg>) -> Self {
-        let mut app = Self {
+        Self {
             goal: None,
             nodes: Vec::new(),
             pending: Vec::new(),
             live_tail: String::new(),
             live_thinking: String::new(),
             live_node: None,
+            live_actions: std::collections::HashMap::new(),
+            intro: None,
+            pending_intro: None,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -156,10 +274,66 @@ impl App {
             should_quit: false,
             cancel: None,
             tx,
-        };
-        app.push(FeedKind::System, "Welcome to Rinne. Describe what you want done and press Enter.");
-        app.push(FeedKind::System, "Type @ to reference files · /help for commands · ctrl-q to quit · scroll the terminal to see history.");
-        app
+        }
+        // `set_intro` is called from `run()` with the loaded config to populate
+        // the live intro table; the background probe then resolves availability.
+    }
+
+    /// Build the live intro table from config (all enabled harnesses, status
+    /// Checking). Rendered in the viewport until the first submit. `banner`
+    /// controls whether the wordmark/hints chrome is shown (startup) or just the
+    /// workers table (mid-session `/models`).
+    fn set_intro(&mut self, config: &rinne_config::Config, banner: bool) {
+        let workers = config
+            .backends
+            .harness
+            .enabled
+            .iter()
+            .map(|name| WorkerRow {
+                name: name.clone(),
+                avail: WorkerAvail::Checking,
+                ladder: Vec::new(),
+            })
+            .collect();
+        self.intro = Some(IntroState {
+            workers,
+            conductor: format!("{:?} · {}", config.conductor.backend, config.conductor.model)
+                .to_lowercase(),
+            resolved: false,
+            banner,
+        });
+    }
+
+    /// Fold a background capability probe into the intro table: mark each worker
+    /// available/not-installed and fill its model ladder.
+    fn apply_capabilities(
+        &mut self,
+        available: &[String],
+        ladders: &std::collections::HashMap<String, Vec<String>>,
+    ) {
+        if let Some(intro) = &mut self.intro {
+            for row in &mut intro.workers {
+                row.avail = if available.contains(&row.name) {
+                    WorkerAvail::Available
+                } else {
+                    WorkerAvail::NotInstalled
+                };
+                if let Some(l) = ladders.get(&row.name) {
+                    row.ladder = l.clone();
+                }
+            }
+            intro.resolved = true;
+        }
+    }
+
+    /// Commit the intro table to scrollback and dismiss the live version. Called
+    /// on the first submit so the intro scrolls away like any other content. The
+    /// styled lines are stashed for the event loop to flush (they carry the
+    /// gradient wordmark, which the text feed can't express).
+    fn commit_intro(&mut self) {
+        if let Some(intro) = self.intro.take() {
+            self.pending_intro = Some(ui::intro_lines(&intro));
+        }
     }
 
     /// Queue a committed line for scrollback.
@@ -251,12 +425,13 @@ impl App {
                 self.commit_tail();
                 self.goal = Some(goal);
                 self.nodes = nodes;
+                self.live_actions.clear();
                 self.running = true;
                 self.parked = None;
-                // Print the plan to scrollback as one block.
+                // Print the plan to scrollback as one block, by role (no ids).
                 let mut listing = String::from("Plan:");
                 for n in &self.nodes {
-                    listing.push_str(&format!("\n  ○ {:<5} {}", n.id, n.role));
+                    listing.push_str(&format!("\n  ○ {}", n.role));
                 }
                 self.push(FeedKind::Conductor, listing);
             }
@@ -298,6 +473,9 @@ impl App {
                 self.commit_tail();
                 self.push(FeedKind::System, text);
             }
+            AppMsg::Capabilities { available, ladders } => {
+                self.apply_capabilities(&available, &ladders);
+            }
         }
     }
 
@@ -305,38 +483,44 @@ impl App {
         match ev {
             EngineEvent::Narration(line) => {
                 self.commit_tail();
-                self.push(FeedKind::Conductor, line);
+                // Hide engine routing jargon ("routed n1 (Generator) to X
+                // [harness]", "n1 on X:model") from the user view; it stays in
+                // the engine's own narration for logs.
+                if !is_internal_narration(&line) {
+                    self.push(FeedKind::Conductor, line);
+                }
             }
             EngineEvent::NodeStarted { id, worker } => {
                 self.commit_tail();
+                let role = self
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| n.role.clone())
+                    .unwrap_or_else(|| id.clone());
                 if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
                     n.worker = worker.clone();
                     n.status = NodeStatus::Running;
                 }
-                self.push(FeedKind::NodeStart, format!("{id} → {worker}"));
+                self.push(FeedKind::NodeStart, format!("{role}  {worker}"));
             }
             EngineEvent::NodeStream { id, event } => {
                 use rinne_core::worker::WorkerEvent::*;
                 let id = id.clone();
+                let action = action_label(&event);
                 match event {
                     Done => {}
-                    // Tool actions are discrete lines and break a text run.
-                    Reading(m) | Editing(m) | ToolUse(m) => {
+                    Reading(_) | Editing(_) | ToolUse(_) => {
                         self.commit_tail();
-                        let t = m.trim();
-                        if !t.is_empty() {
-                            self.push(FeedKind::Stream, format!("{id}  {t}"));
+                        if let Some(label) = action {
+                            let acts = self.live_actions.entry(id.clone()).or_default();
+                            acts.push(label);
+                            let n = acts.len();
+                            if n > ACTIONS_PER_AGENT { acts.drain(0..n - ACTIONS_PER_AGENT); }
                         }
                     }
-                    // A reasoning delta from a reasoning model — accumulate it as
-                    // a dimmed thinking block shown above the answer.
                     Thinking(t) => self.stream_thinking(&id, &t),
-                    // A raw streaming delta: concatenate verbatim (fragments are
-                    // mid-word). Any token-streaming worker — every API provider,
-                    // Grok — uses this, so rendering is correct regardless of name.
                     Token(t) => self.stream_token(&id, &t),
-                    // A discrete line/block (Claude blocks, Codex/OpenCode lines):
-                    // place it on its own line within the accumulating block.
                     Message(m) | Raw(m) => self.stream_line(&id, &m),
                 }
             }
@@ -345,6 +529,7 @@ impl App {
                 if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
                     n.status = status;
                 }
+                self.live_actions.remove(&id);
                 let kind = if status == NodeStatus::Succeeded { FeedKind::NodeOk } else { FeedKind::NodeFail };
                 self.push(kind, format!("{id} {}", status.label()));
             }
@@ -651,6 +836,10 @@ impl App {
             self.history.push(text.clone());
             self.persist_history(&text);
         }
+        // Commit the live intro table to scrollback before the first echoed
+        // prompt, so it scrolls away naturally with the rest of the transcript.
+        self.commit_intro();
+
         // Echo the input, redacting an API key in a `connect` command so it
         // never lands in the transcript.
         self.push(FeedKind::System, format!("› {}", redact_secret(&text)));
@@ -706,7 +895,8 @@ impl App {
             }
             "models" => {
                 if rest.is_empty() {
-                    self.push(FeedKind::System, "usage: /models <provider>  (lists the models an API provider's key can access)");
+                    // No provider: show all available workers + ladders (like the intro).
+                    self.list_models_all();
                 } else {
                     self.list_models_for(rest.split_whitespace().next().unwrap_or("").to_string());
                 }
@@ -751,6 +941,9 @@ impl App {
                     self.goal = None;
                     self.nodes.clear();
                     self.pending.clear();
+                    // Drop any intro banner staged by commit_intro this submit, so
+                    // the screen wipe isn't immediately undone by re-printing it.
+                    self.pending_intro = None;
                     self.live_tail.clear();
                     self.live_thinking.clear();
                     self.live_node = None;
@@ -783,6 +976,34 @@ impl App {
         tokio::spawn(async move {
             let text = crate::commands::models::list_lines(&provider).await.join("\n");
             let _ = tx.send(AppMsg::Note(text));
+        });
+    }
+
+    /// No-arg `/models`: re-show the live workers table (table only, no banner),
+    /// re-armed and resolved by a fresh probe, then committed to scrollback on
+    /// the next submit — the same mechanism as the startup intro.
+    fn list_models_all(&mut self) {
+        let Ok(config) = rinne_config::load_cwd() else {
+            self.push(FeedKind::NodeFail, "could not load config");
+            return;
+        };
+        if self.running {
+            // A run owns the live region; fall back to a one-shot text overview.
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let text = crate::commands::models::overview_lines().await.join("\n");
+                let _ = tx.send(AppMsg::Note(text));
+            });
+            return;
+        }
+        // Re-arm the live workers table (table only) and probe to resolve it.
+        self.set_intro(&config, false);
+        let probe_tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok((registry, names)) = runner::build_registry(&config).await {
+                let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
+                let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
+            }
         });
     }
 
@@ -999,7 +1220,7 @@ fn help_text() -> String {
         ("/workers", "list workers + connected APIs and their auth"),
         ("/connect <b>", "connect a harness, or an API provider + key (e.g. /connect deepseek sk-…)"),
         ("/forget <p>", "delete a stored API key from the OS keychain"),
-        ("/models <p>", "list the models an API provider's key can access"),
+        ("/models [p]", "all workers + ladders, or a provider's full catalog"),
         ("/config", "show/edit config: conductor <b> [--key <t>], set <k> <v>, init, edit"),
         ("/steer <text>", "give guidance to a parked node (or just type while parked)"),
         ("/approve", "accept the current state and continue"),
@@ -1133,9 +1354,25 @@ pub async fn run() -> Result<()> {
         }
     });
 
+    // Clone the sender for the background availability probe before `App` takes
+    // ownership of the original.
+    let tx_for_probe = tx.clone();
     let mut app = App::new(index, tx);
     // Persist prompt history across sessions under the project blackboard.
     app.attach_history(cwd.join(rinne_core::BLACKBOARD_DIR).join("history"));
+
+    // Populate the live intro table from config (instant), and kick off the
+    // background registry build that resolves availability + model ladders.
+    if let Ok(config) = rinne_config::load_cwd() {
+        app.set_intro(&config, true);
+        let probe_tx = tx_for_probe.clone();
+        tokio::spawn(async move {
+            if let Ok((registry, names)) = runner::build_registry(&config).await {
+                let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
+                let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
+            }
+        });
+    }
 
     // No alternate screen: the transcript stays in normal scrollback. A small
     // inline viewport at the bottom holds the live region.
@@ -1144,7 +1381,7 @@ pub async fn run() -> Result<()> {
     // failure here returns early with only raw mode to undo — never a terminal
     // left in bracketed-paste / keyboard-enhancement state.
     let rows = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
-    let viewport_height = rows.saturating_sub(1).min(10).max(4);
+    let viewport_height = viewport_height_for(rows);
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = match Terminal::with_options(
         backend,
@@ -1195,6 +1432,13 @@ async fn event_loop(
             // it doesn't assume the old buffer is still on screen.
             let _ = execute!(io::stdout(), MoveTo(0, 0), Clear(ClearType::All), Clear(ClearType::Purge));
             let _ = terminal.clear();
+            // A staged intro banner must not survive a screen wipe.
+            app.pending_intro = None;
+        }
+        // Commit the dismissed intro banner (styled) before other pending lines,
+        // so it lands above the first prompt in scrollback.
+        if let Some(lines) = app.pending_intro.take() {
+            ui::flush_lines(terminal, lines)?;
         }
         ui::flush_pending(terminal, app)?;
         terminal.draw(|f| ui::draw_viewport(f, app))?;
@@ -1530,6 +1774,20 @@ mod tests {
     }
 
     #[test]
+    fn clear_drops_staged_intro_banner() {
+        // Regression: `/clear` as the first command must not leave a committed
+        // intro banner staged, which the event loop would re-print after wiping.
+        let mut cfg = rinne_config::Config::default();
+        cfg.backends.harness.enabled = vec!["claude-code".into()];
+        let mut app = app_for(&temp_dir("clearintro"));
+        app.set_intro(&cfg, true);
+        app.commit_intro(); // simulates the commit_intro() submit() runs before slash routing
+        assert!(app.pending_intro.is_some(), "precondition: banner staged");
+        app.slash("clear");
+        assert!(app.pending_intro.is_none(), "staged banner must be dropped on /clear");
+    }
+
+    #[test]
     fn clear_refused_while_running() {
         let mut app = app_for(&temp_dir("clearrun"));
         app.running = true;
@@ -1586,5 +1844,130 @@ mod tests {
         assert_eq!(app.input, "line1\nline2");
         app.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn tool_calls_fill_live_actions_not_scrollback() {
+        use rinne_core::worker::WorkerEvent as W;
+        let mut app = app_for(&temp_dir("liveact"));
+        app.nodes = vec![NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Running, worker: "claude-code".into() }];
+        let before = app.pending.len();
+        app.apply_engine(EngineEvent::NodeStream { id: "n1".into(), event: W::Reading("Cargo.toml".into()) });
+        app.apply_engine(EngineEvent::NodeStream { id: "n1".into(), event: W::ToolUse("grep needle".into()) });
+        assert_eq!(app.live_actions.get("n1").map(Vec::as_slice), Some(["Read Cargo.toml".to_string(), "Searched needle".to_string()].as_slice()));
+        assert_eq!(app.pending.len(), before, "tool calls must not be pushed to scrollback");
+    }
+
+    #[test]
+    fn live_actions_capped_per_agent() {
+        use rinne_core::worker::WorkerEvent as W;
+        let mut app = app_for(&temp_dir("liveactcap"));
+        app.nodes = vec![NodeView { id: "n1".into(), role: "r".into(), status: NodeStatus::Running, worker: "w".into() }];
+        for i in 0..(ACTIONS_PER_AGENT + 3) {
+            app.apply_engine(EngineEvent::NodeStream { id: "n1".into(), event: W::Reading(format!("f{i}.rs")) });
+        }
+        let acts = app.live_actions.get("n1").unwrap();
+        assert_eq!(acts.len(), ACTIONS_PER_AGENT);
+        assert_eq!(acts.last().unwrap(), &format!("Read f{}.rs", ACTIONS_PER_AGENT + 2));
+    }
+
+    #[test]
+    fn action_label_maps_friendly_verbs() {
+        use rinne_core::worker::WorkerEvent as W;
+        let cases = [
+            (W::Reading("Cargo.toml".into()), Some("Read Cargo.toml")),
+            (W::Editing("editing src/foo.rs".into()), Some("Edited src/foo.rs")),
+            (W::Editing("writing src/foo.rs".into()), Some("Wrote src/foo.rs")),
+            (W::ToolUse("grep needle".into()), Some("Searched needle")),
+            (W::ToolUse("glob **/*.rs".into()), Some("Listed **/*.rs")),
+            (W::ToolUse("subagent: review the diff".into()), Some("Delegated review the diff")),
+            (W::ToolUse("cargo build".into()), Some("cargo build")),
+            (W::Token("hi".into()), None),
+            (W::Done, None),
+        ];
+        for (ev, want) in cases {
+            assert_eq!(super::action_label(&ev).as_deref(), want, "for {ev:?}");
+        }
+    }
+
+    #[test]
+    fn intro_resolves_availability_and_ladders() {
+        use std::collections::HashMap;
+        let mut cfg = rinne_config::Config::default();
+        cfg.backends.harness.enabled = vec!["claude-code".into(), "codex".into(), "grok".into()];
+        let mut app = app_for(&temp_dir("intro"));
+        app.set_intro(&cfg, true);
+
+        // Before the probe: all rows are Checking.
+        let intro = app.intro.as_ref().unwrap();
+        assert_eq!(intro.workers.len(), 3);
+        assert!(intro.workers.iter().all(|w| w.avail == WorkerAvail::Checking));
+        assert!(!intro.resolved);
+
+        // Probe: claude-code + codex available (claude-code has a ladder); grok not.
+        let mut ladders: HashMap<String, Vec<String>> = HashMap::new();
+        ladders.insert("claude-code".into(), vec!["haiku".into(), "sonnet".into(), "opus".into()]);
+        app.apply_capabilities(&["claude-code".to_string(), "codex".to_string()], &ladders);
+
+        let intro = app.intro.as_ref().unwrap();
+        assert!(intro.resolved);
+        let cc = intro.workers.iter().find(|w| w.name == "claude-code").unwrap();
+        assert_eq!(cc.avail, WorkerAvail::Available);
+        assert_eq!(cc.ladder, vec!["haiku".to_string(), "sonnet".to_string(), "opus".to_string()]);
+        let cx = intro.workers.iter().find(|w| w.name == "codex").unwrap();
+        assert_eq!(cx.avail, WorkerAvail::Available);
+        assert!(cx.ladder.is_empty());
+        let gk = intro.workers.iter().find(|w| w.name == "grok").unwrap();
+        assert_eq!(gk.avail, WorkerAvail::NotInstalled);
+
+        // Commit on submit: intro cleared, styled lines staged for flush.
+        app.commit_intro();
+        assert!(app.intro.is_none());
+        assert!(app.pending_intro.is_some());
+    }
+
+    #[test]
+    fn viewport_height_scales_and_clamps() {
+        assert_eq!(super::viewport_height_for(24), 14); // 60% of 24
+        assert_eq!(super::viewport_height_for(80), 24); // capped at 24
+        assert_eq!(super::viewport_height_for(10), 6);  // floor of 6
+        assert_eq!(super::viewport_height_for(5), 4);   // never exceeds rows-1
+        assert_eq!(super::viewport_height_for(1), 1);   // degenerate
+    }
+
+    #[test]
+    fn internal_narration_is_hidden() {
+        // Jargon lines suppressed in the user view.
+        assert!(super::is_internal_narration("routed n1 (Generator) to claude-code [harness]"));
+        assert!(super::is_internal_narration("n1 on claude-code:sonnet"));
+        // Ordinary narration kept.
+        assert!(!super::is_internal_narration("planning: help me understand the project"));
+        assert!(!super::is_internal_narration("resuming with your decision"));
+        assert!(!super::is_internal_narration("waiting on human input")); // " on " but not id:worker:model
+    }
+
+    #[test]
+    fn plan_listing_uses_roles_not_ids() {
+        let mut app = app_for(&temp_dir("planlist"));
+        app.apply(AppMsg::Planned {
+            goal: "g".into(),
+            nodes: vec![
+                NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: String::new() },
+                NodeView { id: "n2".into(), role: "evaluator".into(), status: NodeStatus::Pending, worker: String::new() },
+            ],
+        });
+        let plan = app.pending.iter().find(|e| e.text.starts_with("Plan:")).expect("plan entry");
+        assert!(plan.text.contains("generator") && plan.text.contains("evaluator"), "{}", plan.text);
+        assert!(!plan.text.contains("n1") && !plan.text.contains("n2"), "ids leaked: {}", plan.text);
+    }
+
+    #[test]
+    fn node_started_heading_uses_role() {
+        let mut app = app_for(&temp_dir("nodestart"));
+        app.nodes = vec![NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: String::new() }];
+        app.apply_engine(EngineEvent::NodeStarted { id: "n1".into(), worker: "claude-code".into() });
+        let start = app.pending.iter().find(|e| e.kind == FeedKind::NodeStart).expect("node start entry");
+        assert!(start.text.contains("generator") && start.text.contains("claude-code"), "{}", start.text);
+        assert!(!start.text.contains("n1"), "id leaked: {}", start.text);
     }
 }

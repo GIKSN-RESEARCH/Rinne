@@ -1,0 +1,47 @@
+# Configures GitHub's auto-generated release notes (used by the release workflow's
+# `generate_release_notes: true`). Merged PRs are grouped into the sections below
+# by their labels; a PR with no matching label falls into "Other changes".
+# Docs: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - skip-changelog
+    authors:
+      - dependabot
+  categories:
+    - title: 🚀 Features
+      labels:
+        - feature
+        - enhancement
+        - feat
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+        - fix
+        - bugfix
+    - title: 🖥️ TUI / UX
+      labels:
+        - tui
+        - ux
+        - ui
+    - title: ⚡ Performance
+      labels:
+        - performance
+        - perf
+    - title: 📚 Documentation
+      labels:
+        - documentation
+        - docs
+    - title: 🔧 Build & CI
+      labels:
+        - build
+        - ci
+        - chore
+    - title: ⬆️ Dependencies
+      labels:
+        - dependencies
+        - deps
+    - title: 🧹 Other changes
+      labels:
+        - "*"

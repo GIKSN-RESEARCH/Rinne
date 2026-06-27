@@ -155,7 +155,7 @@ pub fn conductor_credential(config: &ConductorConfig) -> Option<(String, String)
 /// The endpoint a conductor backend talks to (explicit `base_url`, else a
 /// per-backend default), or `None` when it cannot be constructed (Cloudflare
 /// without an `account_id`) or is the harness fallback.
-fn conductor_base_url(config: &ConductorConfig) -> Option<String> {
+pub fn conductor_base_url(config: &ConductorConfig) -> Option<String> {
     if let Some(base) = config.base_url.clone() {
         return Some(base);
     }

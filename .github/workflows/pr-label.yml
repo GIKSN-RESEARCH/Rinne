@@ -1,0 +1,69 @@
+name: pr-label
+
+# Labels each PR from its conventional-commit title prefix (feat:, fix:, docs:,
+# …) so categorized release notes (see .github/release.yml) work without manual
+# labeling. Idempotent: re-runs on title edits and replaces the type label.
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = context.payload.pull_request.title || "";
+            const m = title.match(/^(\w+)(\([^)]*\))?!?:/);
+            const type = m ? m[1].toLowerCase() : null;
+
+            // conventional type -> (label, color)
+            const map = {
+              feat:     ["feature", "0e8a16"],
+              fix:      ["bug", "d73a4a"],
+              perf:     ["performance", "fbca04"],
+              docs:     ["documentation", "0075ca"],
+              build:    ["build", "5319e7"],
+              ci:       ["ci", "5319e7"],
+              chore:    ["chore", "cfd3d7"],
+              refactor: ["enhancement", "a2eeef"],
+              test:     ["chore", "cfd3d7"],
+              style:    ["chore", "cfd3d7"],
+            };
+            const entry = type && map[type];
+            if (!entry) {
+              core.info(`No conventional type in title: "${title}" — leaving labels as-is.`);
+              return;
+            }
+            const [label, color] = entry;
+            const { owner, repo } = context.repo;
+            const prNumber = context.payload.pull_request.number;
+
+            // Ensure the label exists (create it with a color if missing).
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({ owner, repo, name: label, color });
+              } else {
+                throw e;
+              }
+            }
+
+            // Remove any other type labels we manage, then add the right one.
+            const managed = new Set(Object.values(map).map(([l]) => l));
+            const current = await github.rest.issues.listLabelsOnIssue({ owner, repo, issue_number: prNumber });
+            for (const l of current.data) {
+              if (managed.has(l.name) && l.name !== label) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: prNumber, name: l.name })
+                  .catch(() => {});
+              }
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: prNumber, labels: [label] });
+            core.info(`Labeled PR #${prNumber} as "${label}".`);

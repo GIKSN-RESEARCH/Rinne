@@ -12,7 +12,8 @@ pub mod parse;
 pub mod prompt;
 
 pub use backend::{
-    conductor_credential, resolve_openai, HarnessBackend, OpenAiBackend, PlanBackend,
+    conductor_base_url, conductor_credential, resolve_openai, HarnessBackend, OpenAiBackend,
+    PlanBackend,
 };
 pub use conductor::Conductor;
 pub use parse::parse_plan;

@@ -2,7 +2,11 @@
 
 **Local, open-source, terminal-first AI orchestration.**
 
+<<<<<<< HEAD
 ### Crates Version - 0.1.5
+=======
+### Crates Version - 0.1.6
+>>>>>>> 0f4c1d3eb1b74c76e928656fce8e5256dea49b78
 
 Rinne is a CLI harness you talk to directly. You tell it what you want done; it plans the work into a graph, distributes that work across the AI coding tools and model APIs already on your machine, and drives it to completion through a verifying generator–evaluator loop. You never open Claude Code, Codex, Grok, or OpenCode yourself — you live in Rinne, and it reaches down to those tools as workers.
 
@@ -221,6 +225,25 @@ After setting one, `rinne config` shows `Conductor … key present (keychain)` a
 Rinne stores its working state under `.rinne/` in the project directory (plans, progress, logs).
 
 ## Install & build
+
+### Prebuilt binary (recommended)
+
+Download the archive for your platform from the
+[latest release](https://github.com/GIKSN-RESEARCH/Rinne/releases/latest),
+unpack it, and put `rinne` on your `PATH`:
+
+```bash
+# macOS (Apple Silicon) example — adjust the asset name for your platform
+curl -L -o rinne.tar.gz \
+  https://github.com/GIKSN-RESEARCH/Rinne/releases/latest/download/rinne-aarch64-apple-darwin.tar.gz
+tar -xzf rinne.tar.gz
+sudo mv rinne-aarch64-apple-darwin/rinne /usr/local/bin/
+```
+
+Each release publishes archives for macOS (arm64 + x86_64), Linux (x86_64), and
+Windows (x86_64), each with a `.sha256` checksum.
+
+### Build from source
 
 ```bash
 # from the repository root
@@ -605,6 +628,40 @@ rinne -vv -p "..."     # verbose logs to .rinne/ for debugging
 ```
 
 The architecture has a deliberate constraint worth knowing: SQLite connections are `!Sync`, so the TUI runs the engine on a dedicated thread with a current-thread runtime, and intra-run parallelism is achieved by joining concurrent futures on that thread rather than spawning across threads.
+
+### Cutting a release (maintainers)
+
+Releases are **tag-triggered**: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the `rinne` binary for macOS (arm64 + x86_64), Linux (x86_64), and Windows (x86_64), then publishes a GitHub Release with the archives, `.sha256` checksums, and **auto-generated, categorized notes** (see `.github/release.yml`).
+
+```bash
+# 1. Bump the version in the workspace Cargo.toml first (e.g. 0.1.5 → 0.1.6),
+#    in BOTH [workspace.package].version and the internal rinne-* dep versions.
+#    Commit that bump and merge it to main.
+
+# 2. From the up-to-date main:
+git checkout main && git pull
+
+# 3. Tag with `v` + the Cargo.toml version, then push the tag:
+git tag -a v0.1.6 -m "Rinne v0.1.6"
+git push origin v0.1.6        # this fires the release workflow
+```
+
+The tag name **must** match the convention `v<version>` — the workflow only triggers on `v*`, and the tag should equal the `Cargo.toml` version. Pushing the tag requires push access to this repository.
+
+Alternatives:
+
+- **GitHub web UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.1.6` → *Create new tag on publish* → *Publish*.
+- **Manual run (no tag from your machine):** Actions → *release* → *Run workflow* → enter the tag. The workflow's `workflow_dispatch` input handles this.
+
+To redo a botched release, delete the tag and the GitHub Release, then re-tag:
+
+```bash
+git push origin :refs/tags/v0.1.6   # delete the remote tag
+git tag -d v0.1.6                    # delete the local tag
+# fix, re-tag, push again
+```
+
+Release notes are categorized by PR label; the `pr-label` workflow labels each PR from its conventional-commit title (`feat:`, `fix:`, `docs:`, …), so notes populate without manual labeling.
 
 ## Privacy & security
 

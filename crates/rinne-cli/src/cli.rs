@@ -73,10 +73,12 @@ pub enum Command {
         provider: String,
     },
 
-    /// List the models an API provider's key can access (`/v1/models`).
+    /// List models. With a provider, its key's live catalog; with no provider,
+    /// every available worker and its model ladder (like the startup intro).
     Models {
-        /// The configured API provider to query (e.g. `openrouter`).
-        provider: String,
+        /// The configured API provider to query (e.g. `openrouter`). Omit to
+        /// list all available workers and their model ladders.
+        provider: Option<String>,
     },
 
     /// Show the state of the current run (DAG, progress).
