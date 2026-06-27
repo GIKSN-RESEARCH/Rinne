@@ -70,39 +70,43 @@ pub fn intro_lines(intro: &super::IntroState) -> Vec<Line<'static>> {
     intro_render(intro, "·")
 }
 
-/// Render the intro: gradient `rinne` wordmark, tagline, a unified workers table
-/// (status glyph + model ladder per worker), and the conductor line. `spin` is
-/// the spinner frame used for rows still being checked.
+/// Render the intro. With `intro.banner`, the full startup intro (gradient
+/// wordmark + tagline + workers table + prompt hints); otherwise just the
+/// workers table (mid-session `/models`). `spin` is the spinner for checking rows.
 pub fn intro_render(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>> {
-    use super::WorkerAvail;
-    let art = [
-        "  ╦═╗ ╦ ╔╗╔ ╔╗╔ ╔═╗",
-        "  ╠╦╝ ║ ║║║ ║║║ ╠╣ ",
-        "  ╩╚═ ╩ ╝╚╝ ╝╚╝ ╚═╝",
-    ];
+    if !intro.banner {
+        let mut out = vec![Line::default()];
+        out.extend(workers_table_lines(intro, spin));
+        return out;
+    }
     let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::default());
-    for row in art {
-        let chars: Vec<char> = row.chars().collect();
-        let n = chars.len().max(1);
-        let spans: Vec<Span<'static>> = chars
-            .into_iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let color = GRADIENT[(i * GRADIENT.len() / n).min(GRADIENT.len() - 1)];
-                Span::styled(c.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD))
-            })
-            .collect();
-        out.push(Line::from(spans));
-    }
+    out.extend(wordmark_lines());
     out.push(Line::from(Span::styled(
         "  the conductor for your AI coding tools",
         Style::default().fg(Color::DarkGray),
     )));
     out.push(Line::default());
+    out.extend(workers_table_lines(intro, spin));
+    out.push(Line::from(Span::styled(
+        "  › describe what you want done, then press enter",
+        Style::default().fg(Color::White),
+    )));
+    out.push(Line::from(Span::styled(
+        "  @ files · /help · /clear · shift-enter newline · ctrl-q quit",
+        Style::default().fg(Color::DarkGray),
+    )));
+    out.push(Line::default());
+    out
+}
 
-    // Workers table: status glyph · name · model ladder (or a default note).
-    // Sorted so available workers come first, then checking, then not-installed.
+/// The workers table on its own (no wordmark/hints): a header, one styled row
+/// per worker (status glyph · name · model ladder), sorted available-first, and
+/// the conductor line. Used by `/models` (no provider) for a clean standalone
+/// block, and composed into the full startup intro.
+pub fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>> {
+    use super::WorkerAvail;
+    let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::from(Span::styled(
         "  workers",
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -134,23 +138,36 @@ pub fn intro_render(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>>
         ]));
     }
     out.push(Line::default());
-
     out.push(Line::from(vec![
         Span::styled("  conductor  ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
         Span::styled(intro.conductor.clone(), Style::default().fg(Color::Gray)),
     ]));
     out.push(Line::default());
-
-    out.push(Line::from(Span::styled(
-        "  › describe what you want done, then press enter",
-        Style::default().fg(Color::White),
-    )));
-    out.push(Line::from(Span::styled(
-        "  @ files · /help · /clear · shift-enter newline · ctrl-q quit",
-        Style::default().fg(Color::DarkGray),
-    )));
-    out.push(Line::default());
     out
+}
+
+/// The gradient `rinne` block-glyph wordmark (3 rows), colored left→right.
+fn wordmark_lines() -> Vec<Line<'static>> {
+    let art = [
+        "  ╦═╗ ╦ ╔╗╔ ╔╗╔ ╔═╗",
+        "  ╠╦╝ ║ ║║║ ║║║ ╠╣ ",
+        "  ╩╚═ ╩ ╝╚╝ ╝╚╝ ╚═╝",
+    ];
+    art.into_iter()
+        .map(|row| {
+            let chars: Vec<char> = row.chars().collect();
+            let n = chars.len().max(1);
+            let spans: Vec<Span<'static>> = chars
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let color = GRADIENT[(i * GRADIENT.len() / n).min(GRADIENT.len() - 1)];
+                    Span::styled(c.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD))
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// Draw the inline live region: status, in-progress text or picker, and prompt.
@@ -732,6 +749,7 @@ mod tests {
             ],
             conductor: "groq · openai/gpt-oss-120b".into(),
             resolved: true,
+            banner: true,
         };
         let lines = intro_render(&intro, "⠹");
         let text: String = lines
@@ -756,6 +774,30 @@ mod tests {
             .filter_map(|s| s.style.fg)
             .collect();
         assert!(colors.len() >= 3, "expected a multi-color gradient, got {colors:?}");
+    }
+
+    #[test]
+    fn intro_render_table_only_omits_wordmark_and_hints() {
+        use crate::tui::{IntroState, WorkerAvail, WorkerRow};
+        let intro = IntroState {
+            workers: vec![WorkerRow { name: "claude-code".into(), avail: WorkerAvail::Available, ladder: vec!["haiku".into(), "sonnet".into()] }],
+            conductor: "groq · m".into(),
+            resolved: true,
+            banner: false, // /models view: table only
+        };
+        let text: String = intro_render(&intro, "⠹")
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Table content present.
+        assert!(text.contains("workers") && text.contains("claude-code") && text.contains("haiku"), "{text}");
+        assert!(text.contains("conductor"), "{text}");
+        // Chrome absent.
+        assert!(!text.contains("conductor for your AI coding tools"), "tagline leaked: {text}");
+        assert!(!text.contains("describe what you want done"), "prompt hint leaked: {text}");
+        assert!(!text.contains('╦'), "wordmark leaked: {text}");
     }
 
     #[test]

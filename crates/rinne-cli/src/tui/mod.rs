@@ -176,6 +176,9 @@ pub struct IntroState {
     pub conductor: String,
     /// True once the background capability probe has reported.
     pub resolved: bool,
+    /// Whether to render the wordmark/tagline/prompt-hint chrome (startup intro)
+    /// or just the workers table (mid-session `/models`).
+    pub banner: bool,
 }
 
 /// Messages delivered to the app loop from background runs.
@@ -277,8 +280,10 @@ impl App {
     }
 
     /// Build the live intro table from config (all enabled harnesses, status
-    /// Checking). Rendered in the viewport until the first submit.
-    fn set_intro(&mut self, config: &rinne_config::Config) {
+    /// Checking). Rendered in the viewport until the first submit. `banner`
+    /// controls whether the wordmark/hints chrome is shown (startup) or just the
+    /// workers table (mid-session `/models`).
+    fn set_intro(&mut self, config: &rinne_config::Config, banner: bool) {
         let workers = config
             .backends
             .harness
@@ -295,6 +300,7 @@ impl App {
             conductor: format!("{:?} · {}", config.conductor.backend, config.conductor.model)
                 .to_lowercase(),
             resolved: false,
+            banner,
         });
     }
 
@@ -970,27 +976,31 @@ impl App {
         });
     }
 
-    /// No-arg `/models`: re-show the live workers table (re-armed and resolved by
-    /// a fresh probe) AND print a durable text overview to scrollback.
+    /// No-arg `/models`: re-show the live workers table (table only, no banner),
+    /// re-armed and resolved by a fresh probe, then committed to scrollback on
+    /// the next submit — the same mechanism as the startup intro.
     fn list_models_all(&mut self) {
-        if let Ok(config) = rinne_config::load_cwd() {
-            // Re-arm the live intro table (re-runs the checking→resolved animation).
-            if !self.running {
-                self.set_intro(&config);
-            }
-            let probe_tx = self.tx.clone();
+        let Ok(config) = rinne_config::load_cwd() else {
+            self.push(FeedKind::NodeFail, "could not load config");
+            return;
+        };
+        if self.running {
+            // A run owns the live region; fall back to a one-shot text overview.
+            let tx = self.tx.clone();
             tokio::spawn(async move {
-                if let Ok((registry, names)) = runner::build_registry(&config).await {
-                    let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
-                    let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
-                }
+                let text = crate::commands::models::overview_lines().await.join("\n");
+                let _ = tx.send(AppMsg::Note(text));
             });
+            return;
         }
-        // Durable text record of the same data.
-        let tx = self.tx.clone();
+        // Re-arm the live workers table (table only) and probe to resolve it.
+        self.set_intro(&config, false);
+        let probe_tx = self.tx.clone();
         tokio::spawn(async move {
-            let text = crate::commands::models::overview_lines().await.join("\n");
-            let _ = tx.send(AppMsg::Note(text));
+            if let Ok((registry, names)) = runner::build_registry(&config).await {
+                let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
+                let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
+            }
         });
     }
 
@@ -1351,7 +1361,7 @@ pub async fn run() -> Result<()> {
     // Populate the live intro table from config (instant), and kick off the
     // background registry build that resolves availability + model ladders.
     if let Ok(config) = rinne_config::load_cwd() {
-        app.set_intro(&config);
+        app.set_intro(&config, true);
         let probe_tx = tx_for_probe.clone();
         tokio::spawn(async move {
             if let Ok((registry, names)) = runner::build_registry(&config).await {
@@ -1867,7 +1877,7 @@ mod tests {
         let mut cfg = rinne_config::Config::default();
         cfg.backends.harness.enabled = vec!["claude-code".into(), "codex".into(), "grok".into()];
         let mut app = app_for(&temp_dir("intro"));
-        app.set_intro(&cfg);
+        app.set_intro(&cfg, true);
 
         // Before the probe: all rows are Checking.
         let intro = app.intro.as_ref().unwrap();
