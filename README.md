@@ -2,11 +2,19 @@
 
 **Local, open-source, terminal-first AI orchestration.**
 
-<<<<<<< HEAD
-### Crates Version - 0.1.5
-=======
 ### Crates Version - 0.1.6
->>>>>>> 0f4c1d3eb1b74c76e928656fce8e5256dea49b78
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GIKSN-RESEARCH/Rinne/main/install.sh | sh
+```
+
+Downloads the prebuilt `rinne` binary for your platform, verifies its checksum,
+and installs it to `~/.local/bin`. Re-run the same command to upgrade. On
+Windows, or to build from source, see [Install & build](#install--build).
+
+---
 
 Rinne is a CLI harness you talk to directly. You tell it what you want done; it plans the work into a graph, distributes that work across the AI coding tools and model APIs already on your machine, and drives it to completion through a verifying generator–evaluator loop. You never open Claude Code, Codex, Grok, or OpenCode yourself — you live in Rinne, and it reaches down to those tools as workers.
 
@@ -57,7 +65,7 @@ These are locked.
 
 - **Local only.** Runs on your machine. No hosted component, ever.
 - **Open source.** No pricing, no tiers, no accounts.
-- **No telemetry, no data fetching.** The only network calls are the worker calls and the conductor backend you configured.
+- **No telemetry, no data fetching.** The only network calls are the worker calls and the conductor backend you configured — plus an optional, cached check of GitHub Releases for a new version, which sends nothing about you and can be disabled (`RINNE_NO_UPDATE_CHECK=1` or `[update] check = false`).
 - **Rinne holds no credentials in plaintext.** Each worker is installed and logged in by you the normal way. API keys are stored in your OS keychain (an approved, encrypted deviation) — never written to config files.
 - **Terminal-first.** No app, no web UI. A CLI that controls other CLIs.
 - **Routing is always narrated, never hidden.** Every routing decision is explained in the transcript.
@@ -226,7 +234,24 @@ Rinne stores its working state under `.rinne/` in the project directory (plans, 
 
 ## Install & build
 
-### Prebuilt binary (recommended)
+### Install script (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GIKSN-RESEARCH/Rinne/main/install.sh | sh
+```
+
+Detects your OS/arch, downloads the matching prebuilt binary from the latest
+release, verifies its `.sha256`, and installs `rinne` to `~/.local/bin`. Re-run
+to upgrade. Overrides via env var:
+
+- `RINNE_INSTALL_DIR` — install location (default `~/.local/bin`)
+- `RINNE_VERSION` — pin a specific tag, e.g. `v0.1.6` (default: latest)
+
+Windows is not covered by the script — use the prebuilt `.zip` below or build
+from source. Linux arm64 has no prebuilt binary yet; build from source or
+`cargo install rinne`.
+
+### Prebuilt binary (manual)
 
 Download the archive for your platform from the
 [latest release](https://github.com/GIKSN-RESEARCH/Rinne/releases/latest),
@@ -549,6 +574,10 @@ prefer = "harness"              # harness | api | balanced — family routing or
 # [models]                      # default model per worker
 # claude-code = "sonnet"
 
+[update]
+check = true                    # check GitHub Releases for a newer version on
+                                # startup (cached 24h); RINNE_NO_UPDATE_CHECK=1 also disables
+
 [backends.harness]
 enabled = ["claude-code", "codex", "opencode", "grok", "cursor-agent", "aider", "antigravity"]
 
@@ -665,7 +694,8 @@ Release notes are categorized by PR label; the `pr-label` workflow labels each P
 
 ## Privacy & security
 
-- No hosted component, no telemetry, no analytics, no auto-update. The only outbound network calls are to the workers and the conductor backend **you** configured.
+- No hosted component, no telemetry, no analytics. Rinne never updates itself. The only outbound network calls are to the workers and the conductor backend **you** configured, plus an optional new-release check (below).
+- **New-release check.** On startup Rinne asks the public GitHub Releases API for the latest version tag (cached for 24h, 3s timeout) and prints an "update available" banner if you're behind. It sends no identifying data, only runs in an interactive terminal, and is skipped in `--json`/headless modes. Disable it with `RINNE_NO_UPDATE_CHECK=1` or `[update] check = false` in config. Notification only — Rinne never downloads or installs anything on its own.
 - All state is local under `.rinne/`. The config file is safe to commit or share — it contains no secrets.
 - Keys live in the OS keychain (encrypted) or environment variables you control. `/forget <provider>` removes a stored key.
 - Transcript secrets (API keys passed to `connect`, tokens passed via `--key`) are redacted in the on-screen feed.
