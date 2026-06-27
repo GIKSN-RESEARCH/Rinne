@@ -625,6 +625,40 @@ rinne -vv -p "..."     # verbose logs to .rinne/ for debugging
 
 The architecture has a deliberate constraint worth knowing: SQLite connections are `!Sync`, so the TUI runs the engine on a dedicated thread with a current-thread runtime, and intra-run parallelism is achieved by joining concurrent futures on that thread rather than spawning across threads.
 
+### Cutting a release (maintainers)
+
+Releases are **tag-triggered**: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the `rinne` binary for macOS (arm64 + x86_64), Linux (x86_64), and Windows (x86_64), then publishes a GitHub Release with the archives, `.sha256` checksums, and **auto-generated, categorized notes** (see `.github/release.yml`).
+
+```bash
+# 1. Bump the version in the workspace Cargo.toml first (e.g. 0.1.5 → 0.1.6),
+#    in BOTH [workspace.package].version and the internal rinne-* dep versions.
+#    Commit that bump and merge it to main.
+
+# 2. From the up-to-date main:
+git checkout main && git pull
+
+# 3. Tag with `v` + the Cargo.toml version, then push the tag:
+git tag -a v0.1.6 -m "Rinne v0.1.6"
+git push origin v0.1.6        # this fires the release workflow
+```
+
+The tag name **must** match the convention `v<version>` — the workflow only triggers on `v*`, and the tag should equal the `Cargo.toml` version. Pushing the tag requires push access to this repository.
+
+Alternatives:
+
+- **GitHub web UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.1.6` → *Create new tag on publish* → *Publish*.
+- **Manual run (no tag from your machine):** Actions → *release* → *Run workflow* → enter the tag. The workflow's `workflow_dispatch` input handles this.
+
+To redo a botched release, delete the tag and the GitHub Release, then re-tag:
+
+```bash
+git push origin :refs/tags/v0.1.6   # delete the remote tag
+git tag -d v0.1.6                    # delete the local tag
+# fix, re-tag, push again
+```
+
+Release notes are categorized by PR label; the `pr-label` workflow labels each PR from its conventional-commit title (`feat:`, `fix:`, `docs:`, …), so notes populate without manual labeling.
+
 ## Privacy & security
 
 - No hosted component, no telemetry, no analytics, no auto-update. The only outbound network calls are to the workers and the conductor backend **you** configured.
