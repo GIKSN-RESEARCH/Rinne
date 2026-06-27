@@ -63,13 +63,18 @@ pub fn flush_lines(
 /// The five identity colors, reused for the wordmark gradient.
 const GRADIENT: [Color; 5] = [Color::Cyan, Color::Magenta, Color::Blue, Color::Green, Color::Cyan];
 
-/// The startup intro: a gradient `rinne` wordmark, a tagline, and a live
-/// capability dashboard (configured harnesses + conductor/API models) built from
-/// the loaded config. Honest about state: it lists what's *configured*; a
-/// background probe later appends which are actually available.
-pub fn intro_lines(cfg: &rinne_config::Config) -> Vec<Line<'static>> {
-    // Block-glyph wordmark; each row colored left→right with the gradient so the
-    // letters fade across the palette.
+/// The startup intro for scrollback: the gradient wordmark + a resolved workers
+/// table. Used when committing the dismissed intro; the spinner is irrelevant by
+/// then, so a static glyph is used for any still-checking row.
+pub fn intro_lines(intro: &super::IntroState) -> Vec<Line<'static>> {
+    intro_render(intro, "·")
+}
+
+/// Render the intro: gradient `rinne` wordmark, tagline, a unified workers table
+/// (status glyph + model ladder per worker), and the conductor line. `spin` is
+/// the spinner frame used for rows still being checked.
+pub fn intro_render(intro: &super::IntroState, spin: &str) -> Vec<Line<'static>> {
+    use super::WorkerAvail;
     let art = [
         "  ╦═╗ ╦ ╔╗╔ ╔╗╔ ╔═╗",
         "  ╠╦╝ ║ ║║║ ║║║ ╠╣ ",
@@ -96,40 +101,44 @@ pub fn intro_lines(cfg: &rinne_config::Config) -> Vec<Line<'static>> {
     )));
     out.push(Line::default());
 
-    // Harnesses row (configured / enabled). Each harness's full model ladder is
-    // resolved asynchronously and appended by the background capabilities block,
-    // so the instant intro lists names only.
-    let h_value = if cfg.backends.harness.enabled.is_empty() {
-        "(none — /connect to add one)".to_string()
-    } else {
-        cfg.backends.harness.enabled.join(" · ")
-    };
-    out.push(Line::from(vec![
-        Span::styled("  harnesses  ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(h_value, Style::default().fg(Color::Gray)),
-    ]));
-
-    // Models block: a header row with the conductor model, then one row per
-    // configured API provider listing its full ladder (cheap→strong). The
-    // provider's `models` ladder is preferred; otherwise its single `model`.
-    out.push(Line::from(vec![
-        Span::styled("  models     ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("conductor: {}", cfg.conductor.model), Style::default().fg(Color::Gray)),
-    ]));
-    for (name, p) in &cfg.backends.api.providers {
-        let ladder = if !p.models.is_empty() {
-            p.models.join(" · ")
-        } else if let Some(m) = &p.model {
-            m.clone()
-        } else {
-            "(no model configured)".to_string()
+    // Workers table: status glyph · name · model ladder (or a default note).
+    // Sorted so available workers come first, then checking, then not-installed.
+    out.push(Line::from(Span::styled(
+        "  workers",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    let mut rows: Vec<&super::WorkerRow> = intro.workers.iter().collect();
+    rows.sort_by_key(|w| match w.avail {
+        WorkerAvail::Available => 0,
+        WorkerAvail::Checking => 1,
+        WorkerAvail::NotInstalled => 2,
+    });
+    for w in rows {
+        let (glyph, gcolor) = match w.avail {
+            WorkerAvail::Available => ("✔".to_string(), Color::Green),
+            WorkerAvail::Checking => (spin.to_string(), Color::Cyan),
+            WorkerAvail::NotInstalled => ("·".to_string(), Color::DarkGray),
         };
+        let name_color = if w.avail == WorkerAvail::NotInstalled { Color::DarkGray } else { Color::White };
+        let detail = match w.avail {
+            WorkerAvail::NotInstalled => "not installed".to_string(),
+            WorkerAvail::Checking => "checking…".to_string(),
+            WorkerAvail::Available if w.ladder.len() > 1 => w.ladder.join(" · "),
+            WorkerAvail::Available => "default model".to_string(),
+        };
+        let detail_color = if w.avail == WorkerAvail::Available { Color::Gray } else { Color::DarkGray };
         out.push(Line::from(vec![
-            Span::raw("             "),
-            Span::styled(format!("{name:<10} "), Style::default().fg(Color::Magenta)),
-            Span::styled(ladder, Style::default().fg(Color::Gray)),
+            Span::styled(format!("  {glyph} "), Style::default().fg(gcolor)),
+            Span::styled(format!("{:<14}", w.name), Style::default().fg(name_color)),
+            Span::styled(detail, Style::default().fg(detail_color)),
         ]));
     }
+    out.push(Line::default());
+
+    out.push(Line::from(vec![
+        Span::styled("  conductor  ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(intro.conductor.clone(), Style::default().fg(Color::Gray)),
+    ]));
     out.push(Line::default());
 
     out.push(Line::from(Span::styled(
@@ -203,6 +212,19 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
+    }
+    // The live startup intro takes the whole live region until the first submit.
+    if app.picker.is_none() && app.completion.is_none() && !app.running {
+        if let Some(intro) = &app.intro {
+            let spin = SPINNER[app.spinner % SPINNER.len()];
+            let lines = intro_render(intro, spin);
+            // Bottom-align within the region so the dashboard sits just above the
+            // prompt rather than floating at the top of a tall viewport.
+            let h = (lines.len() as u16).min(area.height);
+            let slot = bottom_slice(area, h);
+            f.render_widget(Paragraph::new(lines), slot);
+            return;
+        }
     }
     if app.picker.is_none() && app.completion.is_none() && app.running && !app.nodes.is_empty() {
         let spin = SPINNER[app.spinner % SPINNER.len()];
@@ -700,20 +722,18 @@ mod tests {
     use crate::tui::{FeedEntry, FeedKind};
 
     #[test]
-    fn intro_lines_show_wordmark_and_dashboard() {
-        let mut cfg = rinne_config::Config::default();
-        // A provider with a full ladder should list every model, one row.
-        cfg.backends.api.providers.insert(
-            "openai".to_string(),
-            rinne_config::model::ApiProvider {
-                key_env: "OPENAI_API_KEY".into(),
-                base_url: None,
-                model: Some("gpt-5-mini".into()),
-                models: vec!["gpt-5-mini".into(), "gpt-5".into(), "gpt-5-codex".into()],
-                extra_body: None,
-            },
-        );
-        let lines = intro_lines(&cfg);
+    fn intro_render_shows_wordmark_and_workers_table() {
+        use crate::tui::{IntroState, WorkerAvail, WorkerRow};
+        let intro = IntroState {
+            workers: vec![
+                WorkerRow { name: "claude-code".into(), avail: WorkerAvail::Available, ladder: vec!["haiku".into(), "sonnet".into(), "opus".into()] },
+                WorkerRow { name: "codex".into(), avail: WorkerAvail::Available, ladder: vec![] },
+                WorkerRow { name: "grok".into(), avail: WorkerAvail::NotInstalled, ladder: vec![] },
+            ],
+            conductor: "groq · openai/gpt-oss-120b".into(),
+            resolved: true,
+        };
+        let lines = intro_render(&intro, "⠹");
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -721,13 +741,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("conductor for your AI coding tools"), "tagline missing");
-        assert!(text.contains("harnesses"), "harnesses row missing");
-        assert!(text.contains("models"), "models row missing");
-        // Default config enables claude-code; it should be listed.
-        assert!(text.contains("claude-code"), "configured harness missing: {text}");
-        // The provider's full ladder is shown, not just the default.
-        assert!(text.contains("openai"), "provider missing: {text}");
-        assert!(text.contains("gpt-5") && text.contains("gpt-5-codex"), "model ladder missing: {text}");
+        assert!(text.contains("workers"), "workers header missing");
+        // Available harness with a ladder shows its full ladder.
+        assert!(text.contains("claude-code") && text.contains("haiku") && text.contains("opus"), "ladder missing: {text}");
+        // Available harness without a ladder shows the default-model note.
+        assert!(text.contains("codex") && text.contains("default model"), "codex row missing: {text}");
+        // Not-installed harness is shown as such, not hidden.
+        assert!(text.contains("grok") && text.contains("not installed"), "grok row missing: {text}");
+        assert!(text.contains("conductor"), "conductor line missing");
         // The wordmark rows use the gradient: more than one fg color appears.
         let colors: std::collections::HashSet<_> = lines
             .iter()

@@ -83,29 +83,6 @@ fn viewport_height_for(rows: u16) -> u16 {
     preferred.min(rows.saturating_sub(1)).max(1)
 }
 
-/// A capabilities block appended after the intro once the background registry
-/// build finishes: every worker that is actually usable now, one per line, each
-/// with its model ladder when the adapter declares one (cheap→strong) or a
-/// "uses its own default" note otherwise — so every available worker is visible,
-/// not just the ones with an explicit ladder. `names` are the registered
-/// (available) worker names in preference order; `ladders` maps a worker name to
-/// its model ladder.
-fn capabilities_block(names: &[String], ladders: &std::collections::HashMap<String, Vec<String>>) -> String {
-    if names.is_empty() {
-        return "no workers available yet — run `rinne doctor` or /connect to set one up".to_string();
-    }
-    let mut s = String::from("✔ available workers");
-    for name in names {
-        match ladders.get(name) {
-            Some(ladder) if ladder.len() > 1 => {
-                s.push_str(&format!("\n  {name}: {}", ladder.join(" · ")));
-            }
-            _ => s.push_str(&format!("\n  {name}: uses its own default model")),
-        }
-    }
-    s
-}
-
 /// Map a worker action event to a friendly, verb-first label (Claude-Code
 /// style). Returns `None` for non-action events. Adapter payloads already carry
 /// human text; this only normalises the leading verb and strips redundant
@@ -173,6 +150,34 @@ pub struct FeedEntry {
     pub node: Option<String>,
 }
 
+/// Availability of a worker in the intro table.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum WorkerAvail {
+    Checking,
+    Available,
+    NotInstalled,
+}
+
+/// One row in the intro workers table.
+#[derive(Clone)]
+pub struct WorkerRow {
+    pub name: String,
+    pub avail: WorkerAvail,
+    /// Model ladder (cheap→strong) if the adapter declares one; else empty.
+    pub ladder: Vec<String>,
+}
+
+/// The startup intro shown live in the viewport until the first submit, then
+/// committed to scrollback. Its worker rows fill in `✔`/`·` as a background
+/// probe resolves availability.
+#[derive(Clone)]
+pub struct IntroState {
+    pub workers: Vec<WorkerRow>,
+    pub conductor: String,
+    /// True once the background capability probe has reported.
+    pub resolved: bool,
+}
+
 /// Messages delivered to the app loop from background runs.
 pub enum AppMsg {
     Engine(EngineEvent),
@@ -182,6 +187,11 @@ pub enum AppMsg {
     Reindex,
     /// A block of informational lines (e.g. `/workers`, `/connect` output).
     Note(String),
+    /// Background probe result: available worker names + per-worker ladders.
+    Capabilities {
+        available: Vec<String>,
+        ladders: std::collections::HashMap<String, Vec<String>>,
+    },
 }
 
 /// The TUI application state.
@@ -200,6 +210,12 @@ pub struct App {
     /// Recent friendly actions per node (newest last), shown under the agent's
     /// heading in the live view. Capped at `ACTIONS_PER_AGENT`.
     live_actions: std::collections::HashMap<String, Vec<String>>,
+    /// The startup intro table, shown live in the viewport until the first
+    /// submit (then committed to scrollback). `None` once dismissed.
+    intro: Option<IntroState>,
+    /// Styled intro lines staged for the event loop to flush into scrollback
+    /// (set by `commit_intro`; the gradient can't go through the text feed).
+    pending_intro: Option<Vec<ratatui::text::Line<'static>>>,
     input: String,
     /// Cursor position in `input` as a byte index (always on a char boundary).
     cursor: usize,
@@ -236,6 +252,8 @@ impl App {
             live_thinking: String::new(),
             live_node: None,
             live_actions: std::collections::HashMap::new(),
+            intro: None,
+            pending_intro: None,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -254,9 +272,62 @@ impl App {
             cancel: None,
             tx,
         }
-        // The styled intro banner is rendered once in `run()` before the event
-        // loop (it needs per-letter gradient styling that the text feed can't
-        // carry); see `ui::intro_lines`.
+        // `set_intro` is called from `run()` with the loaded config to populate
+        // the live intro table; the background probe then resolves availability.
+    }
+
+    /// Build the live intro table from config (all enabled harnesses, status
+    /// Checking). Rendered in the viewport until the first submit.
+    fn set_intro(&mut self, config: &rinne_config::Config) {
+        let workers = config
+            .backends
+            .harness
+            .enabled
+            .iter()
+            .map(|name| WorkerRow {
+                name: name.clone(),
+                avail: WorkerAvail::Checking,
+                ladder: Vec::new(),
+            })
+            .collect();
+        self.intro = Some(IntroState {
+            workers,
+            conductor: format!("{:?} · {}", config.conductor.backend, config.conductor.model)
+                .to_lowercase(),
+            resolved: false,
+        });
+    }
+
+    /// Fold a background capability probe into the intro table: mark each worker
+    /// available/not-installed and fill its model ladder.
+    fn apply_capabilities(
+        &mut self,
+        available: &[String],
+        ladders: &std::collections::HashMap<String, Vec<String>>,
+    ) {
+        if let Some(intro) = &mut self.intro {
+            for row in &mut intro.workers {
+                row.avail = if available.contains(&row.name) {
+                    WorkerAvail::Available
+                } else {
+                    WorkerAvail::NotInstalled
+                };
+                if let Some(l) = ladders.get(&row.name) {
+                    row.ladder = l.clone();
+                }
+            }
+            intro.resolved = true;
+        }
+    }
+
+    /// Commit the intro table to scrollback and dismiss the live version. Called
+    /// on the first submit so the intro scrolls away like any other content. The
+    /// styled lines are stashed for the event loop to flush (they carry the
+    /// gradient wordmark, which the text feed can't express).
+    fn commit_intro(&mut self) {
+        if let Some(intro) = self.intro.take() {
+            self.pending_intro = Some(ui::intro_lines(&intro));
+        }
     }
 
     /// Queue a committed line for scrollback.
@@ -395,6 +466,9 @@ impl App {
             AppMsg::Note(text) => {
                 self.commit_tail();
                 self.push(FeedKind::System, text);
+            }
+            AppMsg::Capabilities { available, ladders } => {
+                self.apply_capabilities(&available, &ladders);
             }
         }
     }
@@ -756,6 +830,10 @@ impl App {
             self.history.push(text.clone());
             self.persist_history(&text);
         }
+        // Commit the live intro table to scrollback before the first echoed
+        // prompt, so it scrolls away naturally with the rest of the transcript.
+        self.commit_intro();
+
         // Echo the input, redacting an API key in a `connect` command so it
         // never lands in the transcript.
         self.push(FeedKind::System, format!("› {}", redact_secret(&text)));
@@ -1245,6 +1323,19 @@ pub async fn run() -> Result<()> {
     // Persist prompt history across sessions under the project blackboard.
     app.attach_history(cwd.join(rinne_core::BLACKBOARD_DIR).join("history"));
 
+    // Populate the live intro table from config (instant), and kick off the
+    // background registry build that resolves availability + model ladders.
+    if let Ok(config) = rinne_config::load_cwd() {
+        app.set_intro(&config);
+        let probe_tx = tx_for_probe.clone();
+        tokio::spawn(async move {
+            if let Ok((registry, names)) = runner::build_registry(&config).await {
+                let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
+                let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
+            }
+        });
+    }
+
     // No alternate screen: the transcript stays in normal scrollback. A small
     // inline viewport at the bottom holds the live region.
     enable_raw_mode()?;
@@ -1271,21 +1362,6 @@ pub async fn run() -> Result<()> {
     let kbd_enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
     if kbd_enhanced {
         let _ = execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-    }
-
-    // Render the styled intro banner into scrollback once, from the loaded
-    // config (instant, synchronous). Then kick off a background task that builds
-    // the worker registry (async) and reports which workers are actually
-    // available plus each available harness's full model ladder.
-    if let Ok(config) = rinne_config::load_cwd() {
-        let _ = ui::flush_lines(&mut terminal, ui::intro_lines(&config));
-        let probe_tx = tx_for_probe.clone();
-        tokio::spawn(async move {
-            if let Ok((registry, names)) = runner::build_registry(&config).await {
-                let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
-                let _ = probe_tx.send(AppMsg::Note(capabilities_block(&names, &ladders)));
-            }
-        });
     }
 
     let result = event_loop(&mut terminal, &mut app, &mut rx).await;
@@ -1318,6 +1394,11 @@ async fn event_loop(
             // it doesn't assume the old buffer is still on screen.
             let _ = execute!(io::stdout(), MoveTo(0, 0), Clear(ClearType::All), Clear(ClearType::Purge));
             let _ = terminal.clear();
+        }
+        // Commit the dismissed intro banner (styled) before other pending lines,
+        // so it lands above the first prompt in scrollback.
+        if let Some(lines) = app.pending_intro.take() {
+            ui::flush_lines(terminal, lines)?;
         }
         ui::flush_pending(terminal, app)?;
         terminal.draw(|f| ui::draw_viewport(f, app))?;
@@ -1756,20 +1837,39 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_block_lists_available_and_ladders() {
+    fn intro_resolves_availability_and_ladders() {
         use std::collections::HashMap;
-        let names = vec!["claude-code".to_string(), "codex".to_string()];
+        let mut cfg = rinne_config::Config::default();
+        cfg.backends.harness.enabled = vec!["claude-code".into(), "codex".into(), "grok".into()];
+        let mut app = app_for(&temp_dir("intro"));
+        app.set_intro(&cfg);
+
+        // Before the probe: all rows are Checking.
+        let intro = app.intro.as_ref().unwrap();
+        assert_eq!(intro.workers.len(), 3);
+        assert!(intro.workers.iter().all(|w| w.avail == WorkerAvail::Checking));
+        assert!(!intro.resolved);
+
+        // Probe: claude-code + codex available (claude-code has a ladder); grok not.
         let mut ladders: HashMap<String, Vec<String>> = HashMap::new();
         ladders.insert("claude-code".into(), vec!["haiku".into(), "sonnet".into(), "opus".into()]);
-        ladders.insert("codex".into(), vec!["gpt-5-codex".into()]); // single → no ladder row
-        let block = super::capabilities_block(&names, &ladders);
-        // Every available worker appears on its own line.
-        assert!(block.contains("claude-code: haiku · sonnet · opus"), "{block}");
-        // A worker without a real ladder still appears, with the default note.
-        assert!(block.contains("codex: uses its own default model"), "{block}");
+        app.apply_capabilities(&["claude-code".to_string(), "codex".to_string()], &ladders);
 
-        let empty = super::capabilities_block(&[], &HashMap::new());
-        assert!(empty.contains("no workers available"), "{empty}");
+        let intro = app.intro.as_ref().unwrap();
+        assert!(intro.resolved);
+        let cc = intro.workers.iter().find(|w| w.name == "claude-code").unwrap();
+        assert_eq!(cc.avail, WorkerAvail::Available);
+        assert_eq!(cc.ladder, vec!["haiku".to_string(), "sonnet".to_string(), "opus".to_string()]);
+        let cx = intro.workers.iter().find(|w| w.name == "codex").unwrap();
+        assert_eq!(cx.avail, WorkerAvail::Available);
+        assert!(cx.ladder.is_empty());
+        let gk = intro.workers.iter().find(|w| w.name == "grok").unwrap();
+        assert_eq!(gk.avail, WorkerAvail::NotInstalled);
+
+        // Commit on submit: intro cleared, styled lines staged for flush.
+        app.commit_intro();
+        assert!(app.intro.is_none());
+        assert!(app.pending_intro.is_some());
     }
 
     #[test]
