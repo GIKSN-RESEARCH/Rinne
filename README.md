@@ -2,7 +2,7 @@
 
 **Local, open-source, terminal-first AI orchestration.**
 
-### Crates Version - 0.1.5
+### Crates Version - 0.1.6
 
 Rinne is a CLI harness you talk to directly. You tell it what you want done; it plans the work into a graph, distributes that work across the AI coding tools and model APIs already on your machine, and drives it to completion through a verifying generator–evaluator loop. You never open Claude Code, Codex, Grok, or OpenCode yourself — you live in Rinne, and it reaches down to those tools as workers.
 
