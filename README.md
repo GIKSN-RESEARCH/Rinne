@@ -2,6 +2,8 @@
 
 **Local, open-source, terminal-first AI orchestration.**
 
+![Rinne driving a cross-harness refactor: the conductor plans a generator→evaluator DAG, claude-code refactors, codex verifies and loops back with a critique until every test is green.](assets/rinne-demo.gif)
+
 ## Crates Version - 0.1.6
 
 ## Install
