@@ -222,6 +222,25 @@ Rinne stores its working state under `.rinne/` in the project directory (plans, 
 
 ## Install & build
 
+### Prebuilt binary (recommended)
+
+Download the archive for your platform from the
+[latest release](https://github.com/GIKSN-RESEARCH/Rinne/releases/latest),
+unpack it, and put `rinne` on your `PATH`:
+
+```bash
+# macOS (Apple Silicon) example — adjust the asset name for your platform
+curl -L -o rinne.tar.gz \
+  https://github.com/GIKSN-RESEARCH/Rinne/releases/latest/download/rinne-aarch64-apple-darwin.tar.gz
+tar -xzf rinne.tar.gz
+sudo mv rinne-aarch64-apple-darwin/rinne /usr/local/bin/
+```
+
+Each release publishes archives for macOS (arm64 + x86_64), Linux (x86_64), and
+Windows (x86_64), each with a `.sha256` checksum.
+
+### Build from source
+
 ```bash
 # from the repository root
 cargo build --release
