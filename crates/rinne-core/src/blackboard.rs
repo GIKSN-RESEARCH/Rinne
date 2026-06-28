@@ -13,14 +13,23 @@
 use std::path::{Path, PathBuf};
 
 use crate::dag::Plan;
+use crate::state::{NodeStatus, State, UsageRow};
+use crate::worker::Usage;
 use crate::{Result, RinneError, BLACKBOARD_DIR};
 
 /// A handle to a run's `.rinne/` blackboard rooted in a repo.
+///
+/// Owns both the file tree and the SQLite [`State`]; the loop engine reads and
+/// writes plan, state, artifacts, and transcripts through this one handle
+/// (`MCP_SKILLS.md` §15 Blackboard seam) and never touches the persistence layer
+/// directly.
 pub struct Blackboard {
     /// The `.rinne/` directory itself.
     root: PathBuf,
     /// The repo / workspace the run operates on (parent of `.rinne/`).
     workspace: PathBuf,
+    /// Machine state (node statuses, iteration counts, budget ledger).
+    state: State,
 }
 
 impl Blackboard {
@@ -30,9 +39,11 @@ impl Blackboard {
         for sub in ["", "context", "artifacts", "transcripts"] {
             std::fs::create_dir_all(root.join(sub))?;
         }
+        let state = State::open(&root.join("state.db"))?;
         Ok(Self {
             root,
             workspace: workspace.to_path_buf(),
+            state,
         })
     }
 
@@ -80,12 +91,55 @@ impl Blackboard {
     /// Reset per-run state so a brand-new goal starts clean: clears the SQLite
     /// state (node statuses, iteration counts, budget ledger, the run clock) and
     /// the progress log. Resume must NOT call this — only a fresh goal does.
+    /// Clears in place (the owned connection stays valid).
     pub fn reset_run(&self) -> Result<()> {
-        for f in ["state.db", "state.db-wal", "state.db-shm"] {
-            let _ = std::fs::remove_file(self.root.join(f));
-        }
+        self.state.reset()?;
         let _ = std::fs::remove_file(self.progress_path());
         Ok(())
+    }
+
+    // ----- machine state (delegated to the owned SQLite `State`) --------------
+    // The engine reaches persistence only through these, so it never names the
+    // concrete `State` type and can live behind the Blackboard seam.
+
+    pub fn ensure_node(&self, node_id: &str) -> Result<()> {
+        self.state.ensure_node(node_id)
+    }
+    pub fn set_status(&self, node_id: &str, status: NodeStatus) -> Result<()> {
+        self.state.set_status(node_id, status)
+    }
+    pub fn set_worker(&self, node_id: &str, worker: &str) -> Result<()> {
+        self.state.set_worker(node_id, worker)
+    }
+    pub fn status(&self, node_id: &str) -> Result<NodeStatus> {
+        self.state.status(node_id)
+    }
+    pub fn worker(&self, node_id: &str) -> Result<Option<String>> {
+        self.state.worker(node_id)
+    }
+    pub fn incr_iteration(&self, node_id: &str) -> Result<u32> {
+        self.state.incr_iteration(node_id)
+    }
+    pub fn iterations(&self, node_id: &str) -> Result<u32> {
+        self.state.iterations(node_id)
+    }
+    pub fn record_usage(&self, node_id: &str, worker: &str, usage: &Usage) -> Result<()> {
+        self.state.record_usage(node_id, worker, usage)
+    }
+    pub fn total_iterations(&self) -> Result<u32> {
+        self.state.total_iterations()
+    }
+    pub fn total_usage(&self) -> Result<Usage> {
+        self.state.total_usage()
+    }
+    pub fn usage_rows(&self) -> Result<Vec<UsageRow>> {
+        self.state.usage_rows()
+    }
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.state.set_meta(key, value)
+    }
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        self.state.meta(key)
     }
 
     /// Path to a named artifact, e.g. `design.md`. A leading `artifacts/` (as
@@ -134,6 +188,82 @@ impl Blackboard {
         writeln!(f, "{line}")?;
         Ok(())
     }
+}
+
+/// Satisfy the `rinne-types` Blackboard seam by delegating to the inherent
+/// methods above. The loop engine talks to `&dyn Blackboard` through this; the
+/// CLI keeps using the concrete inherent methods directly.
+impl rinne_types::Blackboard for Blackboard {
+    fn workspace(&self) -> &Path {
+        Blackboard::workspace(self)
+    }
+    fn progress_path(&self) -> PathBuf {
+        Blackboard::progress_path(self)
+    }
+    fn save_plan(&self, plan: &Plan) -> Result<()> {
+        Blackboard::save_plan(self, plan)
+    }
+    fn write_artifact(&self, name: &str, contents: &str) -> Result<()> {
+        Blackboard::write_artifact(self, name, contents)
+    }
+    fn read_artifact(&self, name: &str) -> Result<String> {
+        Blackboard::read_artifact(self, name)
+    }
+    fn artifact_exists(&self, name: &str) -> bool {
+        Blackboard::artifact_exists(self, name)
+    }
+    fn write_transcript(&self, node_id: &str, contents: &str) -> Result<()> {
+        Blackboard::write_transcript(self, node_id, contents)
+    }
+    fn write_context(&self, node_id: &str, contents: &str) -> Result<()> {
+        Blackboard::write_context(self, node_id, contents)
+    }
+    fn append_progress(&self, line: &str) -> Result<()> {
+        Blackboard::append_progress(self, line)
+    }
+    fn ensure_node(&self, node_id: &str) -> Result<()> {
+        Blackboard::ensure_node(self, node_id)
+    }
+    fn set_status(&self, node_id: &str, status: NodeStatus) -> Result<()> {
+        Blackboard::set_status(self, node_id, status)
+    }
+    fn set_worker(&self, node_id: &str, worker: &str) -> Result<()> {
+        Blackboard::set_worker(self, node_id, worker)
+    }
+    fn status(&self, node_id: &str) -> Result<NodeStatus> {
+        Blackboard::status(self, node_id)
+    }
+    fn incr_iteration(&self, node_id: &str) -> Result<u32> {
+        Blackboard::incr_iteration(self, node_id)
+    }
+    fn iterations(&self, node_id: &str) -> Result<u32> {
+        Blackboard::iterations(self, node_id)
+    }
+    fn record_usage(&self, node_id: &str, worker: &str, usage: &Usage) -> Result<()> {
+        Blackboard::record_usage(self, node_id, worker, usage)
+    }
+    fn total_iterations(&self) -> Result<u32> {
+        Blackboard::total_iterations(self)
+    }
+    fn total_usage(&self) -> Result<Usage> {
+        Blackboard::total_usage(self)
+    }
+    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        Blackboard::set_meta(self, key, value)
+    }
+    fn meta(&self, key: &str) -> Result<Option<String>> {
+        Blackboard::meta(self, key)
+    }
+}
+
+/// Convenience for the binary boundary: a not-found plan maps to a clear error.
+pub fn require_plan(blackboard: &Blackboard) -> Result<Plan> {
+    if !Blackboard::exists(blackboard.workspace()) {
+        return Err(RinneError::Plan(
+            "no plan.json in .rinne/ — nothing to run or resume".into(),
+        ));
+    }
+    blackboard.load_plan()
 }
 
 /// Write a file atomically: write to a sibling temp file, then rename over the
