@@ -7,24 +7,24 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::assembler::ContextAssembler;
-use crate::blackboard::Blackboard;
-use crate::dag::{Acceptance, Checkpoint, EvaluatorKind, Node, OnFail, Plan};
-use crate::evaluator::{self, AI_VERDICT_INSTRUCTION};
+use crate::dag::{Checkpoint, EvaluatorKind, Node, OnFail, Plan};
+use crate::evaluator::{self, AiEvaluator, HumanEvaluator, ToolEvaluator};
 use crate::ratchet;
 use crate::registry::WorkerRegistry;
-use crate::replanner::Replanner;
-use crate::state::{NodeStatus, State};
 use crate::worker::{
     Constraints, EventSink, ExecStatus, ExecuteRequest, Usage, WorkerDescriptor, WorkerEvent,
     WorkerFamily,
 };
-use crate::{Result, RinneError};
+use crate::Result;
+use rinne_types::{Blackboard, EvalContext, Evaluator, Gate, NodeStatus, Replanner};
 
 /// Tunable limits for a run, merged from config and the plan's own budget.
 #[derive(Debug, Clone)]
@@ -133,17 +133,9 @@ struct LoopTracker {
     escalated_models: HashMap<String, String>,
 }
 
-/// The result of grading an evaluator node.
-enum Gate {
-    Pass,
-    Fail { critique: String, policy: OnFail },
-    /// A human evaluator with no input yet — park.
-    Park { question: String },
-}
-
 /// The loop engine over a blackboard, owned plan, and worker registry.
 pub struct Engine<'a> {
-    blackboard: &'a Blackboard,
+    blackboard: &'a dyn Blackboard,
     plan: Plan,
     registry: &'a WorkerRegistry,
     options: EngineOptions,
@@ -152,7 +144,7 @@ pub struct Engine<'a> {
 
 impl<'a> Engine<'a> {
     pub fn new(
-        blackboard: &'a Blackboard,
+        blackboard: &'a dyn Blackboard,
         plan: Plan,
         registry: &'a WorkerRegistry,
         options: EngineOptions,
@@ -179,7 +171,9 @@ impl<'a> Engine<'a> {
         sink: Option<EngineSink>,
         resume: Option<ResumeInput>,
     ) -> Result<RunReport> {
-        let state = State::open(&self.blackboard.state_db_path())?;
+        // The engine reaches persistence only through the blackboard seam (it
+        // never names the concrete `State`), so it can live behind the trait.
+        let state = self.blackboard;
         for node in &self.plan.nodes {
             state.ensure_node(&node.id)?;
         }
@@ -195,8 +189,8 @@ impl<'a> Engine<'a> {
 
         // Apply any resume input to a parked node before scheduling.
         if let Some(input) = resume {
-            if let Some(stop) = self.apply_resume(&state, &mut tracker, input).await? {
-                return self.finish(&state, stop);
+            if let Some(stop) = self.apply_resume(state, &mut tracker, input).await? {
+                return self.finish(state, stop);
             }
         }
 
@@ -222,7 +216,7 @@ impl<'a> Engine<'a> {
                 }
             }
 
-            let ready = self.ready_nodes(&state)?;
+            let ready = self.ready_nodes(state)?;
             if ready.is_empty() {
                 let all_ok = self
                     .plan
@@ -245,7 +239,7 @@ impl<'a> Engine<'a> {
                 .collect();
             if batch.len() >= 2 {
                 if let Some(stop) = self
-                    .run_parallel_evaluators(&batch, &state, &mut tracker, &sink, &cancel)
+                    .run_parallel_evaluators(&batch, state, &mut tracker, &sink, &cancel)
                     .await?
                 {
                     break stop;
@@ -260,7 +254,7 @@ impl<'a> Engine<'a> {
             if node.checkpoint == Some(Checkpoint::Before)
                 && state.meta(&ckpt_key(&node.id))?.is_none()
             {
-                self.park(&state, &sink, &node.id, "checkpoint", &node.id, &format!(
+                self.park(state, &sink, &node.id, "checkpoint", &node.id, &format!(
                     "approve before running {}?",
                     node.id
                 ))?;
@@ -274,26 +268,26 @@ impl<'a> Engine<'a> {
                 node.evaluator.is_some() || matches!(node.role, crate::worker::Role::Evaluator);
 
             if is_evaluator {
-                let gate = self.grade(&node, &state, &sink, &cancel).await?;
-                if let Some(stop) = self.apply_gate(&node, gate, &state, &mut tracker, &sink).await? {
+                let gate = self.grade(&node, state, &sink, &cancel).await?;
+                if let Some(stop) = self.apply_gate(&node, gate, state, &mut tracker, &sink).await? {
                     break stop;
                 }
             } else {
                 // A normal worker node.
-                if let Some(stop) = self.run_worker_node(&node, &state, &mut tracker, &sink, &cancel).await? {
+                if let Some(stop) = self.run_worker_node(&node, state, &mut tracker, &sink, &cancel).await? {
                     break stop;
                 }
             }
         };
 
-        self.finish(&state, stop_reason)
+        self.finish(state, stop_reason)
     }
 
     /// Execute a non-evaluator node by dispatching to a worker.
     async fn run_worker_node(
         &self,
         node: &Node,
-        state: &State,
+        state: &dyn Blackboard,
         tracker: &mut LoopTracker,
         sink: &Option<EngineSink>,
         cancel: &CancellationToken,
@@ -391,11 +385,14 @@ impl<'a> Engine<'a> {
         Ok(None)
     }
 
-    /// Grade an evaluator node: tool, AI, or human.
+    /// Grade an evaluator node by dispatching to the matching `Evaluator` impl
+    /// through the seam. The engine keeps the cross-cutting bits (status,
+    /// iteration count, the test ratchet); the kind-specific grading lives in
+    /// the evaluator strategies (`MCP_SKILLS.md` §15).
     async fn grade(
         &self,
         node: &Node,
-        state: &State,
+        state: &dyn Blackboard,
         sink: &Option<EngineSink>,
         cancel: &CancellationToken,
     ) -> Result<Gate> {
@@ -416,124 +413,13 @@ impl<'a> Engine<'a> {
             }
         }
 
-        match kind {
-            EvaluatorKind::Tool => self.grade_tool(node, sink).await,
-            EvaluatorKind::Ai => self.grade_ai(node, state, sink, cancel).await,
-            EvaluatorKind::Human => {
-                // No resume input reached this node (that path is handled in
-                // `apply_resume`); park for the user.
-                Ok(Gate::Park {
-                    question: node.instruction.clone(),
-                })
-            }
-        }
-    }
-
-    async fn grade_tool(&self, node: &Node, sink: &Option<EngineSink>) -> Result<Gate> {
-        let Some(Acceptance { command, must_exit }) = node.acceptance.clone() else {
-            return Ok(Gate::Fail {
-                critique: "tool evaluator has no acceptance command".into(),
-                policy: node.parsed_on_fail().unwrap_or(OnFail::Replan),
-            });
+        let ctx = GradeCtx { engine: self, sink, cancel };
+        let evaluator: Box<dyn Evaluator> = match kind {
+            EvaluatorKind::Tool => Box::new(ToolEvaluator),
+            EvaluatorKind::Ai => Box::new(AiEvaluator),
+            EvaluatorKind::Human => Box::new(HumanEvaluator),
         };
-        emit_engine(sink, EngineEvent::NodeStarted {
-            id: node.id.clone(),
-            worker: format!("tool:{command}"),
-        });
-        let verdict = evaluator::run_tool(
-            self.blackboard.workspace(),
-            &command,
-            must_exit,
-            Duration::from_secs(300),
-        )
-        .await?;
-        emit_engine(sink, EngineEvent::NodeStream {
-            id: node.id.clone(),
-            event: WorkerEvent::Message(format!(
-                "{} → {}",
-                command,
-                if verdict.passed { "pass" } else { "fail" }
-            )),
-        });
-        if verdict.passed {
-            Ok(Gate::Pass)
-        } else {
-            Ok(Gate::Fail {
-                critique: verdict.output,
-                policy: node.parsed_on_fail().unwrap_or(OnFail::Replan),
-            })
-        }
-    }
-
-    async fn grade_ai(
-        &self,
-        node: &Node,
-        state: &State,
-        sink: &Option<EngineSink>,
-        cancel: &CancellationToken,
-    ) -> Result<Gate> {
-        let Some(worker) = self.registry.resolve(&node.needs, node.prefer.as_deref()) else {
-            return Ok(Gate::Fail {
-                critique: format!("no worker for AI evaluator needs {:?}", node.needs),
-                policy: node.parsed_on_fail().unwrap_or(OnFail::Replan),
-            });
-        };
-        let worker_name = worker.descriptor().name.clone();
-        let family = worker.descriptor().family;
-        state.set_worker(&node.id, &worker_name)?;
-        // Evaluator-independence ladder: a single-family pool can only do
-        // same-family review, which shares blind spots. Be honest about it
-        // (`CONTEXT.md` §7, §11).
-        if self.options.single_family_pool {
-            narrate(
-                sink,
-                "same-family review — independence is limited; a tool check, a human checkpoint, \
-                 or a cheap second-family key would strengthen verification"
-                    .to_string(),
-            );
-        }
-        emit_engine(sink, EngineEvent::NodeStarted {
-            id: node.id.clone(),
-            worker: worker_name.clone(),
-        });
-
-        let assembler = ContextAssembler::new(self.blackboard, &self.plan);
-        let packet = assembler.build(node, family, None)?;
-        let candidate = self.resolve_model(node, &worker_name);
-        let model = self.valid_model_for(candidate, worker.descriptor(), &worker_name, sink);
-        if let Some(m) = &model {
-            narrate(sink, format!("{} on {worker_name}:{m}", node.id));
-        }
-        let request = ExecuteRequest {
-            role: node.role,
-            instruction: format!("{}{}", node.instruction, AI_VERDICT_INSTRUCTION),
-            context: packet,
-            workspace: self.blackboard.workspace().to_path_buf(),
-            constraints: Constraints {
-                model,
-                ..Default::default()
-            },
-        };
-        let result = self.dispatch(worker.as_ref(), &node.id, request, sink, cancel).await?;
-        self.blackboard.write_transcript(&node.id, &result.transcript)?;
-        state.record_usage(&node.id, &worker_name, &result.usage)?;
-
-        // A model can explicitly call for a replan ("wrong approach").
-        if result.result.to_uppercase().contains("VERDICT: REPLAN") {
-            return Ok(Gate::Fail {
-                critique: result.result,
-                policy: OnFail::Replan,
-            });
-        }
-        let verdict = evaluator::parse_ai_verdict(&result.result);
-        if verdict.passed {
-            Ok(Gate::Pass)
-        } else {
-            Ok(Gate::Fail {
-                critique: verdict.output,
-                policy: node.parsed_on_fail().unwrap_or(OnFail::Replan),
-            })
-        }
+        evaluator.grade(node, &ctx).await
     }
 
     /// Apply an evaluator failure: write the critique, check the stuck-detector
@@ -541,7 +427,7 @@ impl<'a> Engine<'a> {
     async fn on_fail(
         &mut self,
         node: &Node,
-        state: &State,
+        state: &dyn Blackboard,
         tracker: &mut LoopTracker,
         sink: &Option<EngineSink>,
         critique: String,
@@ -574,7 +460,7 @@ impl<'a> Engine<'a> {
     async fn loop_back(
         &self,
         node: &Node,
-        state: &State,
+        state: &dyn Blackboard,
         tracker: &mut LoopTracker,
         sink: &Option<EngineSink>,
         target: Option<String>,
@@ -665,7 +551,7 @@ impl<'a> Engine<'a> {
     /// Ask the replanner (the conductor) to amend the DAG (`CONTEXT.md` §12).
     async fn do_replan(
         &mut self,
-        state: &State,
+        state: &dyn Blackboard,
         sink: &Option<EngineSink>,
     ) -> Result<Option<StopReason>> {
         let Some(replanner) = self.replanner.clone() else {
@@ -690,7 +576,7 @@ impl<'a> Engine<'a> {
     /// Apply a resume decision to a parked node before scheduling resumes.
     async fn apply_resume(
         &mut self,
-        state: &State,
+        state: &dyn Blackboard,
         tracker: &mut LoopTracker,
         input: ResumeInput,
     ) -> Result<Option<StopReason>> {
@@ -747,7 +633,7 @@ impl<'a> Engine<'a> {
     /// Park a node for the user, recording how to resume it.
     fn park(
         &self,
-        state: &State,
+        state: &dyn Blackboard,
         sink: &Option<EngineSink>,
         node_id: &str,
         kind: &str,
@@ -786,7 +672,7 @@ impl<'a> Engine<'a> {
 
     /// Reset `target` and all its transitive dependents to Pending so the
     /// affected subtree re-runs after a loop-back.
-    fn reset_subtree(&self, state: &State, target: &str) -> Result<()> {
+    fn reset_subtree(&self, state: &dyn Blackboard, target: &str) -> Result<()> {
         let mut to_reset: HashSet<String> = HashSet::new();
         to_reset.insert(target.to_string());
         // Iteratively pull in anything that depends on something already marked.
@@ -859,7 +745,7 @@ impl<'a> Engine<'a> {
     }
 
     /// A digest of current state for the replanner.
-    fn digest(&self, state: &State) -> Result<String> {
+    fn digest(&self, state: &dyn Blackboard) -> Result<String> {
         let mut s = String::new();
         s.push_str("Node statuses:\n");
         for n in &self.plan.nodes {
@@ -884,7 +770,7 @@ impl<'a> Engine<'a> {
     /// All ready nodes, in plan order. Ready = not yet succeeded/failed/parked
     /// and all dependencies have succeeded. A node left `Running` by an
     /// interrupted run is re-runnable.
-    fn ready_nodes(&self, state: &State) -> Result<Vec<Node>> {
+    fn ready_nodes(&self, state: &dyn Blackboard) -> Result<Vec<Node>> {
         let mut out = Vec::new();
         for node in &self.plan.nodes {
             let status = state.status(&node.id)?;
@@ -922,7 +808,7 @@ impl<'a> Engine<'a> {
     async fn run_parallel_evaluators(
         &mut self,
         batch: &[Node],
-        state: &State,
+        state: &dyn Blackboard,
         tracker: &mut LoopTracker,
         sink: &Option<EngineSink>,
         cancel: &CancellationToken,
@@ -954,7 +840,7 @@ impl<'a> Engine<'a> {
         &mut self,
         node: &Node,
         gate: Gate,
-        state: &State,
+        state: &dyn Blackboard,
         tracker: &mut LoopTracker,
         sink: &Option<EngineSink>,
     ) -> Result<Option<StopReason>> {
@@ -1023,7 +909,7 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    fn finish(&self, state: &State, stop_reason: StopReason) -> Result<RunReport> {
+    fn finish(&self, state: &dyn Blackboard, stop_reason: StopReason) -> Result<RunReport> {
         let node_statuses = self
             .plan
             .nodes
@@ -1078,14 +964,4 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Convenience for the binary boundary: a not-found plan maps to a clear error.
-pub fn require_plan(blackboard: &Blackboard) -> Result<Plan> {
-    if !Blackboard::exists(blackboard.workspace()) {
-        return Err(RinneError::Plan(
-            "no plan.json in .rinne/ — nothing to run or resume".into(),
-        ));
-    }
-    blackboard.load_plan()
 }
