@@ -11,6 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+rinne-types.workspace = true
+rinne-loop.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -20,3 +22,7 @@ tokio-util.workspace = true
 async-trait.workspace = true
 futures-util = "0.3"
 rusqlite.workspace = true
+
+[dev-dependencies]
+rinne-loop.workspace = true
+serde_json.workspace = true
