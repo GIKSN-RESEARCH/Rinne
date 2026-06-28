@@ -333,7 +333,7 @@ pub async fn run_plan_with(
     }
     println!("workers: {}", names.join(", "));
 
-    let plan = rinne_core::engine::require_plan(blackboard)?;
+    let plan = rinne_core::require_plan(blackboard)?;
     println!("goal: {}\n", plan.goal);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
