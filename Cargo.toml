@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/rinne-cli",
     "crates/rinne-core",
+    "crates/rinne-types",
+    "crates/rinne-loop",
     "crates/rinne-conductor",
     "crates/rinne-workers",
     "crates/rinne-config",
@@ -20,7 +22,9 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 # Internal crates — path for local builds, version for crates.io publishing.
+rinne-types = { path = "crates/rinne-types", version = "0.1.6" }
 rinne-core = { path = "crates/rinne-core", version = "0.1.6" }
+rinne-loop = { path = "crates/rinne-loop", version = "0.1.6" }
 rinne-conductor = { path = "crates/rinne-conductor", version = "0.1.6" }
 rinne-workers = { path = "crates/rinne-workers", version = "0.1.6" }
 rinne-config = { path = "crates/rinne-config", version = "0.1.6" }
