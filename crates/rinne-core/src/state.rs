@@ -11,50 +11,9 @@ use rusqlite::Connection;
 use crate::worker::Usage;
 use crate::{Result, RinneError};
 
-/// The lifecycle status of a node (`CONTEXT.md` §12 scheduler).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeStatus {
-    /// Not yet started.
-    Pending,
-    /// Dispatched and running (or interrupted mid-run).
-    Running,
-    /// Completed successfully.
-    Succeeded,
-    /// Ran and failed (terminal for Phase 3; P5 adds loop-back).
-    Failed,
-    /// Parked awaiting a human (checkpoint / stuck escalation — P5).
-    Parked,
-}
-
-impl NodeStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            NodeStatus::Pending => "pending",
-            NodeStatus::Running => "running",
-            NodeStatus::Succeeded => "succeeded",
-            NodeStatus::Failed => "failed",
-            NodeStatus::Parked => "parked",
-        }
-    }
-
-    fn from_str(s: &str) -> NodeStatus {
-        match s {
-            "running" => NodeStatus::Running,
-            "succeeded" => NodeStatus::Succeeded,
-            "failed" => NodeStatus::Failed,
-            "parked" => NodeStatus::Parked,
-            _ => NodeStatus::Pending,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        self.as_str()
-    }
-
-    pub fn is_terminal_success(self) -> bool {
-        matches!(self, NodeStatus::Succeeded)
-    }
-}
+// The node lifecycle status now lives in `rinne-types` (the Blackboard seam);
+// re-export it so existing `rinne_core::state::NodeStatus` paths keep working.
+pub use rinne_types::NodeStatus;
 
 /// One recorded worker invocation, for `rinne logs`.
 #[derive(Debug, Clone)]
@@ -92,6 +51,20 @@ impl State {
         let state = State { conn };
         state.init_schema()?;
         Ok(state)
+    }
+
+    /// Clear all run state in place (node statuses, iterations, ledger, meta),
+    /// keeping the connection and schema. Used by `Blackboard::reset_run` so a
+    /// fresh goal starts clean without deleting the db file out from under an
+    /// open connection.
+    pub fn reset(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "DELETE FROM nodes; DELETE FROM usage_ledger; \
+                 DELETE FROM quota_buckets; DELETE FROM run_meta;",
+            )
+            .map_err(sql_err)?;
+        Ok(())
     }
 
     fn init_schema(&self) -> Result<()> {
