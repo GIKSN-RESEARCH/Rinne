@@ -17,6 +17,12 @@ pub enum RinneError {
     #[error("conductor error: {0}")]
     Conductor(String),
 
+    #[error("mcp error: {0}")]
+    Mcp(String),
+
+    #[error("skill error: {0}")]
+    Skill(String),
+
     #[error("blackboard error: {0}")]
     Blackboard(String),
 
