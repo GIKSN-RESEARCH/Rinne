@@ -9,7 +9,7 @@ use toml_edit::{value, Array, DocumentMut, Item, Table, Value};
 
 use rinne_core::{Result, RinneError};
 
-use crate::model::Config;
+use crate::model::{Config, McpServer, McpTransport};
 use crate::paths;
 
 /// Which config file an edit targets (`CONTEXT.md` §18 layering).
@@ -249,4 +249,96 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+}
+
+/// Write (or overwrite) an `[mcp.servers.<name>]` table at `path`,
+/// format-preserving and validated. Secrets are never written here.
+pub fn write_mcp_server_to(path: &Path, name: &str, server: &McpServer) -> Result<()> {
+    let mut doc = read_doc(path)?;
+
+    let mcp = doc
+        .entry("mcp")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| RinneError::Config("`mcp` is not a table".into()))?;
+    mcp.set_implicit(true);
+    let servers = mcp
+        .entry("servers")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| RinneError::Config("`mcp.servers` is not a table".into()))?;
+    servers.set_implicit(true);
+
+    let mut t = Table::new();
+    t["transport"] = value(match server.transport {
+        McpTransport::Stdio => "stdio",
+        McpTransport::Http => "http",
+    });
+    if let Some(c) = &server.command {
+        t["command"] = value(c);
+    }
+    if !server.args.is_empty() {
+        let mut arr = Array::new();
+        for a in &server.args {
+            arr.push(a.as_str());
+        }
+        t["args"] = value(arr);
+    }
+    if let Some(u) = &server.url {
+        t["url"] = value(u);
+    }
+    if let Some(k) = &server.key_env {
+        t["key_env"] = value(k);
+    }
+    if !server.env.is_empty() {
+        let mut tbl = Table::new();
+        for (k, v) in &server.env {
+            tbl[k] = value(v.as_str());
+        }
+        t["env"] = Item::Table(tbl);
+    }
+    if !server.headers.is_empty() {
+        let mut tbl = Table::new();
+        for (k, v) in &server.headers {
+            tbl[k] = value(v.as_str());
+        }
+        t["headers"] = Item::Table(tbl);
+    }
+    // Only write non-default flags, to keep the table tidy.
+    if !(server.tools_allow.len() == 1 && server.tools_allow[0] == "*") {
+        let mut arr = Array::new();
+        for a in &server.tools_allow {
+            arr.push(a.as_str());
+        }
+        t["tools_allow"] = value(arr);
+    }
+    if server.host_only {
+        t["host_only"] = value(true);
+    }
+    if !server.enabled {
+        t["enabled"] = value(false);
+    }
+
+    servers[name] = Item::Table(t);
+    validate_and_write(path, doc)
+}
+
+/// Remove an `[mcp.servers.<name>]` table from `path`. Returns whether it was
+/// present.
+pub fn remove_mcp_server_from(path: &Path, name: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut doc = read_doc(path)?;
+    let removed = doc
+        .get_mut("mcp")
+        .and_then(|m| m.as_table_mut())
+        .and_then(|m| m.get_mut("servers"))
+        .and_then(|s| s.as_table_mut())
+        .map(|servers| servers.remove(name).is_some())
+        .unwrap_or(false);
+    if removed {
+        validate_and_write(path, doc)?;
+    }
+    Ok(removed)
 }
