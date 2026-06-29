@@ -12,8 +12,9 @@ pub use rinne_types::replanner::Replanner;
 pub use rinne_types::{dag, error, replanner, worker};
 pub use rinne_types::{
     AuthMode, Capability, Constraints, ContextPacket, EventSink, ExecStatus, ExecuteRequest,
-    ExecuteResult, InlinedFile, LatencyProfile, NodeStatus, QuotaModel, Role, Transport, Usage,
-    Worker, WorkerDescriptor, WorkerEvent, WorkerFamily, BLACKBOARD_DIR,
+    ExecuteResult, InlinedFile, LatencyProfile, McpServerSpec, McpTransportKind, NodeStatus,
+    QuotaModel, Role, Skill, ToolExecutor, ToolSpec, Transport, Usage, Worker, WorkerDescriptor,
+    WorkerEvent, WorkerFamily, BLACKBOARD_DIR,
 };
 
 // The loop engine. Re-export so existing `rinne_core::Engine`, `rinne_core::pool`,
