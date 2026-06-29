@@ -91,6 +91,19 @@ pub struct Node {
     /// fits the node; resolved against config defaults at dispatch.
     #[serde(default)]
     pub model: Option<String>,
+    /// MCP tools this node is scoped to use, as `server.tool` ids (e.g.
+    /// `postgres.query`). The host path sends these as function definitions; the
+    /// provision path provisions exactly these into the harness
+    /// (`MCP_SKILLS.md` §7 per-node scoping). Only this node's tools, never the
+    /// global catalog.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Skills attached to this node, by name (e.g. `migration-safety`). The
+    /// skill's `SKILL.md` body is injected for this node only; the conductor
+    /// sees only names + descriptions until then (`MCP_SKILLS.md` §11 progressive
+    /// disclosure).
+    #[serde(default)]
+    pub skills: Vec<String>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Named blackboard artifacts consumed, plus the special `diff`.
