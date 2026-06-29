@@ -39,6 +39,10 @@ pub struct ContextPacket {
     /// (`CONTEXT.md` §10, §11).
     #[serde(default)]
     pub critique: Option<String>,
+    /// Instruction text from any skills attached to this node (`MCP_SKILLS.md`
+    /// §11). Injected verbatim into the worker's prompt, both families.
+    #[serde(default)]
+    pub skill_text: String,
 }
 
 /// A file inlined into an API worker's context.
@@ -46,6 +50,62 @@ pub struct ContextPacket {
 pub struct InlinedFile {
     pub path: PathBuf,
     pub contents: String,
+}
+
+/// An MCP tool offered to a worker for the host agentic loop (`MCP_SKILLS.md`
+/// §6). Carries the full argument schema; the cheap catalog layer the planner
+/// plans over is only id+description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSpec {
+    /// Qualified id `server.tool` — also the function name sent to the model.
+    pub id: String,
+    pub description: String,
+    /// JSON Schema for the tool's arguments (the MCP `inputSchema`).
+    pub schema: serde_json::Value,
+}
+
+/// How an MCP server is reached. Mirrors the config transport but lives here so
+/// the worker adapters need no dependency on `rinne-config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransportKind {
+    Stdio,
+    Http,
+}
+
+/// Everything a harness needs to launch/connect an MCP server itself — the
+/// provision path (`MCP_SKILLS.md` §6). A harness with a node's `mcp_servers`
+/// runs the tools natively rather than Rinne driving the host loop.
+///
+/// The `token` is the resolved secret, held in memory only: a provisioner must
+/// reference it via environment expansion in the config it writes, never inline
+/// it on disk (§9, §12).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    pub name: String,
+    pub transport: McpTransportKind,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Non-secret environment passed to a stdio server.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Non-secret headers for an http server.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// The environment variable the server's token is referenced through (the
+    /// var a stdio server reads, or the one an http `Authorization` header
+    /// expands). `None` when the server needs no token.
+    #[serde(default)]
+    pub token_env: Option<String>,
+    /// The resolved token value. In memory only — never serialized to a config
+    /// file by a provisioner; injected into the harness subprocess environment
+    /// and referenced via `token_env`.
+    #[serde(default, skip_serializing)]
+    pub token: Option<String>,
 }
 
 /// Per-invocation limits and steering (`CONTEXT.md` §10 budgets).
@@ -72,6 +132,15 @@ pub struct ExecuteRequest {
     /// The repository / working directory the worker operates in.
     pub workspace: PathBuf,
     pub constraints: Constraints,
+    /// MCP tools this node may call via the host agentic loop (`MCP_SKILLS.md`
+    /// §6). Empty for nodes that attach none; only API workers act on it. Built
+    /// by the engine from `node.tools` against the run's tool catalog.
+    pub tools: Vec<ToolSpec>,
+    /// MCP servers to provision into a harness so it calls the node's tools
+    /// natively — the provision path (`MCP_SKILLS.md` §6). The harness sibling of
+    /// `tools`: both are filled from `node.tools`; an API worker reads `tools`, a
+    /// harness reads `mcp_servers`.
+    pub mcp_servers: Vec<McpServerSpec>,
 }
 
 /// How an execution ended.
