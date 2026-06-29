@@ -8,6 +8,22 @@ use std::path::PathBuf;
 
 use rinne_core::worker::WorkerDescriptor;
 
+/// An MCP tool surfaced to the planner as a cheap name+description (the full
+/// schema loads only when a node that attaches it runs — `MCP_SKILLS.md` §11).
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    /// Qualified id `server.tool` — what a node puts in its `tools` list.
+    pub id: String,
+    pub description: String,
+}
+
+/// A skill surfaced to the planner as a cheap name+description.
+#[derive(Debug, Clone)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+}
+
 /// Everything the conductor needs to produce or amend a plan.
 #[derive(Debug, Clone, Default)]
 pub struct ConductorInput {
@@ -16,6 +32,10 @@ pub struct ConductorInput {
     pub mentioned: Vec<PathBuf>,
     /// The available workers and their capabilities.
     pub workers: Vec<WorkerDescriptor>,
+    /// MCP tools available to attach to nodes (the cheap catalog layer).
+    pub tools: Vec<ToolInfo>,
+    /// Installed skills available to attach to nodes.
+    pub skills: Vec<SkillInfo>,
     /// A digest of current blackboard state (progress, prior outputs), for
     /// re-planning. Empty on initial planning.
     pub digest: Option<String>,
@@ -98,6 +118,18 @@ API WORKERS vs HARNESSES — this decides what `needs` you may use:
   mentioned files. So "summarize @a.md @b.md with deepseek" → needs ["reasoning","writing"],
   prefer "api:deepseek" — NOT repo-aware.
 
+TOOLS AND SKILLS (only when a catalog is shown below) — extra capabilities you may attach to a
+node, beyond the worker's built-in abilities:
+- TOOLS are MCP tools (live actions: query a database, search the web, call an API). Attach one
+  to a node by listing its exact id in that node's `tools` array. Rinne handles the wiring — an
+  API worker gets an agentic tool loop, a harness gets the tool provisioned. Only attach a tool
+  to a node that actually needs it; most nodes need none.
+- SKILLS are reusable instruction packs (a procedure the worker should follow). Attach one by
+  listing its exact name in that node's `skills` array. Attach a skill only when its description
+  matches what the node does.
+- Attaching a tool/skill does NOT change a node's `needs` — keep `needs` about worker capabilities.
+  Use the EXACT id/name from the catalog; never invent one. If no catalog is shown, omit both.
+
 Assign each node a role, the capability requirements it needs, and an OPTIONAL preferred
 worker. Do NOT hard-bind a worker — the scheduler resolves the concrete worker from live
 availability. Prefer is a soft hint of the form "harness:<name>" or "api:<name>".
@@ -117,6 +149,8 @@ JSON schema:
       "prefer": string (optional, "harness:<name>" or "api:<name>"),
       "model": string (optional, one of the chosen worker's listed models),
       "depends_on": [node_id, ...],
+      "tools": [tool_id, ...] (optional; exact ids from the TOOLS catalog),
+      "skills": [skill_name, ...] (optional; exact names from the SKILLS catalog),
       "inputs": [artifact_name, ...] (optional; named blackboard artifacts),
       "outputs": [artifact_name, ...] (optional; use "diff" for code changes),
       "budget": { "iterations": number } (optional),
@@ -190,6 +224,20 @@ pub fn user_prompt(input: &ConductorInput) -> String {
         }
     }
 
+    if !input.tools.is_empty() {
+        s.push_str("\nAVAILABLE TOOLS (attach by exact id to a node's `tools` when it needs the action):\n");
+        for t in &input.tools {
+            s.push_str(&format!("- {} — {}\n", t.id, one_line(&t.description)));
+        }
+    }
+
+    if !input.skills.is_empty() {
+        s.push_str("\nAVAILABLE SKILLS (attach by exact name to a node's `skills` when it fits the task):\n");
+        for sk in &input.skills {
+            s.push_str(&format!("- {} — {}\n", sk.name, one_line(&sk.description)));
+        }
+    }
+
     s.push_str("\nPREFERENCES:\n");
     if let Some(p) = &input.prefer {
         s.push_str(&format!("- prefer family: {p}\n"));
@@ -205,4 +253,45 @@ pub fn user_prompt(input: &ConductorInput) -> String {
 
     s.push_str("\nReturn the JSON DAG now.");
     s
+}
+
+/// Collapse a (possibly multi-line) description to a single trimmed line so the
+/// catalog stays one entry per line.
+fn one_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalogs_render_only_when_present() {
+        let bare = ConductorInput {
+            goal: "do a thing".into(),
+            ..Default::default()
+        };
+        let out = user_prompt(&bare);
+        assert!(!out.contains("AVAILABLE TOOLS"));
+        assert!(!out.contains("AVAILABLE SKILLS"));
+
+        let with = ConductorInput {
+            goal: "do a thing".into(),
+            tools: vec![ToolInfo {
+                id: "github.search_issues".into(),
+                description: "Search issues\nsecond line ignored".into(),
+            }],
+            skills: vec![SkillInfo {
+                name: "pdf-forms".into(),
+                description: "Fill PDF forms".into(),
+            }],
+            ..Default::default()
+        };
+        let out = user_prompt(&with);
+        assert!(out.contains("AVAILABLE TOOLS"));
+        assert!(out.contains("- github.search_issues — Search issues"));
+        assert!(!out.contains("second line ignored"), "description collapsed to one line");
+        assert!(out.contains("AVAILABLE SKILLS"));
+        assert!(out.contains("- pdf-forms — Fill PDF forms"));
+    }
 }
