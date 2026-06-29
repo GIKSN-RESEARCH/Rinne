@@ -12,6 +12,7 @@ pub mod model;
 pub mod paths;
 pub mod probe;
 pub mod secrets;
+pub mod skills;
 pub mod update;
 pub mod write;
 
