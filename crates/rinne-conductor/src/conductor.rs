@@ -16,6 +16,10 @@ use crate::prompt::{system_prompt, user_prompt, ConductorInput};
 /// through to the next backend (`CONTEXT.md` §21 graceful fallback).
 pub struct Conductor {
     backends: Vec<Box<dyn PlanBackend>>,
+    /// The planning context captured at build time (workers, tools, skills,
+    /// preference, budgets). Reused on replan so an amended plan stays pool- and
+    /// catalog-aware — the engine's `Replanner` hook only hands us goal+digest.
+    context: ConductorInput,
 }
 
 impl Conductor {
@@ -27,7 +31,18 @@ impl Conductor {
                 "no conductor backend available — configure one or install a harness".into(),
             ));
         }
-        Ok(Self { backends })
+        Ok(Self {
+            backends,
+            context: ConductorInput::default(),
+        })
+    }
+
+    /// Capture the planning context (workers, tools, skills, preference, budgets)
+    /// so replans reuse it. The per-call `goal`/`digest`/`mentioned` are still
+    /// supplied per `plan()` call; everything else falls back to this template.
+    pub fn with_context(mut self, context: ConductorInput) -> Self {
+        self.context = context;
+        self
     }
 
     /// Names of the configured backends, primary first (for narration).
@@ -112,12 +127,74 @@ fn finalize(mut plan: Plan) -> Plan {
 #[async_trait]
 impl Replanner for Conductor {
     async fn replan(&self, goal: &str, digest: &str, _current: &Plan) -> Result<Plan> {
+        // Start from the captured planning context (workers, tools, skills,
+        // preference, budgets) so the amendment is as pool-aware as the initial
+        // plan; only the goal and the fresh digest change.
         let input = ConductorInput {
             goal: goal.to_string(),
             digest: Some(digest.to_string()),
-            max_iterations_per_node: 8,
-            ..Default::default()
+            ..self.context.clone()
         };
         Conductor::replan(self, &input).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prompt::{SkillInfo, ToolInfo};
+    use std::sync::{Arc, Mutex};
+
+    /// A backend that records the last user prompt it saw and returns a canned plan.
+    struct RecordingBackend {
+        last_user: Arc<Mutex<String>>,
+    }
+
+    #[async_trait]
+    impl PlanBackend for RecordingBackend {
+        fn name(&self) -> &str {
+            "recording"
+        }
+        async fn complete(&self, _system: &str, user: &str) -> Result<String> {
+            *self.last_user.lock().unwrap() = user.to_string();
+            Ok(r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#
+                .to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn replan_reuses_captured_catalog() {
+        let recorded = Arc::new(Mutex::new(String::new()));
+        let backend = Box::new(RecordingBackend {
+            last_user: recorded.clone(),
+        });
+        let context = ConductorInput {
+            tools: vec![ToolInfo {
+                id: "github.search_issues".into(),
+                description: "Search issues".into(),
+            }],
+            skills: vec![SkillInfo {
+                name: "pdf-forms".into(),
+                description: "Fill PDF forms".into(),
+            }],
+            ..Default::default()
+        };
+        let conductor = Conductor::new(vec![backend]).unwrap().with_context(context);
+
+        // Drive the engine-facing replan hook, which only hands over goal + digest.
+        let current = parse_plan(
+            r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#,
+        )
+        .unwrap();
+        let plan = Replanner::replan(&conductor, "amend it", "node n1 failed", &current)
+            .await
+            .unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+
+        // The captured catalog must have reached the prompt regardless.
+        let prompt = recorded.lock().unwrap().clone();
+        assert!(prompt.contains("github.search_issues"), "tool catalog flowed into replan");
+        assert!(prompt.contains("pdf-forms"), "skill catalog flowed into replan");
+        assert!(prompt.contains("node n1 failed"), "digest flowed into replan");
     }
 }
