@@ -17,4 +17,4 @@ pub use backend::{
 };
 pub use conductor::Conductor;
 pub use parse::parse_plan;
-pub use prompt::ConductorInput;
+pub use prompt::{ConductorInput, SkillInfo, ToolInfo};
