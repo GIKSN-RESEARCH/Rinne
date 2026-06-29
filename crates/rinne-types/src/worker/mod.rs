@@ -14,8 +14,8 @@ pub use descriptor::{
 };
 pub use event::{emit, EventSink, WorkerEvent};
 pub use exec::{
-    Constraints, ContextPacket, ExecStatus, ExecuteRequest, ExecuteResult, InlinedFile, Role,
-    Usage,
+    Constraints, ContextPacket, ExecStatus, ExecuteRequest, ExecuteResult, InlinedFile,
+    McpServerSpec, McpTransportKind, Role, ToolSpec, Usage,
 };
 
 use async_trait::async_trait;
@@ -44,4 +44,26 @@ pub trait Worker: Send + Sync {
         events: EventSink,
         cancel: CancellationToken,
     ) -> Result<ExecuteResult>;
+
+    /// Whether this worker can actually run a node's attached MCP tools
+    /// (`MCP_SKILLS.md` §6): an API worker with the host agentic loop wired, or a
+    /// harness that can provision MCP servers into itself. The scheduler uses
+    /// this to keep a tool node off a worker that would silently drop its tools.
+    /// Default `false` — a worker opts in by overriding.
+    fn serves_mcp_tools(&self) -> bool {
+        false
+    }
+}
+
+/// Executes an MCP tool call on behalf of the host agentic loop (`MCP_SKILLS.md`
+/// §6). The trait seam keeps the worker adapters MCP-agnostic: an API worker
+/// holds a `dyn ToolExecutor` and calls it when the model emits a tool call; the
+/// concrete implementation (over a warm MCP connection pool) lives in the wiring
+/// layer.
+#[async_trait]
+pub trait ToolExecutor: Send + Sync {
+    /// Invoke a tool by its qualified id (`server.tool`) with JSON `arguments`,
+    /// returning the result rendered as text for the model to read. An error is
+    /// returned as a string the loop feeds back so the model can recover.
+    async fn call(&self, id: &str, arguments: serde_json::Value) -> std::result::Result<String, String>;
 }
