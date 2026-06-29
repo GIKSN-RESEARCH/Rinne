@@ -11,16 +11,18 @@ pub mod dag;
 pub mod error;
 pub mod evaluator;
 pub mod replanner;
+pub mod skill;
 pub mod worker;
 
 pub use blackboard::{Blackboard, NodeStatus};
 pub use error::{Result, RinneError};
 pub use evaluator::{EvalContext, Evaluator, Gate};
 pub use replanner::Replanner;
+pub use skill::Skill;
 pub use worker::{
     AuthMode, Capability, Constraints, ContextPacket, EventSink, ExecStatus, ExecuteRequest,
-    ExecuteResult, InlinedFile, LatencyProfile, QuotaModel, Role, Transport, Usage, Worker,
-    WorkerDescriptor, WorkerEvent, WorkerFamily,
+    ExecuteResult, InlinedFile, LatencyProfile, McpServerSpec, McpTransportKind, QuotaModel, Role,
+    ToolExecutor, ToolSpec, Transport, Usage, Worker, WorkerDescriptor, WorkerEvent, WorkerFamily,
 };
 
 /// The on-disk blackboard directory name, relative to the working repo.
