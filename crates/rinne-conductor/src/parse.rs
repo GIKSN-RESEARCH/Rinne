@@ -221,6 +221,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_node_tools_and_skills() {
+        let raw = r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do",
+            "tools":["github.search_issues"],"skills":["pdf-forms"]}]}"#;
+        let plan = parse_plan(raw).unwrap();
+        assert_eq!(plan.nodes[0].tools, vec!["github.search_issues"]);
+        assert_eq!(plan.nodes[0].skills, vec!["pdf-forms"]);
+    }
+
+    #[test]
+    fn node_tools_and_skills_default_empty() {
+        let raw = r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#;
+        let plan = parse_plan(raw).unwrap();
+        assert!(plan.nodes[0].tools.is_empty());
+        assert!(plan.nodes[0].skills.is_empty());
+    }
+
+    #[test]
     fn preserves_urls_and_commas_in_strings() {
         let raw = r#"{"goal":"see https://x.io, really","nodes":[{"id":"n1","role":"planner","instruction":"a, b, c"}]}"#;
         let plan = parse_plan(raw).unwrap();
