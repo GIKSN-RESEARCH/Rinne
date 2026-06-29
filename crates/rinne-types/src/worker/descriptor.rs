@@ -4,11 +4,16 @@
 //! model, latency profile, and transport. The scheduler resolves a node's
 //! `needs` against these descriptors at dispatch time (`CONTEXT.md` §7, §13).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A capability a worker can satisfy (`CONTEXT.md` §8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+///
+/// The built-in variants are the fixed vocabulary; `Custom` carries a
+/// dynamically-registered capability — an MCP server adds `database`/`browser`,
+/// a skill adds e.g. `pdf-forms` (`MCP_SKILLS.md` §3). Both the conductor and
+/// scheduler plan over the same open vocabulary. Serialized as a plain kebab
+/// string, so a node's `needs: ["code-edit", "database"]` round-trips.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Capability {
     CodeEdit,
     RepoAware,
@@ -19,6 +24,55 @@ pub enum Capability {
     CodeReview,
     Reasoning,
     Writing,
+    /// A dynamically-registered capability (MCP server / skill), by name.
+    Custom(String),
+}
+
+impl Capability {
+    /// The kebab-case string form (the built-in names; the raw name for `Custom`).
+    pub fn as_str(&self) -> &str {
+        match self {
+            Capability::CodeEdit => "code-edit",
+            Capability::RepoAware => "repo-aware",
+            Capability::WebSearch => "web-search",
+            Capability::Vision => "vision",
+            Capability::LongContext => "long-context",
+            Capability::ToolRun => "tool-run",
+            Capability::CodeReview => "code-review",
+            Capability::Reasoning => "reasoning",
+            Capability::Writing => "writing",
+            Capability::Custom(s) => s,
+        }
+    }
+
+    /// Parse a capability name; an unknown name becomes a `Custom` capability.
+    pub fn from_name(s: &str) -> Capability {
+        match s {
+            "code-edit" => Capability::CodeEdit,
+            "repo-aware" => Capability::RepoAware,
+            "web-search" => Capability::WebSearch,
+            "vision" => Capability::Vision,
+            "long-context" => Capability::LongContext,
+            "tool-run" => Capability::ToolRun,
+            "code-review" => Capability::CodeReview,
+            "reasoning" => Capability::Reasoning,
+            "writing" => Capability::Writing,
+            other => Capability::Custom(other.to_string()),
+        }
+    }
+}
+
+impl Serialize for Capability {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Capability {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Capability::from_name(&s))
+    }
 }
 
 /// How a worker authenticates (`CONTEXT.md` §9). Surfaced by `doctor` so the
@@ -137,13 +191,58 @@ pub struct WorkerDescriptor {
 
 impl WorkerDescriptor {
     /// Whether this worker advertises the given capability.
-    pub fn has(&self, cap: Capability) -> bool {
-        self.capabilities.contains(&cap)
+    pub fn has(&self, cap: &Capability) -> bool {
+        self.capabilities.contains(cap)
     }
 
     /// Whether this worker satisfies every capability in `needs` — the
     /// scheduler's core match test (`CONTEXT.md` §7, §13).
     pub fn satisfies(&self, needs: &[Capability]) -> bool {
-        needs.iter().all(|n| self.has(*n))
+        needs.iter().all(|n| self.has(n))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Capability;
+
+    #[test]
+    fn capability_serializes_as_kebab_string() {
+        assert_eq!(serde_json::to_string(&Capability::CodeEdit).unwrap(), "\"code-edit\"");
+        assert_eq!(
+            serde_json::to_string(&Capability::Custom("database".into())).unwrap(),
+            "\"database\""
+        );
+    }
+
+    #[test]
+    fn unknown_capability_deserializes_as_custom() {
+        let needs: Vec<Capability> =
+            serde_json::from_str(r#"["code-edit", "database", "browser"]"#).unwrap();
+        assert_eq!(
+            needs,
+            vec![
+                Capability::CodeEdit,
+                Capability::Custom("database".into()),
+                Capability::Custom("browser".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn satisfies_matches_custom_capabilities() {
+        use super::*;
+        let d = WorkerDescriptor {
+            name: "pg".into(),
+            family: WorkerFamily::Api,
+            capabilities: vec![Capability::Reasoning, Capability::Custom("database".into())],
+            auth_mode: AuthMode::ApiKey,
+            quota: QuotaModel { capacity: 1.0, refill_per_minute: 1.0 },
+            latency: LatencyProfile::Medium,
+            transport: Transport::Http,
+            models: vec![],
+        };
+        assert!(d.satisfies(&[Capability::Custom("database".into())]));
+        assert!(!d.satisfies(&[Capability::Custom("browser".into())]));
     }
 }
