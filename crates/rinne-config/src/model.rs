@@ -19,6 +19,8 @@ pub struct Config {
     /// between sessions by editing config (`CONTEXT.md` §7).
     pub models: ModelDefaults,
     pub update: UpdateConfig,
+    /// Connected MCP servers (`MCP_SKILLS.md` §10), keyed by name.
+    pub mcp: McpConfig,
 }
 
 /// `[update]` — automatic new-release notification.
@@ -210,4 +212,77 @@ pub struct ApiProvider {
     /// model's slow thinking mode). A TOML table here becomes request JSON.
     #[serde(default)]
     pub extra_body: Option<serde_json::Value>,
+}
+
+/// `[mcp]` — connected MCP servers, keyed by name (`MCP_SKILLS.md` §10).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+    /// Each `[mcp.servers.<name>]` table.
+    pub servers: std::collections::BTreeMap<String, McpServer>,
+}
+
+/// How a server is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    /// A local subprocess server, spoken to over stdio.
+    Stdio,
+    /// A remote server reached over Streamable HTTP.
+    Http,
+}
+
+/// A single `[mcp.servers.<name>]` table. Secrets are never stored here — a
+/// remote server's bearer token lives in the OS keychain, named by `key_env`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    /// `stdio | http`.
+    pub transport: McpTransport,
+    /// For stdio: the server program (e.g. `npx`).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// For stdio: the program's arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// For stdio: extra (non-secret) environment variables for the server.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// For http: the server endpoint URL.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// For http: extra (non-secret) request headers.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// The env var / keychain name holding a bearer token, if the server needs
+    /// one. Resolved env-first then keychain, like an API key.
+    #[serde(default)]
+    pub key_env: Option<String>,
+    /// Whether this server is active. Disabled servers are kept but not used.
+    #[serde(default = "mcp_default_true")]
+    pub enabled: bool,
+    /// Allowlisted tool names (`["*"]` = all). A tool not on the list is never
+    /// offered to a worker (`MCP_SKILLS.md` §12).
+    #[serde(default = "mcp_default_tools_allow")]
+    pub tools_allow: Vec<String>,
+    /// Force the host path for this server's tool nodes even on a harness
+    /// worker, so Rinne gates every call's arguments — for sensitive/write
+    /// servers (`MCP_SKILLS.md` §6 host-only).
+    #[serde(default)]
+    pub host_only: bool,
+}
+
+fn mcp_default_true() -> bool {
+    true
+}
+
+fn mcp_default_tools_allow() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+impl McpServer {
+    /// Whether a tool name is allowed by this server's allowlist.
+    pub fn allows_tool(&self, tool: &str) -> bool {
+        self.tools_allow.iter().any(|t| t == "*" || t == tool)
+    }
 }
