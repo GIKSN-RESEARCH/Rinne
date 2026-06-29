@@ -98,6 +98,8 @@ impl PlanBackend for HarnessBackend {
                 timeout_secs: Some(180),
                 ..Default::default()
             },
+            tools: Vec::new(),
+            mcp_servers: Vec::new(),
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let result = self
