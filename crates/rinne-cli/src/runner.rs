@@ -26,6 +26,24 @@ use rinne_workers::adapters::{
 /// insertion order encodes preference for tie-breaking (`CONTEXT.md` §13).
 /// Returns the registry plus the names registered, for narration.
 pub async fn build_registry(config: &Config) -> Result<(WorkerRegistry, Vec<String>)> {
+    build_registry_inner(config, None).await
+}
+
+/// Like [`build_registry`], but wires an MCP tool executor into the API workers
+/// so nodes that attach `tools` get the host agentic loop (`MCP_SKILLS.md` §6).
+/// The run paths use this; read-only paths (listing workers/models) use the
+/// plain [`build_registry`].
+pub async fn build_registry_with_tools(
+    config: &Config,
+    executor: Option<Arc<dyn rinne_core::ToolExecutor>>,
+) -> Result<(WorkerRegistry, Vec<String>)> {
+    build_registry_inner(config, executor).await
+}
+
+async fn build_registry_inner(
+    config: &Config,
+    executor: Option<Arc<dyn rinne_core::ToolExecutor>>,
+) -> Result<(WorkerRegistry, Vec<String>)> {
     let report = rinne_config::doctor(config, false).await?;
 
     let mut reg = WorkerRegistry::new();
@@ -70,14 +88,18 @@ pub async fn build_registry(config: &Config) -> Result<(WorkerRegistry, Vec<Stri
         } else {
             continue; // need at least one model id to call
         };
-        reg.register(Arc::new(OpenAiWorker::new(
+        let mut worker = OpenAiWorker::new(
             name,
             &base,
             keys,
             models,
             api_capabilities(),
             provider.extra_body.clone(),
-        )));
+        );
+        if let Some(ex) = &executor {
+            worker = worker.with_tool_executor(ex.clone());
+        }
+        reg.register(Arc::new(worker));
     }
 
     let names = reg.names();
@@ -153,25 +175,29 @@ pub async fn oneshot_json(goal: &str) -> Result<serde_json::Value> {
     let config = rinne_config::load_cwd()?;
     let cwd = std::env::current_dir()?;
     let bb = Blackboard::open(&cwd)?;
-    let (registry, _) = build_registry(&config).await?;
+    let (executor, tool_specs, mcp_servers) = host_setup(&config).await;
+    let (registry, _) = build_registry_with_tools(&config, executor).await?;
     if registry.is_empty() {
         return Err(anyhow!("no available workers — run `rinne doctor`"));
     }
-    let conductor = std::sync::Arc::new(build_conductor(&config, &registry, cwd.clone())?);
+    let catalog = crate::catalog::gather(&config, &cwd).await;
+    let template = plan_template(&config, &registry, catalog);
+    let conductor = std::sync::Arc::new(
+        build_conductor(&config, &registry, cwd.clone())?.with_context(template.clone()),
+    );
 
     let input = ConductorInput {
         goal: goal.to_string(),
-        workers: registry.descriptors(),
-        prefer: Some(prefer_label(config.preferences.prefer).to_string()),
-        budget_minutes: Some(config.loop_.global_budget_minutes as u64),
-        max_iterations_per_node: config.loop_.max_iterations_per_node,
-        ..Default::default()
+        ..template
     };
     let plan = conductor.plan(&input).await?;
     bb.save_plan(&plan)?;
     bb.reset_run()?;
 
-    let mut engine = Engine::new(&bb, plan.clone(), &registry, options_with_pool(&config, &registry));
+    let mut opts = options_with_pool(&config, &registry, &cwd);
+    opts.tool_specs = tool_specs;
+    opts.mcp_servers = mcp_servers;
+    let mut engine = Engine::new(&bb, plan.clone(), &registry, opts);
     engine = engine.with_replanner(conductor);
     // None sink → no streaming output; just run to completion.
     let report = engine.run(CancellationToken::new(), None, None).await?;
@@ -244,14 +270,13 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
         ));
     }
 
-    let conductor = build_conductor(&config, &registry, blackboard.workspace().to_path_buf())?;
+    let catalog = crate::catalog::gather(&config, blackboard.workspace()).await;
+    let template = plan_template(&config, &registry, catalog);
+    let conductor = build_conductor(&config, &registry, blackboard.workspace().to_path_buf())?
+        .with_context(template.clone());
     let input = ConductorInput {
         goal: goal.to_string(),
-        workers: registry.descriptors(),
-        prefer: Some(prefer_label(config.preferences.prefer).to_string()),
-        budget_minutes: Some(config.loop_.global_budget_minutes as u64),
-        max_iterations_per_node: config.loop_.max_iterations_per_node,
-        ..Default::default()
+        ..template
     };
 
     println!("planning with: {}", conductor.backend_names().join(" → "));
@@ -288,6 +313,26 @@ fn prefer_label(p: PreferFamily) -> &'static str {
     }
 }
 
+/// The reusable planning context (everything but the per-call goal/mentioned):
+/// the worker pool, the tool/skill catalog, the family preference, and budgets.
+/// Captured on the conductor via `with_context` so replans stay pool- and
+/// catalog-aware, and spread into each `plan()` call's input.
+pub fn plan_template(
+    config: &Config,
+    registry: &WorkerRegistry,
+    catalog: crate::catalog::Catalog,
+) -> ConductorInput {
+    ConductorInput {
+        workers: registry.descriptors(),
+        tools: catalog.tools,
+        skills: catalog.skills,
+        prefer: Some(prefer_label(config.preferences.prefer).to_string()),
+        budget_minutes: Some(config.loop_.global_budget_minutes as u64),
+        max_iterations_per_node: config.loop_.max_iterations_per_node,
+        ..Default::default()
+    }
+}
+
 /// Engine options derived from config (`[loop]`, `[models]`, `[preferences]`).
 pub fn options_from_config(config: &Config) -> EngineOptions {
     EngineOptions {
@@ -303,13 +348,100 @@ pub fn options_from_config(config: &Config) -> EngineOptions {
 }
 
 /// Engine options merged with the live pool profile (tier ladders for the
-/// cascade and the single-family flag for evaluator-independence narration).
-pub fn options_with_pool(config: &Config, registry: &WorkerRegistry) -> EngineOptions {
+/// cascade and the single-family flag), plus the installed skill bodies the
+/// engine injects into nodes that attach a skill (`MCP_SKILLS.md` §11).
+pub fn options_with_pool(
+    config: &Config,
+    registry: &WorkerRegistry,
+    cwd: &std::path::Path,
+) -> EngineOptions {
     let profile = rinne_core::pool::profile(&registry.descriptors());
     EngineOptions {
         model_ladders: profile.ladders(),
         single_family_pool: profile.is_single_family(),
+        skill_bodies: skill_bodies(cwd),
         ..options_from_config(config)
+    }
+}
+
+/// Installed skill bodies (name → instruction body) for the engine to inject.
+pub fn skill_bodies(cwd: &std::path::Path) -> std::collections::HashMap<String, String> {
+    rinne_config::skills::discover(cwd)
+        .into_iter()
+        .map(|s| (s.name, s.body))
+        .collect()
+}
+
+/// The MCP wiring for a run, covering both paths (`MCP_SKILLS.md` §6):
+/// - the tool executor + id→spec catalog for the **host path** (API workers),
+/// - the server-name→spec map for the **provision path** (harnesses).
+///
+/// The host path needs live connections (a warm pool, opened once and shared by
+/// the executor and the spec scan); the provision path needs only static
+/// connection config plus resolved tokens, so it is built straight from config
+/// even when no server is reachable.
+pub async fn host_setup(
+    config: &Config,
+) -> (
+    Option<Arc<dyn rinne_core::ToolExecutor>>,
+    std::collections::HashMap<String, rinne_core::ToolSpec>,
+    std::collections::HashMap<String, rinne_core::McpServerSpec>,
+) {
+    // Provision-path specs: every enabled server, with its token resolved into
+    // memory (never to disk — the provisioner references it via env expansion).
+    let mcp_servers: std::collections::HashMap<String, rinne_core::McpServerSpec> = config
+        .mcp
+        .servers
+        .iter()
+        .filter(|(_, s)| s.enabled)
+        .map(|(name, s)| (name.clone(), server_spec(name, s)))
+        .collect();
+
+    let pool = Arc::new(crate::mcp_pool::McpPool::from_config(config));
+    if pool.is_empty() {
+        return (None, std::collections::HashMap::new(), mcp_servers);
+    }
+    let tool_specs = pool
+        .list_all_tools()
+        .await
+        .into_iter()
+        .map(|(id, t)| {
+            (
+                id.clone(),
+                rinne_core::ToolSpec {
+                    id,
+                    description: t.description,
+                    schema: t.input_schema,
+                },
+            )
+        })
+        .collect();
+    let executor: Arc<dyn rinne_core::ToolExecutor> =
+        Arc::new(crate::mcp_pool::McpToolExecutor::new(pool));
+    (Some(executor), tool_specs, mcp_servers)
+}
+
+/// Map a configured MCP server to the engine's connection spec, resolving its
+/// token from the keychain (or env) into memory.
+fn server_spec(name: &str, s: &rinne_config::model::McpServer) -> rinne_core::McpServerSpec {
+    use rinne_config::model::McpTransport;
+    let token = s
+        .key_env
+        .as_ref()
+        .and_then(|ke| rinne_config::secrets::resolve_api_key(&format!("mcp:{name}"), ke));
+    rinne_core::McpServerSpec {
+        name: name.to_string(),
+        transport: match s.transport {
+            McpTransport::Stdio => rinne_core::McpTransportKind::Stdio,
+            McpTransport::Http => rinne_core::McpTransportKind::Http,
+        },
+        command: s.command.clone(),
+        args: s.args.clone(),
+        env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        url: s.url.clone(),
+        headers: s.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        token_env: s.key_env.clone(),
+        token,
     }
 }
 
@@ -325,7 +457,8 @@ pub async fn run_plan_with(
     resume: Option<rinne_core::ResumeInput>,
 ) -> Result<RunReport> {
     let config = rinne_config::load_cwd()?;
-    let (registry, names) = build_registry(&config).await?;
+    let (executor, tool_specs, mcp_servers) = host_setup(&config).await;
+    let (registry, names) = build_registry_with_tools(&config, executor).await?;
     if registry.is_empty() {
         return Err(anyhow!(
             "no available workers — run `rinne doctor` (need an enabled, installed harness)"
@@ -351,7 +484,10 @@ pub async fn run_plan_with(
         cancel_handle.cancel();
     });
 
-    let mut engine = Engine::new(blackboard, plan, &registry, options_with_pool(&config, &registry));
+    let mut opts = options_with_pool(&config, &registry, blackboard.workspace());
+    opts.tool_specs = tool_specs;
+    opts.mcp_servers = mcp_servers;
+    let mut engine = Engine::new(blackboard, plan, &registry, opts);
     // Attach the conductor as the replanner so the loop can amend the DAG
     // (best-effort: if no backend is available, replan paths simply block).
     if let Ok(conductor) =
