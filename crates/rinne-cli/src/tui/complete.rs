@@ -13,6 +13,8 @@ use nucleo::{Config, Matcher};
 const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
     ("config",  "[sub …]",                       "view or edit configuration"),
     ("connect", "<backend> [key] [--model <id>]", "connect a harness or API provider"),
+    ("mcp",     "[sub …]",                       "connect and manage MCP servers"),
+    ("skill",   "[sub …]",                       "install and manage Agent Skills"),
     ("workers", "",                              "list workers + connected APIs"),
     ("models",  "<provider>",                   "list an API provider's models"),
     ("forget",  "<provider>",                   "delete a stored API key"),
@@ -44,6 +46,23 @@ const CONFIG_SUBCOMMANDS: &[(&str, &str, &str)] = &[
     ("init",      "", "scaffold a commented config file"),
     ("edit",      "", "open the config file in your editor"),
     ("path",      "", "show config file paths"),
+];
+
+/// `/mcp` subcommands.
+const MCP_SUBCOMMANDS: &[(&str, &str, &str)] = &[
+    ("add",    "<name> --stdio \"<cmd>\" | --http <url>", "connect a server"),
+    ("list",   "", "list connected servers"),
+    ("tools",  "<name>", "list a server's tools"),
+    ("test",   "<name>", "check a server is reachable"),
+    ("remove", "<name>", "disconnect a server"),
+];
+
+/// `/skill` subcommands.
+const SKILL_SUBCOMMANDS: &[(&str, &str, &str)] = &[
+    ("install", "<path> [--project]", "install a skill folder"),
+    ("list",    "", "list installed skills"),
+    ("show",    "<name>", "print a skill's instructions"),
+    ("remove",  "<name>", "uninstall a skill"),
 ];
 
 /// Backends accepted by `/config conductor <backend>`.
@@ -134,19 +153,25 @@ pub fn suggest(input: &str) -> Option<Completion> {
         return filter(SLASH_COMMANDS, partial, "/command", token_start);
     }
 
-    // Stage 2+ — only `/config` exposes argument completion for now.
-    if complete[0] != "config" {
-        return None;
-    }
-    match complete.len() {
-        1 => filter(CONFIG_SUBCOMMANDS, partial, "/config subcommand", token_start),
-        2 => match complete[1] {
-            "conductor" => filter(CONDUCTOR_BACKENDS, partial, "conductor backend", token_start),
-            "prefer" => filter(PREFER_FAMILIES, partial, "prefer family", token_start),
-            "role" => filter(ROLES, partial, "role", token_start),
-            "set" | "unset" | "clear" => filter(CONFIG_KEYS, partial, "config key", token_start),
+    // Stage 2+ — argument completion for commands that have subcommands.
+    match complete[0] {
+        "config" => match complete.len() {
+            1 => filter(CONFIG_SUBCOMMANDS, partial, "/config subcommand", token_start),
+            2 => match complete[1] {
+                "conductor" => filter(CONDUCTOR_BACKENDS, partial, "conductor backend", token_start),
+                "prefer" => filter(PREFER_FAMILIES, partial, "prefer family", token_start),
+                "role" => filter(ROLES, partial, "role", token_start),
+                "set" | "unset" | "clear" => filter(CONFIG_KEYS, partial, "config key", token_start),
+                _ => None,
+            },
             _ => None,
         },
+        "mcp" if complete.len() == 1 => {
+            filter(MCP_SUBCOMMANDS, partial, "/mcp subcommand", token_start)
+        }
+        "skill" if complete.len() == 1 => {
+            filter(SKILL_SUBCOMMANDS, partial, "/skill subcommand", token_start)
+        }
         _ => None,
     }
 }
