@@ -286,3 +286,38 @@ impl McpServer {
         self.tools_allow.iter().any(|t| t == "*" || t == tool)
     }
 }
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+
+    #[test]
+    fn parses_with_sensible_defaults() {
+        let s: McpServer = toml::from_str("transport = \"stdio\"\ncommand = \"npx\"\n").unwrap();
+        assert_eq!(s.transport, McpTransport::Stdio);
+        assert_eq!(s.command.as_deref(), Some("npx"));
+        assert!(s.enabled, "enabled defaults true");
+        assert_eq!(s.tools_allow, vec!["*"], "allowlist defaults to all");
+        assert!(!s.host_only);
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        let bad = "transport = \"stdio\"\nbogus = 1\n";
+        assert!(toml::from_str::<McpServer>(bad).is_err());
+    }
+
+    #[test]
+    fn requires_a_transport() {
+        assert!(toml::from_str::<McpServer>("command = \"npx\"\n").is_err());
+    }
+
+    #[test]
+    fn allowlist_gates_tool_names() {
+        let mut s: McpServer = toml::from_str("transport = \"http\"\n").unwrap();
+        assert!(s.allows_tool("anything"), "default `*` allows all");
+        s.tools_allow = vec!["read".into(), "list".into()];
+        assert!(s.allows_tool("read"));
+        assert!(!s.allows_tool("delete"));
+    }
+}
