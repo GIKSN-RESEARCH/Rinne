@@ -27,6 +27,10 @@ pub struct SubprocessSpec {
     pub stdin: Option<String>,
     /// Hard wall-clock timeout. Always set one for beta CLIs (`CONTEXT.md` §21).
     pub timeout: Option<Duration>,
+    /// Extra environment variables set on the child, on top of the inherited
+    /// environment. Carries MCP provisioning tokens so they reach a harness's
+    /// servers without ever being written to a config file (`MCP_SKILLS.md` §6).
+    pub env: Vec<(String, String)>,
 }
 
 /// The captured result of a subprocess run.
@@ -54,6 +58,7 @@ pub async fn run(
 
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
+        .envs(spec.env.iter().map(|(k, v)| (k.clone(), v.clone())))
         .current_dir(&spec.workspace)
         .stdin(if spec.stdin.is_some() {
             Stdio::piped()

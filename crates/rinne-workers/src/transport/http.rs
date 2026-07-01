@@ -10,29 +10,89 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use rinne_core::worker::{emit, EventSink, Usage, WorkerEvent};
+use rinne_core::worker::{emit, EventSink, ToolSpec, Usage, WorkerEvent};
 use rinne_core::{Result, RinneError};
 
-/// A chat message in the OpenAI format.
+/// A chat message in the OpenAI format. The tool fields are only set on the
+/// host agentic loop: `tool_calls` on an assistant turn that calls tools,
+/// `tool_call_id` on a `tool`-role message carrying a call's result.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
     pub role: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: "system".into(),
-            content: content.into(),
-        }
+        Self::plain("system", content)
     }
     pub fn user(content: impl Into<String>) -> Self {
+        Self::plain("user", content)
+    }
+    fn plain(role: &str, content: impl Into<String>) -> Self {
         Self {
-            role: "user".into(),
+            role: role.into(),
             content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
+    /// An assistant turn that requested tool calls (echoed back into the next
+    /// request so the model sees its own calls before their results).
+    pub fn assistant_tool_calls(calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: Some(calls),
+            tool_call_id: None,
+        }
+    }
+    /// The result of one tool call, keyed back to its `tool_call_id`.
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".into(),
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+}
+
+/// One tool call in the OpenAI function-calling format — serialized when echoing
+/// an assistant turn, deserialized when reading the model's response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type", default = "function_kind")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    /// JSON-encoded arguments string (per the OpenAI schema).
+    #[serde(default)]
+    pub arguments: String,
+}
+
+fn function_kind() -> String {
+    "function".into()
+}
+
+/// One turn of the host agentic loop: either text (the model is done) or a set
+/// of tool calls to execute and feed back.
+#[derive(Debug, Clone)]
+pub struct ChatTurn {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
+    pub finish_reason: Option<String>,
 }
 
 /// A chat completion request.
@@ -142,6 +202,86 @@ impl OpenAiClient {
             (None, None) => a.id.cmp(&b.id),
         });
         Ok(models)
+    }
+
+    /// Run one non-streaming chat completion offering `tools`, returning whole
+    /// tool calls (streaming tool-call deltas are fiddly; the host loop wants
+    /// them complete). When `tools` is empty this is a plain completion.
+    pub async fn chat_with_tools(&self, req: &ChatRequest, tools: &[ToolSpec]) -> Result<ChatTurn> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let mut body = serde_json::json!({
+            "model": req.model,
+            "messages": req.messages,
+            "temperature": req.temperature,
+            "stream": false,
+        });
+        if !tools.is_empty() {
+            let defs: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.id,
+                            "description": t.description,
+                            "parameters": t.schema,
+                        }
+                    })
+                })
+                .collect();
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("tools".into(), serde_json::Value::Array(defs));
+                obj.insert("tool_choice".into(), serde_json::json!("auto"));
+            }
+        }
+        // Merge provider-specific extra params, as the streaming path does.
+        if let (Some(serde_json::Value::Object(extra)), Some(obj)) =
+            (&req.extra, body.as_object_mut())
+        {
+            for (k, v) in extra {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+
+        let mut builder = self.http.post(&url).json(&body);
+        if let Some(key) = &self.api_key {
+            builder = builder.bearer_auth(key);
+        }
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| RinneError::Worker(format!("request failed: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RinneError::Worker(format!(
+                "chat completion HTTP {status}: {text}"
+            )));
+        }
+
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RinneError::Worker(format!("bad completion json: {e}")))?;
+        let message = &v["choices"][0]["message"];
+        let content = message["content"].as_str().unwrap_or("").to_string();
+        let tool_calls: Vec<ToolCall> = message
+            .get("tool_calls")
+            .filter(|t| !t.is_null())
+            .and_then(|t| serde_json::from_value(t.clone()).ok())
+            .unwrap_or_default();
+        let finish_reason = v["choices"][0]["finish_reason"].as_str().map(String::from);
+        let usage = Usage {
+            prompt_tokens: v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+            completion_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+            wall_ms: 0,
+        };
+        Ok(ChatTurn {
+            content,
+            tool_calls,
+            usage,
+            finish_reason,
+        })
     }
 
     /// Stream a chat completion, emitting each content delta as a
@@ -265,6 +405,55 @@ mod tests {
         assert_eq!(normalize_base_url("https://openrouter.ai/api/v1/chat/completions"), base);
         assert_eq!(normalize_base_url("https://openrouter.ai/api/v1/responses"), base);
         assert_eq!(normalize_base_url("  https://openrouter.ai/api/v1/models  "), base);
+    }
+
+    #[test]
+    fn plain_message_serializes_without_tool_fields() {
+        let v = serde_json::to_value(ChatMessage::user("hi")).unwrap();
+        assert_eq!(v, serde_json::json!({"role": "user", "content": "hi"}));
+    }
+
+    #[test]
+    fn assistant_tool_call_message_omits_empty_content() {
+        let call = ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "github.search_issues".into(),
+                arguments: r#"{"q":"bug"}"#.into(),
+            },
+        };
+        let v = serde_json::to_value(ChatMessage::assistant_tool_calls(vec![call])).unwrap();
+        assert_eq!(v["role"], "assistant");
+        assert!(v.get("content").is_none(), "empty content is skipped");
+        assert_eq!(v["tool_calls"][0]["id"], "call_1");
+        assert_eq!(v["tool_calls"][0]["type"], "function");
+        assert_eq!(v["tool_calls"][0]["function"]["name"], "github.search_issues");
+    }
+
+    #[test]
+    fn tool_result_message_carries_call_id() {
+        let v = serde_json::to_value(ChatMessage::tool_result("call_1", "42 issues")).unwrap();
+        assert_eq!(v, serde_json::json!({
+            "role": "tool",
+            "content": "42 issues",
+            "tool_call_id": "call_1",
+        }));
+    }
+
+    #[test]
+    fn tool_calls_parse_from_a_response_message() {
+        let message = serde_json::json!({
+            "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "fs.read", "arguments": "{\"path\":\"a\"}"}}
+            ]
+        });
+        let calls: Vec<ToolCall> =
+            serde_json::from_value(message["tool_calls"].clone()).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "fs.read");
+        assert_eq!(calls[0].id, "c1");
     }
 }
 
