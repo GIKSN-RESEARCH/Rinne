@@ -5,14 +5,18 @@
 //! Anthropic API key (`CONTEXT.md` §9). The footgun guard for a stray
 //! `ANTHROPIC_API_KEY` lives in `doctor` (Phase 1).
 
+use std::path::Path;
 use std::time::Duration;
 
-use rinne_core::worker::{
-    AuthMode, Capability, LatencyProfile, QuotaModel, Transport, Usage, WorkerDescriptor,
-    WorkerEvent, WorkerFamily,
-};
+use serde_json::{json, Map, Value};
 
-use super::common::{HarnessAdapter, ParsedHarness};
+use rinne_core::worker::{
+    AuthMode, Capability, LatencyProfile, McpServerSpec, McpTransportKind, QuotaModel, Transport,
+    Usage, WorkerDescriptor, WorkerEvent, WorkerFamily,
+};
+use rinne_core::{Result, RinneError};
+
+use super::common::{HarnessAdapter, ParsedHarness, Provision};
 use crate::transport::subprocess::SubprocessOutput;
 
 /// Construct a Claude Code harness worker.
@@ -26,6 +30,7 @@ pub fn worker() -> HarnessAdapter {
         line_mapper,
         prompt_via_stdin: false,
         default_timeout: Duration::from_secs(600),
+        provisioner: Some(provision),
     }
 }
 
@@ -232,6 +237,100 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Provision a node's MCP servers into a `claude` invocation (`MCP_SKILLS.md`
+/// §6). Writes a `.mcp.json`-shaped config and returns `--mcp-config <path>`
+/// `--strict-mcp-config` (only our servers) and `--allowedTools mcp__<server>…`
+/// (pre-approve the tools for the non-interactive `-p` run).
+///
+/// Secrets stay off disk: a token is written as a `${VAR}` reference and the
+/// real value is set on the subprocess environment, which Claude expands.
+fn provision(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
+    let mut mcp_servers = Map::new();
+    let mut env = Vec::new();
+    let mut allowed = Vec::new();
+
+    for (i, s) in servers.iter().enumerate() {
+        allowed.push(format!("mcp__{}", s.name));
+        let mut entry = Map::new();
+        match s.transport {
+            McpTransportKind::Stdio => {
+                entry.insert("command".into(), json!(s.command.clone().unwrap_or_default()));
+                entry.insert("args".into(), json!(s.args));
+                let mut env_map = Map::new();
+                for (k, v) in &s.env {
+                    env_map.insert(k.clone(), json!(v));
+                }
+                if let (Some(token), Some(var)) = (&s.token, &s.token_env) {
+                    // The server reads its token from `var`; reference it through
+                    // a host env var so the value never lands in the file.
+                    let host_var = host_env_var(i, &s.name);
+                    env_map.insert(var.clone(), json!(format!("${{{host_var}}}")));
+                    env.push((host_var, token.clone()));
+                }
+                if !env_map.is_empty() {
+                    entry.insert("env".into(), Value::Object(env_map));
+                }
+            }
+            McpTransportKind::Http => {
+                entry.insert("type".into(), json!("http"));
+                entry.insert("url".into(), json!(s.url.clone().unwrap_or_default()));
+                let mut headers = Map::new();
+                for (k, v) in &s.headers {
+                    headers.insert(k.clone(), json!(v));
+                }
+                if let Some(token) = &s.token {
+                    let host_var = host_env_var(i, &s.name);
+                    headers.insert("Authorization".into(), json!(format!("Bearer ${{{host_var}}}")));
+                    env.push((host_var, token.clone()));
+                }
+                if !headers.is_empty() {
+                    entry.insert("headers".into(), Value::Object(headers));
+                }
+            }
+        }
+        mcp_servers.insert(s.name.clone(), Value::Object(entry));
+    }
+
+    let config = json!({ "mcpServers": Value::Object(mcp_servers) });
+    std::fs::create_dir_all(scratch)
+        .map_err(|e| RinneError::Worker(format!("could not create MCP scratch dir: {e}")))?;
+    let path = scratch.join(format!("mcp-{}-{}.json", std::process::id(), unique_suffix()));
+    std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap_or_default())
+        .map_err(|e| RinneError::Worker(format!("could not write MCP config: {e}")))?;
+
+    let args = vec![
+        "--mcp-config".to_string(),
+        path.display().to_string(),
+        "--strict-mcp-config".to_string(),
+        "--allowedTools".to_string(),
+        allowed.join(","),
+    ];
+    Ok(Provision {
+        args,
+        env,
+        cleanup: Some(path),
+    })
+}
+
+/// A host environment variable name to carry a server's token to the subprocess.
+/// The index keeps the name unique even when two server names differ only by
+/// punctuation (e.g. `fs.x` and `fs-x` both sanitize to `FS_X`).
+fn host_env_var(index: usize, server: &str) -> String {
+    let up: String = server
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .collect();
+    format!("RINNE_MCP_{index}_{up}_TOKEN")
+}
+
+/// A process-unique suffix for the scratch config filename (no `rand` dep).
+fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 /// Find the last top-level JSON object in mixed output (some CLIs prepend logs).
 pub(crate) fn last_json_object(s: &str) -> Option<serde_json::Value> {
     // Try whole-string parse first (the common case).
@@ -296,5 +395,89 @@ mod tests {
         let mixed = "INFO starting\nWARN something\n{\"result\":\"hi\"}";
         let p = parse(&out(mixed));
         assert_eq!(p.result, "hi");
+    }
+
+    #[test]
+    fn provision_writes_config_and_keeps_tokens_off_disk() {
+        let dir = std::env::temp_dir().join(format!("rinne-prov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let servers = vec![
+            McpServerSpec {
+                name: "fs".into(),
+                transport: McpTransportKind::Stdio,
+                command: Some("npx".into()),
+                args: vec!["-y".into(), "server".into()],
+                env: vec![],
+                url: None,
+                headers: vec![],
+                token_env: Some("GITHUB_TOKEN".into()),
+                token: Some("secret123".into()),
+            },
+            McpServerSpec {
+                name: "remote".into(),
+                transport: McpTransportKind::Http,
+                command: None,
+                args: vec![],
+                env: vec![],
+                url: Some("https://x/mcp".into()),
+                headers: vec![],
+                token_env: Some("REMOTE_TOKEN".into()),
+                token: Some("bearer456".into()),
+            },
+        ];
+
+        let p = provision(&servers, &dir).unwrap();
+
+        // The flags pre-approve each server's tools and pin to our config only.
+        assert!(p.args.contains(&"--mcp-config".to_string()));
+        assert!(p.args.contains(&"--strict-mcp-config".to_string()));
+        let i = p.args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert!(p.args[i + 1].contains("mcp__fs"));
+        assert!(p.args[i + 1].contains("mcp__remote"));
+
+        // Tokens travel via the subprocess environment, never the file. The
+        // var names are index-prefixed to stay unique across servers.
+        assert!(p.env.iter().any(|(k, v)| k == "RINNE_MCP_0_FS_TOKEN" && v == "secret123"));
+        assert!(p.env.iter().any(|(k, v)| k == "RINNE_MCP_1_REMOTE_TOKEN" && v == "bearer456"));
+
+        let content = std::fs::read_to_string(p.cleanup.as_ref().unwrap()).unwrap();
+        assert!(!content.contains("secret123"), "stdio token must not be on disk");
+        assert!(!content.contains("bearer456"), "http token must not be on disk");
+        assert!(content.contains("${RINNE_MCP_0_FS_TOKEN}"));
+        assert!(content.contains("Bearer ${RINNE_MCP_1_REMOTE_TOKEN}"));
+
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["mcpServers"]["fs"]["command"], "npx");
+        assert_eq!(v["mcpServers"]["fs"]["env"]["GITHUB_TOKEN"], "${RINNE_MCP_0_FS_TOKEN}");
+        assert_eq!(v["mcpServers"]["remote"]["type"], "http");
+        assert_eq!(v["mcpServers"]["remote"]["url"], "https://x/mcp");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn provision_errors_gracefully_when_scratch_cannot_be_created() {
+        // A regular file standing where the scratch directory's parent should be:
+        // `create_dir_all` under it fails, and provisioning must return an error
+        // (the adapter then runs the node without tools) rather than panic.
+        let blocker = std::env::temp_dir().join(format!("rinne-prov-blocker-{}", std::process::id()));
+        let _ = std::fs::remove_file(&blocker);
+        std::fs::write(&blocker, b"x").unwrap();
+        let scratch = blocker.join("mcp");
+
+        let servers = vec![McpServerSpec {
+            name: "fs".into(),
+            transport: McpTransportKind::Stdio,
+            command: Some("npx".into()),
+            args: vec![],
+            env: vec![],
+            url: None,
+            headers: vec![],
+            token_env: None,
+            token: None,
+        }];
+        assert!(provision(&servers, &scratch).is_err());
+
+        let _ = std::fs::remove_file(&blocker);
     }
 }
