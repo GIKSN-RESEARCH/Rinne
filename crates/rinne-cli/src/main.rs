@@ -3,8 +3,10 @@
 //! Phase 0 wires the full `clap` command tree (`CONTEXT.md` §17) to stubbed
 //! handlers and stands up file-based logging. Real handlers land per-phase.
 
+mod catalog;
 mod cli;
 mod commands;
+mod mcp_pool;
 mod runner;
 mod telemetry;
 mod tui;
@@ -54,6 +56,8 @@ async fn main() -> Result<()> {
             reject,
         }) => commands::run::resume(steer, approve, reject).await,
         Some(Command::Config { args }) => commands::config::run(&args).await,
+        Some(Command::Mcp { args }) => commands::mcp::run(&args).await,
+        Some(Command::Skill { args }) => commands::skill::run(&args).await,
         Some(Command::Logs) => run_logs().await,
     }
 }
