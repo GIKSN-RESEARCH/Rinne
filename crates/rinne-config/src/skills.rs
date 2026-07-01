@@ -162,4 +162,34 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn install_rejects_a_folder_without_skill_md() {
+        let tmp = std::env::temp_dir().join(format!("rinne-skills-noskill-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let src = tmp.join("not-a-skill");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("README.txt"), "no frontmatter here").unwrap();
+
+        assert!(install(&src, Scope::Project, &tmp.join("repo")).is_err());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_skips_folders_without_skill_md() {
+        let tmp = std::env::temp_dir().join(format!("rinne-skills-skip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let project = tmp.join("repo");
+        let dir = skills_dir(Scope::Project, &project).unwrap();
+        // A junk folder (no SKILL.md) alongside a real one.
+        fs::create_dir_all(dir.join("junk")).unwrap();
+        fs::write(dir.join("junk").join("notes.md"), "ignore me").unwrap();
+        write_skill(&dir.join("real"), "real", "a real skill");
+
+        let names: Vec<String> = discover(&project).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["real"], "only the folder with a SKILL.md is a skill");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }
