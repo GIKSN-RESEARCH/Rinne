@@ -22,6 +22,7 @@ rinne-core.workspace = true
 rinne-config.workspace = true
 rinne-workers.workspace = true
 rinne-conductor.workspace = true
+rinne-mcp.workspace = true
 
 clap.workspace = true
 tokio.workspace = true
@@ -36,6 +37,7 @@ ratatui.workspace = true
 crossterm = { workspace = true, features = ["event-stream"] }
 nucleo.workspace = true
 notify.workspace = true
+async-trait.workspace = true
 futures-util = "0.3"
 glob = "0.3"
 pulldown-cmark = { version = "0.12", default-features = false }
