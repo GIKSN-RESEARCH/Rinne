@@ -25,6 +25,7 @@ pub fn worker() -> HarnessAdapter {
         line_mapper,
         prompt_via_stdin: false,
         default_timeout: Duration::from_secs(600),
+        provisioner: None,
     }
 }
 
