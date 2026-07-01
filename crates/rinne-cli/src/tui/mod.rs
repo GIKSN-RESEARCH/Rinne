@@ -919,6 +919,22 @@ impl App {
                     }
                 }
             }
+            "mcp" => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let args = split_args(&rest); // quote-aware so `--stdio "npx …"` survives
+                let tx = self.tx.clone();
+                self.push(FeedKind::System, "mcp…");
+                tokio::spawn(async move {
+                    let lines = crate::commands::mcp::run_lines(&args, &cwd).await;
+                    let _ = tx.send(AppMsg::Note(lines.join("\n")));
+                });
+            }
+            "skill" => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let args = split_args(&rest);
+                let lines = crate::commands::skill::run_lines(&args, &cwd);
+                self.push(FeedKind::System, lines.join("\n"));
+            }
             "steer" if !rest.is_empty() => self.resume_with(HumanDecision::Steer(rest)),
             "approve" => self.resume_with(HumanDecision::Approve),
             "reject" => self.resume_with(HumanDecision::Reject),
@@ -1120,6 +1136,37 @@ fn current_token(input: &str) -> &str {
     input.rsplit(char::is_whitespace).next().unwrap_or("")
 }
 
+/// Split a slash-command argument string into tokens, keeping double-quoted
+/// segments together (so `--stdio "npx -y …"` stays one argument).
+fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    let mut has = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                has = true;
+            }
+            c if c.is_whitespace() && !in_quote => {
+                if has {
+                    out.push(std::mem::take(&mut cur));
+                    has = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has = true;
+            }
+        }
+    }
+    if has {
+        out.push(cur);
+    }
+    out
+}
+
 /// The byte index of the char boundary just before `i` (clamped at 0).
 fn prev_boundary(s: &str, i: usize) -> usize {
     s[..i].char_indices().next_back().map(|(b, _)| b).unwrap_or(0)
@@ -1278,13 +1325,18 @@ async fn do_run(
     let config = rinne_config::load_cwd()?;
     let cwd = std::env::current_dir()?;
     let bb = Blackboard::open(&cwd)?;
-    let (registry, _) = runner::build_registry(&config).await?;
+    let (executor, tool_specs, mcp_servers) = runner::host_setup(&config).await;
+    let (registry, _) = runner::build_registry_with_tools(&config, executor).await?;
     if registry.is_empty() {
         return Err(anyhow!("no available workers — run `rinne doctor`"));
     }
+    // Build the planning context up front (even on resume) so the conductor
+    // carries it as its replanner template throughout the run.
+    let catalog = crate::catalog::gather(&config, &cwd).await;
+    let template = runner::plan_template(&config, &registry, catalog);
     let conductor = runner::build_conductor(&config, &registry, cwd.clone())
         .ok()
-        .map(Arc::new);
+        .map(|c| Arc::new(c.with_context(template.clone())));
 
     if resume.is_none() {
         let conductor = conductor
@@ -1293,10 +1345,7 @@ async fn do_run(
         let input = ConductorInput {
             goal: goal.clone(),
             mentioned,
-            workers: registry.descriptors(),
-            budget_minutes: Some(config.loop_.global_budget_minutes as u64),
-            max_iterations_per_node: config.loop_.max_iterations_per_node,
-            ..Default::default()
+            ..template
         };
         let plan = conductor.plan(&input).await?;
         bb.save_plan(&plan)?;
@@ -1325,7 +1374,10 @@ async fn do_run(
         }
     });
 
-    let mut engine = Engine::new(&bb, plan, &registry, runner::options_with_pool(&config, &registry));
+    let mut opts = runner::options_with_pool(&config, &registry, &cwd);
+    opts.tool_specs = tool_specs;
+    opts.mcp_servers = mcp_servers;
+    let mut engine = Engine::new(&bb, plan, &registry, opts);
     if let Some(c) = &conductor {
         engine = engine.with_replanner(c.clone());
     }
