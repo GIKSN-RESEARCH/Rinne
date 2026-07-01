@@ -5,18 +5,34 @@
 //! *pinned file paths*, never inlined contents (`CONTEXT.md` §8 behavioral
 //! split, §12 context assembler).
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use rinne_core::worker::{
-    emit, EventSink, ExecStatus, ExecuteRequest, ExecuteResult, Role, Usage, Worker,
+    emit, EventSink, ExecStatus, ExecuteRequest, ExecuteResult, McpServerSpec, Role, Usage, Worker,
     WorkerDescriptor, WorkerEvent,
 };
 use rinne_core::Result;
 
 use crate::transport::subprocess::{self, LineMapper, SubprocessOutput, SubprocessSpec};
+
+/// How a harness invocation is augmented to use a set of MCP servers — the
+/// provision path (`MCP_SKILLS.md` §6). A provisioner writes whatever config the
+/// CLI needs and returns the extra argv, the subprocess environment (carrying
+/// secret tokens, kept out of the file via `${VAR}` expansion), and a file to
+/// clean up afterward.
+pub struct Provision {
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cleanup: Option<PathBuf>,
+}
+
+/// Builds the MCP provisioning for a harness given the node's servers and a
+/// scratch directory to write any config file into.
+pub type McpProvisioner = fn(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision>;
 
 /// What an adapter extracts from a harness CLI's raw output. Parsers should be
 /// defensive: on any doubt, fall back to the raw stdout as the result text so a
@@ -109,12 +125,23 @@ pub struct HarnessAdapter {
     /// Whether the prompt is piped via stdin (vs. passed as an argument).
     pub prompt_via_stdin: bool,
     pub default_timeout: Duration,
+    /// How this harness is told to use a node's MCP servers (`MCP_SKILLS.md` §6).
+    /// `None` means the harness has no MCP provisioning wired: a node's tools are
+    /// simply unavailable to it (the node still runs), so the conductor should
+    /// prefer an API worker for tool-heavy nodes on such a harness.
+    pub provisioner: Option<McpProvisioner>,
 }
 
 #[async_trait]
 impl Worker for HarnessAdapter {
     fn descriptor(&self) -> &WorkerDescriptor {
         &self.descriptor
+    }
+
+    /// A harness serves MCP tools when it has a provisioner wired (the provision
+    /// path, `MCP_SKILLS.md` §6).
+    fn serves_mcp_tools(&self) -> bool {
+        self.provisioner.is_some()
     }
 
     async fn execute(
@@ -138,6 +165,11 @@ impl Worker for HarnessAdapter {
         // starts lean so a work flag can't make the planner exit non-zero.
         let mut lean = matches!(request.role, Role::Planner) && has_lean;
 
+        // Provision the node's MCP servers into this harness once, up front
+        // (`MCP_SKILLS.md` §6). A provisioner failure is non-fatal: narrate it and
+        // run without the tools rather than failing the node.
+        let provision = self.provision(&request, &events);
+
         // Retry transient failures (spawn errors, timeouts) once before giving
         // up — beta CLIs are flaky (`CONTEXT.md` §21). A cancelled run is not
         // retried.
@@ -147,17 +179,23 @@ impl Worker for HarnessAdapter {
             attempt += 1;
             let builder = if lean { self.plan_args.unwrap() } else { self.build_args };
             let mapper = if lean { subprocess::raw_lines } else { self.line_mapper };
-            let (args, stdin) = if self.prompt_via_stdin {
+            let (mut args, stdin) = if self.prompt_via_stdin {
                 (builder("", model), Some(prompt.clone()))
             } else {
                 (builder(&prompt, model), None)
             };
+            // Append the MCP flags on the rich work invocation (not the lean
+            // planner path, which neither needs tools nor accepts the flags).
+            if !lean {
+                args.extend(provision.args.iter().cloned());
+            }
             let spec = SubprocessSpec {
                 program: self.program.clone(),
                 args,
                 workspace: request.workspace.clone(),
                 stdin,
                 timeout: Some(timeout),
+                env: provision.env.clone(),
             };
             match subprocess::run(spec, &events, &cancel, mapper).await {
                 Ok(out) => {
@@ -196,6 +234,11 @@ impl Worker for HarnessAdapter {
                 }
             }
         };
+        // Best-effort cleanup of the provisioned config file (it holds no secret,
+        // but leaving scratch around is untidy).
+        if let Some(path) = &provision.cleanup {
+            let _ = std::fs::remove_file(path);
+        }
         // The lean invocation yields plain text (the answer / JSON DAG, possibly
         // fenced); take full stdout and let the caller's tolerant parser read it.
         let parsed = if lean {
@@ -235,12 +278,65 @@ impl Worker for HarnessAdapter {
     }
 }
 
+impl HarnessAdapter {
+    /// Run this harness's provisioner over a node's MCP servers, narrating the
+    /// outcome. Returns an empty provision (no args/env) when the node attaches
+    /// no servers, the harness has no provisioner, or provisioning fails.
+    fn provision(&self, request: &ExecuteRequest, events: &EventSink) -> Provision {
+        let empty = Provision {
+            args: Vec::new(),
+            env: Vec::new(),
+            cleanup: None,
+        };
+        if request.mcp_servers.is_empty() {
+            return empty;
+        }
+        let Some(provisioner) = self.provisioner else {
+            emit(
+                events,
+                WorkerEvent::Message(format!(
+                    "{} has no MCP provisioning — running without {} tool server(s)",
+                    self.program,
+                    request.mcp_servers.len()
+                )),
+            );
+            return empty;
+        };
+        let scratch = request
+            .workspace
+            .join(rinne_core::BLACKBOARD_DIR)
+            .join("mcp");
+        match provisioner(&request.mcp_servers, &scratch) {
+            Ok(p) => {
+                let names: Vec<&str> = request.mcp_servers.iter().map(|s| s.name.as_str()).collect();
+                emit(
+                    events,
+                    WorkerEvent::Message(format!("provisioned MCP: {}", names.join(", "))),
+                );
+                p
+            }
+            Err(e) => {
+                emit(
+                    events,
+                    WorkerEvent::Message(format!("MCP provisioning failed ({e}) — running without tools")),
+                );
+                empty
+            }
+        }
+    }
+}
+
 /// Compose a harness prompt from the request: the instruction, any critique fed
 /// back on loop-back, ambient steering, and the pinned file paths the worker
 /// should read itself.
 pub fn compose_prompt(request: &ExecuteRequest) -> String {
     let mut out = String::new();
     out.push_str(&request.instruction);
+
+    if !request.context.skill_text.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&request.context.skill_text);
+    }
 
     if !request.context.prior_context.is_empty() {
         out.push_str("\n\n## Context\n");
@@ -267,4 +363,125 @@ pub fn compose_prompt(request: &ExecuteRequest) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rinne_core::worker::{ContextPacket, Constraints};
+    use std::path::PathBuf;
+
+    fn req(skill_text: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            role: Role::Generator,
+            instruction: "do the task".into(),
+            context: ContextPacket {
+                skill_text: skill_text.into(),
+                ..Default::default()
+            },
+            workspace: PathBuf::from("/tmp"),
+            constraints: Constraints::default(),
+            tools: Vec::new(),
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn skill_text_is_injected_after_instruction() {
+        let prompt = compose_prompt(&req("## Skill: pdf-forms\nFlatten the form"));
+        assert!(prompt.starts_with("do the task"));
+        assert!(prompt.contains("## Skill: pdf-forms"));
+        assert!(prompt.contains("Flatten the form"));
+    }
+
+    #[test]
+    fn absent_skill_text_adds_nothing() {
+        assert_eq!(compose_prompt(&req("")), "do the task");
+    }
+
+    fn harness(provisioner: Option<McpProvisioner>) -> HarnessAdapter {
+        use rinne_core::worker::{
+            AuthMode, Capability, LatencyProfile, QuotaModel, Transport, WorkerFamily,
+        };
+        HarnessAdapter {
+            descriptor: WorkerDescriptor {
+                name: "test".into(),
+                family: WorkerFamily::Harness,
+                capabilities: vec![Capability::CodeEdit],
+                auth_mode: AuthMode::Subscription,
+                quota: QuotaModel::unlimited(),
+                latency: LatencyProfile::Medium,
+                transport: Transport::SubprocessJson,
+                models: vec![],
+            },
+            program: "test".into(),
+            build_args: |_, _| vec![],
+            plan_args: None,
+            parse: parse_raw,
+            line_mapper: crate::transport::subprocess::raw_lines,
+            prompt_via_stdin: false,
+            default_timeout: std::time::Duration::from_secs(1),
+            provisioner,
+        }
+    }
+
+    fn tool_request() -> ExecuteRequest {
+        use rinne_core::worker::{McpServerSpec, McpTransportKind};
+        let mut r = req("");
+        r.mcp_servers = vec![McpServerSpec {
+            name: "srv".into(),
+            transport: McpTransportKind::Stdio,
+            command: Some("cmd".into()),
+            args: vec![],
+            env: vec![],
+            url: None,
+            headers: vec![],
+            token_env: None,
+            token: None,
+        }];
+        r
+    }
+
+    #[test]
+    fn provisioner_supplies_args_and_env_for_a_tool_node() {
+        fn prov(_s: &[McpServerSpec], _p: &std::path::Path) -> Result<Provision> {
+            Ok(Provision {
+                args: vec!["--mcp-config".into(), "x.json".into()],
+                env: vec![("TOKEN".into(), "secret".into())],
+                cleanup: None,
+            })
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let p = harness(Some(prov)).provision(&tool_request(), &tx);
+        assert_eq!(p.args, vec!["--mcp-config", "x.json"]);
+        assert_eq!(p.env, vec![("TOKEN".to_string(), "secret".to_string())]);
+    }
+
+    #[test]
+    fn no_provisioner_yields_empty_provision_and_narrates() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let p = harness(None).provision(&tool_request(), &tx);
+        assert!(p.args.is_empty(), "no flags when the harness can't provision");
+        assert!(p.env.is_empty());
+        // The gap is surfaced, not silent.
+        let mut narrated = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let WorkerEvent::Message(m) = ev {
+                if m.contains("no MCP provisioning") {
+                    narrated = true;
+                }
+            }
+        }
+        assert!(narrated, "a missing provisioner should be narrated");
+    }
+
+    #[test]
+    fn no_servers_means_no_provision_work() {
+        fn prov(_s: &[McpServerSpec], _p: &std::path::Path) -> Result<Provision> {
+            panic!("must not be called when the node attaches no servers");
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let p = harness(Some(prov)).provision(&req(""), &tx); // req() has no mcp_servers
+        assert!(p.args.is_empty());
+    }
 }
