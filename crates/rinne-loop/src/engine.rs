@@ -20,8 +20,8 @@ use crate::evaluator::{self, AiEvaluator, HumanEvaluator, ToolEvaluator};
 use crate::ratchet;
 use crate::registry::WorkerRegistry;
 use crate::worker::{
-    Constraints, EventSink, ExecStatus, ExecuteRequest, Usage, WorkerDescriptor, WorkerEvent,
-    WorkerFamily,
+    Constraints, EventSink, ExecStatus, ExecuteRequest, McpServerSpec, ToolSpec, Usage,
+    WorkerDescriptor, WorkerEvent, WorkerFamily,
 };
 use crate::Result;
 use rinne_types::{Blackboard, EvalContext, Evaluator, Gate, NodeStatus, Replanner};
@@ -46,6 +46,18 @@ pub struct EngineOptions {
     /// Whether the pool is single-family; if so, AI evaluators are same-family
     /// and the engine narrates that independence is limited.
     pub single_family_pool: bool,
+    /// Installed skill bodies (name → instruction body), resolved at run start.
+    /// A node's `skills` are looked up here and injected into its prompt
+    /// (`MCP_SKILLS.md` §11).
+    pub skill_bodies: HashMap<String, String>,
+    /// MCP tool specs (id → spec) the host path offers to an API worker whose
+    /// node attaches that tool (`MCP_SKILLS.md` §6). A node's `tools` are looked
+    /// up here to populate its `ExecuteRequest`.
+    pub tool_specs: HashMap<String, ToolSpec>,
+    /// MCP server connection specs (server name → spec) the provision path
+    /// provisions into a harness whose node attaches a tool from that server
+    /// (`MCP_SKILLS.md` §6).
+    pub mcp_servers: HashMap<String, McpServerSpec>,
 }
 
 impl Default for EngineOptions {
@@ -60,6 +72,9 @@ impl Default for EngineOptions {
             worker_models: HashMap::new(),
             model_ladders: HashMap::new(),
             single_family_pool: false,
+            skill_bodies: HashMap::new(),
+            tool_specs: HashMap::new(),
+            mcp_servers: HashMap::new(),
         }
     }
 }
@@ -292,7 +307,13 @@ impl<'a> Engine<'a> {
         sink: &Option<EngineSink>,
         cancel: &CancellationToken,
     ) -> Result<Option<StopReason>> {
-        let Some(worker) = self.registry.resolve(&node.needs, node.prefer.as_deref()) else {
+        // Tool-aware routing (`MCP_SKILLS.md` §6): a node that attaches tools
+        // prefers a worker that can actually serve them.
+        let needs_tools = !node.tools.is_empty();
+        let Some((worker, tools_servable)) =
+            self.registry
+                .resolve_for(&node.needs, node.prefer.as_deref(), needs_tools)
+        else {
             // Unsatisfiable node: never silently assign an incapable worker —
             // park for the human instead (`CONTEXT.md` §7).
             let question = format!(
@@ -308,6 +329,20 @@ impl<'a> Engine<'a> {
         };
         let worker_name = worker.descriptor().name.clone();
         let family = worker.descriptor().family;
+
+        // A tool node landed on a worker that can't run its tools (no
+        // tool-capable worker satisfied its needs). Surface it rather than
+        // dropping the tools silently.
+        if needs_tools && !tools_servable {
+            narrate(
+                sink,
+                format!(
+                    "{} attaches tools but {} can't run them — proceeding without tools \
+                     (add an API worker or claude-code to serve them)",
+                    node.id, worker_name
+                ),
+            );
+        }
 
         narrate(sink, format!(
             "routed {} ({:?}) to {} [{}]",
@@ -332,7 +367,8 @@ impl<'a> Engine<'a> {
         ))?;
 
         let assembler = ContextAssembler::new(self.blackboard, &self.plan);
-        let packet = assembler.build(node, family, critique)?;
+        let mut packet = assembler.build(node, family, critique)?;
+        packet.skill_text = self.skill_text(node);
         if let Ok(json) = serde_json::to_string_pretty(&packet) {
             let _ = self.blackboard.write_context(&node.id, &json);
         }
@@ -360,6 +396,8 @@ impl<'a> Engine<'a> {
                 model,
                 ..Default::default()
             },
+            tools: self.tool_specs_for(node),
+            mcp_servers: self.mcp_servers_for(node),
         };
 
         let result = self.dispatch(worker.as_ref(), &node.id, request, sink, cancel).await?;
@@ -709,6 +747,52 @@ impl<'a> Engine<'a> {
             .or_else(|| self.options.worker_models.get(worker_name).cloned())
     }
 
+    /// The combined instruction text of a node's attached skills (`MCP_SKILLS.md`
+    /// §11), each under a `## Skill: <name>` header. Empty when the node attaches
+    /// none, or none are installed. Unknown skill names are skipped silently —
+    /// the catalog only ever offers installed ones.
+    fn skill_text(&self, node: &Node) -> String {
+        let mut out = String::new();
+        for name in &node.skills {
+            if let Some(body) = self.options.skill_bodies.get(name) {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&format!("## Skill: {name}\n{body}"));
+            }
+        }
+        out
+    }
+
+    /// Resolve a node's attached `tools` to their full specs from the run's tool
+    /// catalog (`MCP_SKILLS.md` §6). Unknown ids are skipped — the catalog only
+    /// offers tools that were reachable at plan time.
+    fn tool_specs_for(&self, node: &Node) -> Vec<ToolSpec> {
+        node.tools
+            .iter()
+            .filter_map(|id| self.options.tool_specs.get(id).cloned())
+            .collect()
+    }
+
+    /// The distinct MCP servers backing a node's attached `tools`, as connection
+    /// specs for the provision path (`MCP_SKILLS.md` §6). A tool id is
+    /// `server.tool`; each server is provisioned once even if the node attaches
+    /// several of its tools. Unknown servers are skipped.
+    fn mcp_servers_for(&self, node: &Node) -> Vec<McpServerSpec> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for id in &node.tools {
+            let server = id.split_once('.').map(|(s, _)| s).unwrap_or(id.as_str());
+            if !seen.insert(server.to_string()) {
+                continue;
+            }
+            if let Some(spec) = self.options.mcp_servers.get(server) {
+                out.push(spec.clone());
+            }
+        }
+        out
+    }
+
     /// Validate a candidate model against the worker that will run the node.
     /// A model belongs to a specific worker (Claude's are opus/sonnet/haiku;
     /// an NVIDIA worker's is `deepseek-ai/…`), so a model the worker doesn't
@@ -923,6 +1007,96 @@ impl<'a> Engine<'a> {
             total_usage: state.total_usage()?,
             total_iterations: state.total_iterations()?,
         })
+    }
+}
+
+/// The engine's [`EvalContext`]: the services the evaluator strategies call,
+/// implemented over the running engine plus this grade's sink and cancel token.
+struct GradeCtx<'a, 'e> {
+    engine: &'a Engine<'e>,
+    sink: &'a Option<EngineSink>,
+    cancel: &'a CancellationToken,
+}
+
+#[async_trait(?Send)]
+impl EvalContext for GradeCtx<'_, '_> {
+    fn workspace(&self) -> &Path {
+        self.engine.blackboard.workspace()
+    }
+
+    async fn run_tool(&self, node: &Node, command: &str, must_exit: i32) -> Result<(bool, String)> {
+        emit_engine(self.sink, EngineEvent::NodeStarted {
+            id: node.id.clone(),
+            worker: format!("tool:{command}"),
+        });
+        let verdict = evaluator::run_tool(
+            self.engine.blackboard.workspace(),
+            command,
+            must_exit,
+            Duration::from_secs(300),
+        )
+        .await?;
+        emit_engine(self.sink, EngineEvent::NodeStream {
+            id: node.id.clone(),
+            event: WorkerEvent::Message(format!(
+                "{} → {}",
+                command,
+                if verdict.passed { "pass" } else { "fail" }
+            )),
+        });
+        Ok((verdict.passed, verdict.output))
+    }
+
+    async fn run_ai(&self, node: &Node, extra_instruction: &str) -> Result<Option<String>> {
+        let e = self.engine;
+        let sink = self.sink;
+        let Some(worker) = e.registry.resolve(&node.needs, node.prefer.as_deref()) else {
+            return Ok(None);
+        };
+        let worker_name = worker.descriptor().name.clone();
+        let family = worker.descriptor().family;
+        e.blackboard.set_worker(&node.id, &worker_name)?;
+        // Evaluator-independence ladder: a single-family pool can only do
+        // same-family review, which shares blind spots. Be honest about it
+        // (`CONTEXT.md` §7, §11).
+        if e.options.single_family_pool {
+            narrate(
+                sink,
+                "same-family review — independence is limited; a tool check, a human checkpoint, \
+                 or a cheap second-family key would strengthen verification"
+                    .to_string(),
+            );
+        }
+        emit_engine(sink, EngineEvent::NodeStarted {
+            id: node.id.clone(),
+            worker: worker_name.clone(),
+        });
+
+        let assembler = ContextAssembler::new(e.blackboard, &e.plan);
+        let mut packet = assembler.build(node, family, None)?;
+        packet.skill_text = e.skill_text(node);
+        let candidate = e.resolve_model(node, &worker_name);
+        let model = e.valid_model_for(candidate, worker.descriptor(), &worker_name, sink);
+        if let Some(m) = &model {
+            narrate(sink, format!("{} on {worker_name}:{m}", node.id));
+        }
+        let request = ExecuteRequest {
+            role: node.role,
+            instruction: format!("{}{}", node.instruction, extra_instruction),
+            context: packet,
+            workspace: e.blackboard.workspace().to_path_buf(),
+            constraints: Constraints {
+                model,
+                ..Default::default()
+            },
+            // Evaluators grade; they do not call tools.
+            tools: Vec::new(),
+            mcp_servers: Vec::new(),
+        };
+        let result = e.dispatch(worker.as_ref(), &node.id, request, sink, self.cancel).await?;
+        e.blackboard.write_transcript(&node.id, &result.transcript)?;
+        e.blackboard.record_usage(&node.id, &worker_name, &result.usage)?;
+        Ok(Some(result.result))
     }
 }
 
