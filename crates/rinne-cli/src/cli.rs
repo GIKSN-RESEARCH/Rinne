@@ -117,4 +117,24 @@ pub enum Command {
 
     /// View trajectory logs (local only).
     Logs,
+
+    /// Connect and manage MCP servers (tools available to your workers).
+    ///
+    /// Subcommands: `add <name> --stdio "<cmd>" | --http <url>`, `list`,
+    /// `tools <name>`, `test <name>`, `remove <name>`.
+    Mcp {
+        /// The subcommand and its arguments (e.g. `add fs --stdio "npx …"`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Install and manage Agent Skills (instructions your workers can follow).
+    ///
+    /// Subcommands: `install <path> [--project]`, `list`, `show <name>`,
+    /// `remove <name>`. A skill is a folder with a `SKILL.md`.
+    Skill {
+        /// The subcommand and its arguments (e.g. `install ./skills/pdf-forms`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
