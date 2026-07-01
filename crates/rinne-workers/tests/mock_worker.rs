@@ -17,6 +17,8 @@ fn request() -> ExecuteRequest {
         context: ContextPacket::default(),
         workspace: PathBuf::from("."),
         constraints: Constraints::default(),
+        tools: Vec::new(),
+        mcp_servers: Vec::new(),
     }
 }
 

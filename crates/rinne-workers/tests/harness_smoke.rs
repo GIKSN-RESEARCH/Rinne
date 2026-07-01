@@ -29,6 +29,8 @@ async fn claude_code_executes_one_line_task() {
             timeout_secs: Some(120),
             ..Default::default()
         },
+        tools: Vec::new(),
+        mcp_servers: Vec::new(),
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WorkerEvent>();
