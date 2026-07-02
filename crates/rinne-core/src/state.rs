@@ -5,11 +5,24 @@
 //! so a killed run resumes entirely from here (`CONTEXT.md` §12 persistence).
 
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::Connection;
 
 use crate::worker::Usage;
 use crate::{Result, RinneError};
+
+/// Turn a single-row query result into an `Option`, treating "no rows" as the
+/// legitimate `None` while propagating every other error (a locked, busy, or
+/// corrupt database). Reads that swallow these into a default silently feed the
+/// scheduler and budget checks wrong state — worse than failing loudly.
+fn optional<T>(r: rusqlite::Result<T>) -> Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(sql_err(e)),
+    }
+}
 
 // The node lifecycle status now lives in `rinne-types` (the Blackboard seam);
 // re-export it so existing `rinne_core::state::NodeStatus` paths keep working.
@@ -40,6 +53,9 @@ impl State {
             .map_err(sql_err)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(sql_err)?;
+        // Wait briefly on a write lock instead of failing instantly, so a
+        // concurrent `rinne status`/`logs` reader doesn't error the engine.
+        conn.busy_timeout(Duration::from_secs(5)).map_err(sql_err)?;
         let state = State { conn };
         state.init_schema()?;
         Ok(state)
@@ -139,28 +155,22 @@ impl State {
     }
 
     pub fn status(&self, node_id: &str) -> Result<NodeStatus> {
-        let s: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT status FROM nodes WHERE node_id = ?1",
-                [node_id],
-                |r| r.get(0),
-            )
-            .ok();
+        let s: Option<String> = optional(self.conn.query_row(
+            "SELECT status FROM nodes WHERE node_id = ?1",
+            [node_id],
+            |r| r.get(0),
+        ))?;
         Ok(s.map(|s| NodeStatus::from_str(&s)).unwrap_or(NodeStatus::Pending))
     }
 
     /// The worker last assigned to a node, if any.
     pub fn worker(&self, node_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT worker FROM nodes WHERE node_id = ?1",
-                [node_id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten())
+        Ok(optional(self.conn.query_row(
+            "SELECT worker FROM nodes WHERE node_id = ?1",
+            [node_id],
+            |r| r.get::<_, Option<String>>(0),
+        ))?
+        .flatten())
     }
 
     /// Increment a node's iteration counter and return the new value.
@@ -175,15 +185,12 @@ impl State {
     }
 
     pub fn iterations(&self, node_id: &str) -> Result<u32> {
-        let n: i64 = self
-            .conn
-            .query_row(
-                "SELECT iterations FROM nodes WHERE node_id = ?1",
-                [node_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        Ok(n as u32)
+        let n: Option<i64> = optional(self.conn.query_row(
+            "SELECT iterations FROM nodes WHERE node_id = ?1",
+            [node_id],
+            |r| r.get(0),
+        ))?;
+        Ok(n.unwrap_or(0).clamp(0, u32::MAX as i64) as u32)
     }
 
     /// Record token/time usage for a node invocation.
@@ -208,13 +215,16 @@ impl State {
 
     /// Total iterations recorded across all nodes (the run-level loop count).
     pub fn total_iterations(&self) -> Result<u32> {
+        // COALESCE(SUM(...)) always returns exactly one row, so any error here is
+        // a real DB failure — propagate it rather than reading "0 iterations",
+        // which would silently bypass the global iteration cap.
         let n: i64 = self
             .conn
             .query_row("SELECT COALESCE(SUM(iterations), 0) FROM nodes", [], |r| {
                 r.get(0)
             })
-            .unwrap_or(0);
-        Ok(n as u32)
+            .map_err(sql_err)?;
+        Ok(n.clamp(0, u32::MAX as i64) as u32)
     }
 
     /// Aggregate token usage across the run.
@@ -227,11 +237,11 @@ impl State {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .unwrap_or((0, 0, 0));
+            .map_err(sql_err)?;
         Ok(Usage {
-            prompt_tokens: p as u64,
-            completion_tokens: c as u64,
-            wall_ms: w as u64,
+            prompt_tokens: p.max(0) as u64,
+            completion_tokens: c.max(0) as u64,
+            wall_ms: w.max(0) as u64,
         })
     }
 
@@ -276,12 +286,11 @@ impl State {
     }
 
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row("SELECT value FROM run_meta WHERE key = ?1", [key], |r| {
-                r.get(0)
-            })
-            .ok())
+        optional(self.conn.query_row(
+            "SELECT value FROM run_meta WHERE key = ?1",
+            [key],
+            |r| r.get(0),
+        ))
     }
 }
 
