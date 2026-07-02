@@ -36,10 +36,14 @@ impl Plan {
         self.nodes.iter().find(|n| n.id == id)
     }
 
-    /// Validate structural invariants: unique ids, and every `depends_on` edge
-    /// points at a real node with no self-loop.
+    /// Validate structural invariants: a non-empty node set, unique ids, every
+    /// `depends_on` edge pointing at a real node, and no dependency cycles (which
+    /// would otherwise leave the scheduler unable to ever run a node).
     pub fn validate(&self) -> crate::Result<()> {
         use std::collections::HashSet;
+        if self.nodes.is_empty() {
+            return Err(crate::RinneError::Plan("plan has no nodes".into()));
+        }
         let mut seen = HashSet::new();
         for n in &self.nodes {
             if !seen.insert(n.id.as_str()) {
@@ -59,6 +63,49 @@ impl Plan {
                         "node `{}` depends on unknown node `{dep}`",
                         n.id
                     )));
+                }
+            }
+        }
+        self.check_acyclic()?;
+        Ok(())
+    }
+
+    /// Detect a dependency cycle via DFS, returning a clear error naming a node
+    /// on the cycle. A multi-node cycle (`a → b → a`) would otherwise pass the
+    /// edge checks and then surface only as a mysterious "blocked" run.
+    fn check_acyclic(&self) -> crate::Result<()> {
+        use std::collections::HashMap;
+
+        // 0 = unvisited, 1 = on the current DFS stack, 2 = fully explored.
+        let mut state: HashMap<&str, u8> = self.nodes.iter().map(|n| (n.id.as_str(), 0u8)).collect();
+
+        // Iterative DFS so a deep chain can't blow the stack.
+        for start in &self.nodes {
+            if state[start.id.as_str()] != 0 {
+                continue;
+            }
+            let mut stack: Vec<(&str, usize)> = vec![(start.id.as_str(), 0)];
+            state.insert(start.id.as_str(), 1);
+            while let Some(&mut (id, ref mut idx)) = stack.last_mut() {
+                let deps = self.node(id).map(|n| n.depends_on.as_slice()).unwrap_or(&[]);
+                if *idx < deps.len() {
+                    let dep = deps[*idx].as_str();
+                    *idx += 1;
+                    match state.get(dep).copied().unwrap_or(2) {
+                        0 => {
+                            state.insert(dep, 1);
+                            stack.push((dep, 0));
+                        }
+                        1 => {
+                            return Err(crate::RinneError::Plan(format!(
+                                "plan has a dependency cycle involving node `{dep}`"
+                            )));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    state.insert(id, 2);
+                    stack.pop();
                 }
             }
         }
@@ -257,5 +304,35 @@ mod tests {
     #[test]
     fn unparseable_returns_none() {
         assert_eq!(parse_on_fail("garbage"), None);
+    }
+
+    #[test]
+    fn rejects_empty_plan() {
+        let p: Plan = serde_json::from_str(r#"{"goal":"g","nodes":[]}"#).unwrap();
+        let err = p.validate().unwrap_err().to_string();
+        assert!(err.contains("no nodes"), "got: {err}");
+    }
+
+    #[test]
+    fn detects_multi_node_cycle() {
+        let p: Plan = serde_json::from_str(
+            r#"{"goal":"g","nodes":[
+                {"id":"a","role":"generator","instruction":"x","depends_on":["b"]},
+                {"id":"b","role":"generator","instruction":"y","depends_on":["a"]}]}"#,
+        )
+        .unwrap();
+        let err = p.validate().unwrap_err().to_string();
+        assert!(err.contains("cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_a_valid_dag() {
+        let p: Plan = serde_json::from_str(
+            r#"{"goal":"g","nodes":[
+                {"id":"a","role":"generator","instruction":"x"},
+                {"id":"b","role":"evaluator","instruction":"y","depends_on":["a"]}]}"#,
+        )
+        .unwrap();
+        assert!(p.validate().is_ok());
     }
 }
