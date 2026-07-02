@@ -94,10 +94,40 @@ pub fn unset_value(path: &Path, dotted: &str) -> Result<bool> {
 
 /// Read the config file at `path` as an editable document (empty doc if absent).
 fn read_doc(path: &Path) -> Result<DocumentMut> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = read_config_text(path)?;
     existing
         .parse()
         .map_err(|e| RinneError::Config(format!("existing config is not valid TOML: {e}")))
+}
+
+/// Read the config file's text: a missing file starts empty, but a real read
+/// error (permissions, IO) is surfaced rather than silently treated as empty —
+/// defaulting to empty here would clobber the user's config on the next write.
+fn read_config_text(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(RinneError::Config(format!(
+            "could not read {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// Write `text` to `path` atomically: write a sibling temp file then rename over
+/// the target (rename is atomic on the same filesystem), so a crash or full disk
+/// mid-write can never leave a truncated, corrupt config.
+fn atomic_write(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        RinneError::Io(e)
+    })?;
+    Ok(())
 }
 
 /// Infer the TOML scalar type of a raw string: bool, then integer, else string.
@@ -118,11 +148,7 @@ fn validate_and_write(path: &Path, doc: DocumentMut) -> Result<()> {
     let text = doc.to_string();
     toml::from_str::<Config>(&text)
         .map_err(|e| RinneError::Config(format!("rejected ({})", reason(&e.to_string()))))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, text)?;
-    Ok(())
+    atomic_write(path, &text)
 }
 
 /// Pull the human-readable reason out of a `toml` deserialize error. The toml
@@ -159,11 +185,7 @@ pub fn write_api_provider_to(
     base_url: &str,
     models: &[&str],
 ) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let mut doc: DocumentMut = existing
+    let mut doc: DocumentMut = read_config_text(path)?
         .parse()
         .map_err(|e| RinneError::Config(format!("existing config is not valid TOML: {e}")))?;
 
@@ -194,8 +216,7 @@ pub fn write_api_provider_to(
     }
     api[name] = Item::Table(provider);
 
-    std::fs::write(path, doc.to_string())?;
-    Ok(())
+    atomic_write(path, &doc.to_string())
 }
 
 #[cfg(test)]
@@ -314,6 +335,12 @@ pub fn write_mcp_server_to(path: &Path, name: &str, server: &McpServer) -> Resul
     }
     if server.host_only {
         t["host_only"] = value(true);
+    }
+    if let Some(a) = &server.auth {
+        t["auth"] = value(a.as_str());
+    }
+    if let Some(h) = &server.auth_header {
+        t["auth_header"] = value(h.as_str());
     }
     if !server.enabled {
         t["enabled"] = value(false);
