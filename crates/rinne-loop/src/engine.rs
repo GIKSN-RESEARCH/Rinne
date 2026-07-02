@@ -24,7 +24,7 @@ use crate::worker::{
     WorkerDescriptor, WorkerEvent, WorkerFamily,
 };
 use crate::Result;
-use rinne_types::{Blackboard, EvalContext, Evaluator, Gate, NodeStatus, Replanner};
+use rinne_types::{Blackboard, EvalContext, Evaluator, Gate, NodeStatus, Replanner, RinneError};
 
 /// Tunable limits for a run, merged from config and the plan's own budget.
 #[derive(Debug, Clone)]
@@ -148,6 +148,16 @@ struct LoopTracker {
     escalated_models: HashMap<String, String>,
 }
 
+/// An absolute ceiling on total node iterations per run, applied even when no
+/// minutes/iteration budget is configured, so the loop can never run unbounded.
+/// Set far above any real run; it is a runaway backstop, not a working budget.
+const HARD_ITERATION_CEILING: u32 = 2000;
+
+/// Maximum times the replanner may amend the DAG in one run. Each replan can
+/// introduce fresh node ids that reset per-node iteration caps, so without this
+/// a perpetually-failing plan could churn indefinitely.
+const MAX_REPLANS: u32 = 10;
+
 /// The loop engine over a blackboard, owned plan, and worker registry.
 pub struct Engine<'a> {
     blackboard: &'a dyn Blackboard,
@@ -155,6 +165,8 @@ pub struct Engine<'a> {
     registry: &'a WorkerRegistry,
     options: EngineOptions,
     replanner: Option<Arc<dyn Replanner>>,
+    /// Replans applied so far this run (capped by [`MAX_REPLANS`]).
+    replan_count: u32,
 }
 
 impl<'a> Engine<'a> {
@@ -170,6 +182,7 @@ impl<'a> Engine<'a> {
             registry,
             options,
             replanner: None,
+            replan_count: 0,
         }
     }
 
@@ -191,6 +204,24 @@ impl<'a> Engine<'a> {
         let state = self.blackboard;
         for node in &self.plan.nodes {
             state.ensure_node(&node.id)?;
+            // Reconcile persisted status with artifacts on disk: a node marked
+            // Succeeded whose declared named output is gone (partial write, manual
+            // deletion, interrupted run) must not be consumed as empty context —
+            // reset it to re-run rather than silently feed downstream nothing.
+            if matches!(state.status(&node.id), Ok(NodeStatus::Succeeded)) {
+                let missing = node
+                    .outputs
+                    .iter()
+                    .filter(|o| o.as_str() != "diff") // `diff` is a pseudo-output, not a file
+                    .any(|name| !state.artifact_exists(name));
+                if missing {
+                    state.set_status(&node.id, NodeStatus::Pending)?;
+                    self.blackboard.append_progress(&format!(
+                        "node {} was Succeeded but an output artifact is missing — re-running",
+                        node.id
+                    ))?;
+                }
+            }
         }
         if state.meta("started_at")?.is_none() {
             state.set_meta("started_at", &now_secs().to_string())?;
@@ -221,14 +252,17 @@ impl<'a> Engine<'a> {
                 break StopReason::Cancelled;
             }
             if let Some(mins) = effective_minutes {
-                if now_secs().saturating_sub(started_at) >= mins * 60 {
+                if now_secs().saturating_sub(started_at) >= mins.saturating_mul(60) {
                     break StopReason::BudgetMinutes;
                 }
             }
-            if let Some(max) = effective_max_iters {
-                if state.total_iterations()? >= max {
-                    break StopReason::BudgetIterations;
-                }
+            // The configured cap (if any), plus an always-on absolute backstop so
+            // a run with no budget configured still cannot loop forever.
+            let total_iters = state.total_iterations()?;
+            if effective_max_iters.map(|max| total_iters >= max).unwrap_or(false)
+                || total_iters >= HARD_ITERATION_CEILING
+            {
+                break StopReason::BudgetIterations;
             }
 
             let ready = self.ready_nodes(state)?;
@@ -435,7 +469,7 @@ impl<'a> Engine<'a> {
         cancel: &CancellationToken,
     ) -> Result<Gate> {
         state.set_status(&node.id, NodeStatus::Running)?;
-        let _ = state.incr_iteration(&node.id);
+        state.incr_iteration(&node.id)?;
         let kind = node.evaluator.unwrap_or(EvaluatorKind::Tool);
 
         // The test ratchet runs first: a diff that deletes tests fails the gate
@@ -596,6 +630,14 @@ impl<'a> Engine<'a> {
             narrate(sink, "replan requested but no replanner is attached".into());
             return Ok(Some(StopReason::Blocked));
         };
+        if self.replan_count >= MAX_REPLANS {
+            narrate(
+                sink,
+                format!("replan limit reached ({MAX_REPLANS}) — stopping instead of churning"),
+            );
+            return Ok(Some(StopReason::Blocked));
+        }
+        self.replan_count += 1;
         let digest = self.digest(state)?;
         narrate(sink, "replanning the DAG".into());
         let new_plan = replanner
@@ -909,11 +951,27 @@ impl<'a> Engine<'a> {
             futures_util::future::join_all(futures).await
         };
 
+        // Apply every gate that graded successfully so we don't discard work the
+        // other evaluators already did (tokens spent, transcripts written) just
+        // because one sibling errored; surface the first error only after.
+        let mut first_err: Option<RinneError> = None;
         for (node, gate) in batch.iter().zip(gates) {
-            let gate = gate?;
-            if let Some(stop) = self.apply_gate(node, gate, state, tracker, sink).await? {
-                return Ok(Some(stop));
+            match gate {
+                Ok(gate) => {
+                    if let Some(stop) = self.apply_gate(node, gate, state, tracker, sink).await? {
+                        return Ok(Some(stop));
+                    }
+                }
+                Err(e) => {
+                    narrate(sink, format!("evaluator {} errored: {e}", node.id));
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
             }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
         }
         Ok(None)
     }
