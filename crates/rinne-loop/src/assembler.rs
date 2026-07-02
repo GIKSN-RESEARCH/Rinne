@@ -94,15 +94,30 @@ fn artifact_rel_path(name: &str) -> PathBuf {
     Path::new(BLACKBOARD_DIR).join("artifacts").join(name)
 }
 
+/// Cap on a single inlined file's size, so `@`-mentioning a huge (or binary)
+/// file can't blow up the API request's tokens/cost/memory. Content past the cap
+/// is truncated with a visible marker rather than sent whole.
+const MAX_INLINE_BYTES: usize = 256 * 1024;
+
 /// Read a mentioned file's contents for inlining, resolving it against the
-/// workspace. Returns `None` if it cannot be read (e.g. a directory or missing).
+/// workspace. Returns `None` if it cannot be read (e.g. a directory or missing);
+/// oversized files are truncated with a marker rather than dropped.
 fn read_inlined(workspace: &Path, rel: &Path) -> Option<InlinedFile> {
     let abs = if rel.is_absolute() {
         rel.to_path_buf()
     } else {
         workspace.join(rel)
     };
-    let contents = std::fs::read_to_string(&abs).ok()?;
+    let mut contents = std::fs::read_to_string(&abs).ok()?;
+    if contents.len() > MAX_INLINE_BYTES {
+        // Truncate on a char boundary at or below the cap.
+        let mut cut = MAX_INLINE_BYTES;
+        while cut > 0 && !contents.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        contents.truncate(cut);
+        contents.push_str("\n…[file truncated: exceeded inline size limit]\n");
+    }
     Some(InlinedFile {
         path: rel.to_path_buf(),
         contents,
