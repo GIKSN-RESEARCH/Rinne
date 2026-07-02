@@ -260,12 +260,14 @@ fn provision(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
                 for (k, v) in &s.env {
                     env_map.insert(k.clone(), json!(v));
                 }
-                if let (Some(token), Some(var)) = (&s.token, &s.token_env) {
-                    // The server reads its token from `var`; reference it through
-                    // a host env var so the value never lands in the file.
-                    let host_var = host_env_var(i, &s.name);
-                    env_map.insert(var.clone(), json!(format!("${{{host_var}}}")));
-                    env.push((host_var, token.clone()));
+                if let Some(token) = &s.token {
+                    // The server reads its token from its auth env var; reference
+                    // it through a host env var so the value never lands in the file.
+                    if let Some(var) = s.stdio_auth_env().or_else(|| s.token_env.clone()) {
+                        let host_var = host_env_var(i, &s.name);
+                        env_map.insert(var, json!(format!("${{{host_var}}}")));
+                        env.push((host_var, token.clone()));
+                    }
                 }
                 if !env_map.is_empty() {
                     entry.insert("env".into(), Value::Object(env_map));
@@ -279,8 +281,11 @@ fn provision(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
                     headers.insert(k.clone(), json!(v));
                 }
                 if let Some(token) = &s.token {
+                    // The configured auth header (bearer by default, or a custom
+                    // API-key header), with the token via env expansion.
+                    let (header, prefix) = s.http_auth();
                     let host_var = host_env_var(i, &s.name);
-                    headers.insert("Authorization".into(), json!(format!("Bearer ${{{host_var}}}")));
+                    headers.insert(header, json!(format!("{prefix}${{{host_var}}}")));
                     env.push((host_var, token.clone()));
                 }
                 if !headers.is_empty() {
@@ -412,6 +417,8 @@ mod tests {
                 headers: vec![],
                 token_env: Some("GITHUB_TOKEN".into()),
                 token: Some("secret123".into()),
+                auth: Some("env".into()),
+                auth_header: Some("GITHUB_TOKEN".into()),
             },
             McpServerSpec {
                 name: "remote".into(),
@@ -423,6 +430,21 @@ mod tests {
                 headers: vec![],
                 token_env: Some("REMOTE_TOKEN".into()),
                 token: Some("bearer456".into()),
+                auth: Some("bearer".into()),
+                auth_header: None,
+            },
+            McpServerSpec {
+                name: "keyed".into(),
+                transport: McpTransportKind::Http,
+                command: None,
+                args: vec![],
+                env: vec![],
+                url: Some("https://y/mcp".into()),
+                headers: vec![],
+                token_env: Some("KEYED_TOKEN".into()),
+                token: Some("apikey789".into()),
+                auth: Some("apikey".into()),
+                auth_header: Some("X-Custom-Key".into()),
             },
         ];
 
@@ -451,6 +473,12 @@ mod tests {
         assert_eq!(v["mcpServers"]["fs"]["env"]["GITHUB_TOKEN"], "${RINNE_MCP_0_FS_TOKEN}");
         assert_eq!(v["mcpServers"]["remote"]["type"], "http");
         assert_eq!(v["mcpServers"]["remote"]["url"], "https://x/mcp");
+        // The api-key server uses its custom header (no `Bearer ` prefix).
+        assert!(!content.contains("apikey789"), "api-key token must not be on disk");
+        assert_eq!(
+            v["mcpServers"]["keyed"]["headers"]["X-Custom-Key"],
+            "${RINNE_MCP_2_KEYED_TOKEN}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -475,6 +503,8 @@ mod tests {
             headers: vec![],
             token_env: None,
             token: None,
+            auth: None,
+            auth_header: None,
         }];
         assert!(provision(&servers, &scratch).is_err());
 
