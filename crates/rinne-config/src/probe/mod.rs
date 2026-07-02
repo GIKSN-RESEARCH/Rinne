@@ -49,6 +49,28 @@ pub async fn run(config: &Config, cached_installs: Option<&InstallMap>) -> Resul
     let mut warnings = Vec::new();
     let mut installs = InstallMap::new();
 
+    // Detect uncached harness installs concurrently: each smoke-test is
+    // timeout-bounded, but running them serially made one hung CLI stall the
+    // whole probe. Output order is restored below by iterating KNOWN_HARNESSES.
+    let mut handles = Vec::new();
+    for harness in KNOWN_HARNESSES {
+        let cached = cached_installs.and_then(|m| m.get(harness.name)).cloned();
+        handles.push(tokio::spawn(async move {
+            let status = match cached {
+                Some(s) => s,
+                None => detect_installation(harness).await,
+            };
+            (harness.name, status)
+        }));
+    }
+    let mut status_by_name: std::collections::HashMap<&str, WorkerStatus> =
+        std::collections::HashMap::new();
+    for handle in handles {
+        if let Ok((name, status)) = handle.await {
+            status_by_name.insert(name, status);
+        }
+    }
+
     for harness in KNOWN_HARNESSES {
         let enabled = config
             .backends
@@ -56,12 +78,10 @@ pub async fn run(config: &Config, cached_installs: Option<&InstallMap>) -> Resul
             .enabled
             .iter()
             .any(|n| n == harness.name);
-
-        // Installation status: reuse the cache when available, else detect now.
-        let status = match cached_installs.and_then(|m| m.get(harness.name)) {
-            Some(s) => s.clone(),
-            None => detect_installation(harness).await,
-        };
+        let status = status_by_name
+            .get(harness.name)
+            .cloned()
+            .unwrap_or(WorkerStatus::NotInstalled);
         installs.insert(harness.name.to_string(), status.clone());
 
         let probe = classify_harness(harness, enabled, status);
