@@ -106,6 +106,38 @@ pub struct McpServerSpec {
     /// and referenced via `token_env`.
     #[serde(default, skip_serializing)]
     pub token: Option<String>,
+    /// How the token is presented (`MCP_SKILLS.md` §10): `bearer` (default HTTP
+    /// `Authorization: Bearer`), `apikey` (a custom HTTP header named by
+    /// `auth_header`), or `env` (a stdio env var named by `auth_header`).
+    #[serde(default)]
+    pub auth: Option<String>,
+    /// The header/env-var name for `apikey`/`env` auth.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+}
+
+impl McpServerSpec {
+    /// For an HTTP server, the `(header_name, value_prefix)` the token is sent as
+    /// (bearer by default).
+    pub fn http_auth(&self) -> (String, String) {
+        match self.auth.as_deref() {
+            Some("apikey") => (
+                self.auth_header.clone().unwrap_or_else(|| "X-API-Key".into()),
+                String::new(),
+            ),
+            _ => ("Authorization".into(), "Bearer ".into()),
+        }
+    }
+
+    /// For a stdio server, the environment variable the token is set in, if this
+    /// server uses env-based auth.
+    pub fn stdio_auth_env(&self) -> Option<String> {
+        if self.auth.as_deref() == Some("env") {
+            self.auth_header.clone()
+        } else {
+            None
+        }
+    }
 }
 
 /// Per-invocation limits and steering (`CONTEXT.md` §10 budgets).
