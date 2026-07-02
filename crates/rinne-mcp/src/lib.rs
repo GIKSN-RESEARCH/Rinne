@@ -8,8 +8,10 @@
 //! gives Rinne's host path the tools it sends a model and dispatches.
 
 mod client;
+pub mod oauth;
 mod protocol;
 mod transport;
 
 pub use client::McpClient;
+pub use oauth::{login, refresh, OAuthSession};
 pub use protocol::{RpcError, Tool, PROTOCOL_VERSION};
