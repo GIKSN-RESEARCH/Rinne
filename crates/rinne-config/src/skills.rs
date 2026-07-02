@@ -114,7 +114,13 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let ft = entry.file_type()?;
+        // Skip symlinks: following directory symlinks could recurse a cycle
+        // forever, and a skill folder shouldn't smuggle links outside itself.
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             copy_dir(&from, &to)?;
         } else {
             fs::copy(&from, &to)?;
