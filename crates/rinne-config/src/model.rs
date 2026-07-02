@@ -270,6 +270,20 @@ pub struct McpServer {
     /// servers (`MCP_SKILLS.md` §6 host-only).
     #[serde(default)]
     pub host_only: bool,
+    /// How a stored token is presented to the server (`MCP_SKILLS.md` §10):
+    /// - `bearer` — HTTP `Authorization: Bearer <token>` (the common default),
+    /// - `apikey` — a custom HTTP header (`auth_header`, default `X-API-Key`),
+    /// - `env`    — a stdio server environment variable (`auth_header`).
+    ///
+    /// Absent means bearer for an HTTP server with a token (back-compat) and no
+    /// token injection for stdio. The token itself lives in the keychain, never
+    /// here.
+    #[serde(default)]
+    pub auth: Option<String>,
+    /// The header name (for `apikey`) or environment variable (for `env`) the
+    /// token is placed in. Defaults to `X-API-Key` for `apikey`.
+    #[serde(default)]
+    pub auth_header: Option<String>,
 }
 
 fn mcp_default_true() -> bool {
@@ -284,6 +298,32 @@ impl McpServer {
     /// Whether a tool name is allowed by this server's allowlist.
     pub fn allows_tool(&self, tool: &str) -> bool {
         self.tools_allow.iter().any(|t| t == "*" || t == tool)
+    }
+
+    /// For an HTTP server, the `(header_name, value_prefix)` a resolved token is
+    /// injected as. Defaults to bearer so a server with a token but no explicit
+    /// `auth` keeps working. `None` only for a stdio server (see [`stdio_auth_env`]).
+    ///
+    /// [`stdio_auth_env`]: McpServer::stdio_auth_env
+    pub fn http_auth(&self) -> (String, String) {
+        match self.auth.as_deref() {
+            Some("apikey") => (
+                self.auth_header.clone().unwrap_or_else(|| "X-API-Key".into()),
+                String::new(),
+            ),
+            // "bearer" or unset → Authorization: Bearer <token>
+            _ => ("Authorization".into(), "Bearer ".into()),
+        }
+    }
+
+    /// For a stdio server, the environment variable a resolved token is set in,
+    /// if this server uses env-based auth.
+    pub fn stdio_auth_env(&self) -> Option<String> {
+        if self.auth.as_deref() == Some("env") {
+            self.auth_header.clone()
+        } else {
+            None
+        }
     }
 }
 
