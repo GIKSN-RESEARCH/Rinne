@@ -15,11 +15,22 @@ const SERVICE: &str = "rinne";
 /// Read a provider's key pool from the keychain (a JSON array; tolerates a bare
 /// legacy single-key string).
 fn read_keys(provider: &str) -> Vec<String> {
-    let Some(raw) = keyring::Entry::new(SERVICE, provider)
-        .ok()
-        .and_then(|e| e.get_password().ok())
-    else {
-        return Vec::new();
+    let entry = match keyring::Entry::new(SERVICE, provider) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("keychain unavailable for `{provider}`: {e}");
+            return Vec::new();
+        }
+    };
+    let raw = match entry.get_password() {
+        Ok(raw) => raw,
+        // "not found" is the normal no-key case; anything else (locked/denied)
+        // is worth a breadcrumb so a stored-but-unreadable key is diagnosable.
+        Err(keyring::Error::NoEntry) => return Vec::new(),
+        Err(e) => {
+            tracing::debug!("keychain read failed for `{provider}`: {e}");
+            return Vec::new();
+        }
     };
     serde_json::from_str::<Vec<String>>(&raw).unwrap_or_else(|_| vec![raw])
 }
@@ -65,6 +76,26 @@ pub fn delete_api_key(provider: &str) -> Result<()> {
 /// The first keychain key for a provider (back-compat single-key accessor).
 pub fn keychain_key(provider: &str) -> Option<String> {
     read_keys(provider).into_iter().next()
+}
+
+/// Store an opaque secret blob (e.g. a serialized OAuth session) verbatim under
+/// `provider`, replacing any existing value. Distinct from the api-key pool
+/// format used by [`store_api_key`].
+pub fn store_secret(provider: &str, value: &str) -> Result<()> {
+    let entry = keyring::Entry::new(SERVICE, provider)
+        .map_err(|e| RinneError::Config(format!("keychain unavailable: {e}")))?;
+    entry
+        .set_password(value)
+        .map_err(|e| RinneError::Config(format!("could not store secret: {e}")))?;
+    Ok(())
+}
+
+/// Load an opaque secret blob for `provider`, if present.
+pub fn load_secret(provider: &str) -> Option<String> {
+    keyring::Entry::new(SERVICE, provider)
+        .ok()?
+        .get_password()
+        .ok()
 }
 
 /// All keys for a provider, env var first then the keychain pool, deduped.
