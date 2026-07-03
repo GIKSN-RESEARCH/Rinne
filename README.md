@@ -655,6 +655,18 @@ Rinne builds and maintains a **local, incremental structural index** of the repo
 
 The graph is shared across all harnesses active in a run, so every worker reads the same fresh snapshot rather than each indexing the repo independently. It is re-indexed on demand (before context assembly) so it stays consistent with the working tree even mid-run. The `rinne graph` subcommand lets you inspect the index — list files, look up a symbol, and view its neighborhood — without starting a full run. Pass `--no-graph` to any `rinne` invocation to skip graph indexing if you want to isolate that behavior or profile without it.
 
+### Learn a subsystem
+
+```bash
+rinne learn explain <topic>          # graph-grounded explainer for a topic
+rinne learn explain <topic> --no-ai  # template-only; works without a configured worker
+rinne learn explain <topic> --open   # open the output in the default browser when done
+```
+
+`rinne learn explain <topic>` walks the code graph, assembles the symbols and call edges most relevant to `<topic>`, pulls their doc-comments and any `CONTEXT.md §N` sections they reference, then asks the conductor to narrate the design decisions in plain prose. The result is written to `.rinne/learn/<topic>.html` — a self-contained file (no network, no external assets) you can open in any browser.
+
+Without a configured conductor (`--no-ai`), the command skips the narration step and produces a template-only page: real symbols, call flow, and code snippets, but no prose overview. The output path and structure are identical either way.
+
 ## Development
 
 ```bash
