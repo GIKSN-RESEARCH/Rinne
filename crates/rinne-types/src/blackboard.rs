@@ -39,6 +39,7 @@ impl NodeStatus {
     }
 
     /// Parse a stored string form back into a status (defaults to `Pending`).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> NodeStatus {
         match s {
             "running" => NodeStatus::Running,
