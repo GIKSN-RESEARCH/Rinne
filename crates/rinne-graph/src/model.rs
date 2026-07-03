@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+// SymbolRef and Neighborhood now live in rinne-types so downstream crates can
+// use the CodeGraph trait without depending on rinne-graph.
+pub use rinne_types::graph::{Neighborhood, SymbolRef};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SymbolKind {
@@ -87,13 +91,6 @@ pub struct Symbol {
     pub signature: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SymbolRef {
-    pub name: String,
-    pub file: String,
-    pub line: u32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
     pub src: Option<i64>,
@@ -108,15 +105,6 @@ pub struct FileRecord {
     pub lang: String,
     pub content_hash: String,
     pub mtime: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Neighborhood {
-    pub definition: SymbolRef,
-    pub callers: Vec<SymbolRef>,
-    pub callees: Vec<SymbolRef>,
-    pub imports: Vec<SymbolRef>,
-    pub stale: bool,
 }
 
 #[cfg(test)]

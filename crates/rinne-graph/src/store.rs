@@ -222,6 +222,34 @@ impl Store {
         })
     }
 
+    /// Returns the names of every symbol currently in the index.
+    pub fn symbol_names(&self) -> Vec<String> {
+        self.conn
+            .prepare("SELECT DISTINCT name FROM graph_symbols")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get(0))
+                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns the first symbol named `name` in `file`.
+    pub fn resolve_in_file(&self, file: &str, name: &str) -> Option<SymbolRef> {
+        self.conn
+            .query_row(
+                "SELECT name, file, start_line FROM graph_symbols WHERE file = ?1 AND name = ?2 LIMIT 1",
+                rusqlite::params![file, name],
+                |row| {
+                    Ok(SymbolRef {
+                        name: row.get(0)?,
+                        file: row.get(1)?,
+                        line: row.get(2)?,
+                    })
+                },
+            )
+            .ok()
+    }
+
     /// Returns all symbols defined in a given file.
     pub fn symbols_in(&self, path: &str) -> Vec<Symbol> {
         self.conn

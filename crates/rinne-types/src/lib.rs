@@ -10,6 +10,7 @@ pub mod blackboard;
 pub mod dag;
 pub mod error;
 pub mod evaluator;
+pub mod graph;
 pub mod replanner;
 pub mod skip;
 pub mod skill;
