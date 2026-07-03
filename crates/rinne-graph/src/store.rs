@@ -58,11 +58,15 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
 
         // Delete prior edges for this file's symbols first (FK-style manual cascade).
-        tx.execute_batch(&format!(
-            "DELETE FROM graph_edges WHERE src_symbol IN (SELECT id FROM graph_symbols WHERE file = '{path}') \
-             OR dst_symbol IN (SELECT id FROM graph_symbols WHERE file = '{path}');
-             DELETE FROM graph_symbols WHERE file = '{path}';",
-        ))?;
+        tx.execute(
+            "DELETE FROM graph_edges WHERE src_symbol IN (SELECT id FROM graph_symbols WHERE file = ?1) \
+             OR dst_symbol IN (SELECT id FROM graph_symbols WHERE file = ?1)",
+            rusqlite::params![path],
+        )?;
+        tx.execute(
+            "DELETE FROM graph_symbols WHERE file = ?1",
+            rusqlite::params![path],
+        )?;
 
         if let Some(lang_str) = lang {
             if let Some((raw_symbols, raw_edges)) = extract(lang_str, source) {
@@ -284,5 +288,15 @@ mod tests {
         store.index_file("a.rs", "fn c() {}\n", 1).unwrap();
         assert!(store.neighborhood("a").is_none());
         assert!(store.neighborhood("c").is_some());
+    }
+
+    #[test]
+    fn reindex_handles_path_with_quote() {
+        let store = mem_store();
+        let path = "weird'name.rs";
+        store.index_file(path, "fn first_sym() {}\n", 0).unwrap();
+        store.index_file(path, "fn second_sym() {}\n", 1).unwrap();
+        assert!(store.neighborhood("first_sym").is_none(), "old symbol must be gone after reindex");
+        assert!(store.neighborhood("second_sym").is_some(), "new symbol must exist after reindex");
     }
 }
