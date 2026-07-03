@@ -136,6 +136,8 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
                 enabled: true,
                 tools_allow: vec!["*".to_string()],
                 host_only,
+                auth: None,
+                auth_header: None,
             }
         }
         (None, Some(url)) => {
@@ -151,6 +153,8 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
                 enabled: true,
                 tools_allow: vec!["*".to_string()],
                 host_only,
+                auth: None,
+                auth_header: None,
             }
         }
         (Some(_), Some(_)) => {

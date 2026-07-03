@@ -442,6 +442,8 @@ fn server_spec(name: &str, s: &rinne_config::model::McpServer) -> rinne_core::Mc
         headers: s.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         token_env: s.key_env.clone(),
         token,
+        auth: s.auth.clone(),
+        auth_header: s.auth_header.clone(),
     }
 }
 
