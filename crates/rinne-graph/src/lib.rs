@@ -9,3 +9,4 @@ pub mod lang;
 pub mod model;
 pub mod resolve;
 pub mod schema;
+pub mod store;
