@@ -213,4 +213,16 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn collect_refs_handles_multiple_multibyte_markers_without_panic() {
+        // The `§` character is 2 bytes; the re-search loop advances by `pos + 1`
+        // into the ASCII prefix, so multiple markers in one text must not slice
+        // on a non-char boundary. Two refs exercise the loop's second iteration.
+        let mut out = Vec::new();
+        collect_refs("see CONTEXT.md §12 and CONTEXT.md §7 and PHASE.md §3", &mut out);
+        assert!(out.contains(&("CONTEXT.md".to_string(), 12)));
+        assert!(out.contains(&("CONTEXT.md".to_string(), 7)));
+        assert!(out.contains(&("PHASE.md".to_string(), 3)));
+    }
 }
