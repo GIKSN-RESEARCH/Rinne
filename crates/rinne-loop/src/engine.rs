@@ -408,6 +408,16 @@ impl<'a> Engine<'a> {
             self.blackboard.reindex_file(&abs);
         }
 
+        // Also reindex files backing symbols the assembler resolves from the
+        // node instruction, so mid-run edits to instruction-referenced files are
+        // visible before the packet is built.
+        if let Some(g) = self.blackboard.code_graph() {
+            let sym_files = resolved_symbol_files(g, &node.instruction, workspace);
+            for abs in sym_files {
+                self.blackboard.reindex_file(&abs);
+            }
+        }
+
         let graph = self.blackboard.code_graph();
         let assembler = ContextAssembler::new(self.blackboard, &self.plan, graph);
         let mut packet = assembler.build(node, family, critique)?;
@@ -1205,4 +1215,63 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Returns the absolute definition-file paths for every symbol the assembler
+/// resolves from `instruction`, deduped. Used to broaden reindex-on-read beyond
+/// `plan.mentioned` to instruction-referenced symbols.
+pub(crate) fn resolved_symbol_files(
+    graph: &dyn rinne_types::graph::CodeGraph,
+    instruction: &str,
+    workspace: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let known = graph.symbol_names();
+    let picked = crate::assembler::resolve_symbols(graph, instruction, &[], &known);
+    let mut out = Vec::new();
+    for name in picked {
+        if let Some(nb) = graph.neighborhood(&name) {
+            let p = workspace.join(&nb.definition.file);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rinne_types::graph::{CodeGraph, Neighborhood, SymbolRef};
+
+    struct FakeGraph;
+
+    impl CodeGraph for FakeGraph {
+        fn neighborhood(&self, s: &str) -> Option<Neighborhood> {
+            (s == "HttpTransport").then(|| Neighborhood {
+                definition: SymbolRef {
+                    name: "HttpTransport".into(),
+                    file: "src/t.rs".into(),
+                    line: 1,
+                },
+                callers: vec![],
+                callees: vec![],
+                imports: vec![],
+                stale: false,
+            })
+        }
+        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> {
+            None
+        }
+        fn symbol_names(&self) -> Vec<String> {
+            vec!["HttpTransport".into()]
+        }
+    }
+
+    #[test]
+    fn resolved_symbol_files_returns_definition_paths() {
+        let ws = std::path::Path::new("/repo");
+        let files = resolved_symbol_files(&FakeGraph, "patch HttpTransport now", ws);
+        assert!(files.contains(&ws.join("src/t.rs")));
+    }
 }
