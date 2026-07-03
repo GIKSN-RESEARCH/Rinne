@@ -15,6 +15,7 @@ const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
     ("connect", "<backend> [key] [--model <id>]", "connect a harness or API provider"),
     ("mcp",     "[sub …]",                       "connect and manage MCP servers"),
     ("skill",   "[sub …]",                       "install and manage Agent Skills"),
+    ("learn",   "<topic>",                       "explain a subsystem as an HTML doc"),
     ("workers", "",                              "list workers + connected APIs"),
     ("models",  "<provider>",                   "list an API provider's models"),
     ("forget",  "<provider>",                   "delete a stored API key"),

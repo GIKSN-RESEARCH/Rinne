@@ -937,6 +937,28 @@ impl App {
                 let lines = crate::commands::skill::run_lines(&args, &cwd);
                 self.push(FeedKind::System, lines.join("\n"));
             }
+            "learn" => {
+                // `/learn <topic>` — `explain` is implied (the only verb). Runs
+                // the same graph-grounded pipeline as the CLI, async like `/mcp`,
+                // narrating when a worker is available. The result path is pushed
+                // to the feed; the HTML is not auto-opened.
+                let topic = rest
+                    .strip_prefix("explain ")
+                    .unwrap_or(&rest)
+                    .trim()
+                    .to_string();
+                if topic.is_empty() {
+                    self.push(FeedKind::System, "usage: /learn <topic>  (writes .rinne/learn/<topic>.html)");
+                } else {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    let tx = self.tx.clone();
+                    self.push(FeedKind::System, format!("learning `{topic}`…"));
+                    tokio::spawn(async move {
+                        let lines = crate::commands::learn::run_lines(&topic, cwd).await;
+                        let _ = tx.send(AppMsg::Note(lines.join("\n")));
+                    });
+                }
+            }
             "steer" if !rest.is_empty() => self.resume_with(HumanDecision::Steer(rest)),
             "approve" => self.resume_with(HumanDecision::Approve),
             "reject" => self.resume_with(HumanDecision::Reject),
@@ -1266,6 +1288,7 @@ fn redact_secret(text: &str) -> String {
 fn help_text() -> String {
     let rows = [
         ("/plan", "show the current plan"),
+        ("/learn <topic>", "explain a subsystem as an HTML doc (.rinne/learn/)"),
         ("/workers", "list workers + connected APIs and their auth"),
         ("/connect <b>", "connect a harness, or an API provider + key (e.g. /connect deepseek sk-…)"),
         ("/forget <p>", "delete a stored API key from the OS keychain"),

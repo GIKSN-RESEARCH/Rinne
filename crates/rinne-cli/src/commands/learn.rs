@@ -45,6 +45,36 @@ fn cluster_flow(graph: &dyn CodeGraph, cluster: &Cluster) -> Vec<(String, String
 /// 7. Render HTML and write to `.rinne/learn/<topic>.html`.
 pub async fn run(cmd: LearnCmd, cwd: PathBuf, no_ai: bool, open: bool) -> Result<()> {
     let LearnCmd::Explain { topic } = cmd;
+    let mut lines = explain_to_lines(&topic, cwd, no_ai).await?;
+    // The CLI's `--open` adds a browser hint after the "wrote …" line; the TUI
+    // path (run_lines) never sets it.
+    if open {
+        if let Some(path) = lines.last().and_then(|l| l.strip_prefix("wrote ")) {
+            lines.push(format!("open it in your browser: {path}"));
+        }
+    }
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// TUI-facing entry point for `/learn <topic>`: runs the same pipeline as [`run`]
+/// but returns the output lines for the feed instead of printing to stdout
+/// (printing would corrupt the inline TUI). Always narrates when a worker is
+/// available, degrading to template-only otherwise.
+pub async fn run_lines(topic: &str, cwd: PathBuf) -> Vec<String> {
+    match explain_to_lines(topic, cwd, false).await {
+        Ok(lines) => lines,
+        Err(e) => vec![format!("learn failed: {e}")],
+    }
+}
+
+/// The shared pipeline: resolve → refresh → assemble → translate → render →
+/// write. Returns the human-readable result lines (e.g. `wrote <path>` or the
+/// "no code found" note); the caller decides how to surface them.
+async fn explain_to_lines(topic: &str, cwd: PathBuf, no_ai: bool) -> Result<Vec<String>> {
+    let topic = topic.to_string();
 
     let bb = Blackboard::open_with(&cwd, true)?;
 
@@ -93,8 +123,9 @@ pub async fn run(cmd: LearnCmd, cwd: PathBuf, no_ai: bool, open: bool) -> Result
     };
 
     if cluster.symbols.is_empty() {
-        println!("no code found for topic `{topic}`. try a symbol or path fragment.");
-        return Ok(());
+        return Ok(vec![format!(
+            "no code found for topic `{topic}`. try a symbol or path fragment."
+        )]);
     }
 
     // Phase 2: reindex the cluster's files before reading snippets.
@@ -137,13 +168,8 @@ pub async fn run(cmd: LearnCmd, cwd: PathBuf, no_ai: bool, open: bool) -> Result
     let out = bb.root().join("learn").join(format!("{topic}.html"));
     std::fs::create_dir_all(out.parent().unwrap())?;
     std::fs::write(&out, html)?;
-    println!("wrote {}", out.display());
 
-    if open {
-        println!("open it in your browser: {}", out.display());
-    }
-
-    Ok(())
+    Ok(vec![format!("wrote {}", out.display())])
 }
 
 #[cfg(test)]
@@ -169,6 +195,41 @@ mod tests {
         assert!(out.is_file(), "html artifact written");
         let html = std::fs::read_to_string(&out).unwrap();
         assert!(html.contains("harness_run"), "real symbol in output");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_lines_returns_wrote_path_for_tui() {
+        let dir = std::env::temp_dir().join(format!("rinne-learn-tui-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/harness.rs"),
+            "/// The harness adapter.\npub fn harness_run() { helper(); }\nfn helper() {}\n",
+        )
+        .unwrap();
+
+        // No worker configured in the test env → template-only, must not error.
+        let lines = run_lines("harness", dir.clone()).await;
+
+        assert!(
+            lines.iter().any(|l| l.starts_with("wrote ") && l.contains("harness.html")),
+            "run_lines returns the wrote-path line, got: {lines:?}"
+        );
+        assert!(dir.join(".rinne/learn/harness.html").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_lines_reports_no_match_topic() {
+        let dir = std::env::temp_dir().join(format!("rinne-learn-nomatch-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn alpha() {}\n").unwrap();
+
+        let lines = run_lines("zzz-nonexistent-topic", dir.clone()).await;
+        assert!(
+            lines.iter().any(|l| l.contains("no code found")),
+            "reports no-match, got: {lines:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
