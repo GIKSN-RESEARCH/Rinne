@@ -41,7 +41,7 @@ pub struct JavaScript {
 impl JavaScript {
     pub fn new() -> Self {
         let language: Language = tree_sitter_javascript::LANGUAGE.into();
-        let query = Query::new(&language, include_str!("../queries/typescript.scm"))
+        let query = Query::new(&language, include_str!("../queries/javascript.scm"))
             .expect("valid javascript query");
         Self { query }
     }

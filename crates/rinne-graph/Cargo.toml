@@ -11,6 +11,7 @@ repository.workspace = true
 rinne-types.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
+streaming-iterator = "0.1"
 tracing.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
