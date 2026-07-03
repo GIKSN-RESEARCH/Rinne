@@ -5,6 +5,7 @@
 //! instead of re-reading whole files (issue #11).
 
 pub mod extract;
+pub mod indexer;
 pub mod lang;
 pub mod model;
 pub mod resolve;
