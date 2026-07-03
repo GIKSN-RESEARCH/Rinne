@@ -86,15 +86,6 @@ impl Blackboard {
         self.graph.is_some()
     }
 
-    /// Returns a reference to the code graph.
-    ///
-    /// Panics if the graph is not enabled; call [`graph_enabled`] first.
-    pub fn code_graph(&self) -> &dyn rinne_types::graph::CodeGraph {
-        self.graph
-            .as_deref()
-            .expect("code_graph() called but graph is not enabled")
-    }
-
     /// Synchronously re-index a single file against the code graph.
     /// A no-op when the graph is not enabled.
     pub fn reindex_file(&self, abs: &Path) {
@@ -346,9 +337,17 @@ mod graph_wiring {
     fn blackboard_exposes_code_graph() {
         let dir = std::env::temp_dir().join(format!("rinne-bb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+
+        // graph enabled: graph_enabled() and trait code_graph() must agree.
         let bb = Blackboard::open(&dir).unwrap();
-        // The seam is present and returns a usable trait object.
-        let _g: &dyn rinne_types::graph::CodeGraph = bb.code_graph();
+        let via_trait = (&bb as &dyn rinne_types::Blackboard).code_graph();
+        assert_eq!(bb.graph_enabled(), via_trait.is_some());
+
+        // graph disabled: must return None, never panic.
+        let bb_no_graph = Blackboard::open_with(&dir, false).unwrap();
+        assert!(!bb_no_graph.graph_enabled());
+        assert!((&bb_no_graph as &dyn rinne_types::Blackboard).code_graph().is_none());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
