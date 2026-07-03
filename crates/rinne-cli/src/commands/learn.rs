@@ -28,6 +28,9 @@ fn cluster_flow(graph: &dyn CodeGraph, cluster: &Cluster) -> Vec<(String, String
             }
         }
     }
+    // Sort before dedup so non-adjacent duplicate edges (the same caller→callee
+    // reached via different cluster symbols) collapse, not just consecutive ones.
+    pairs.sort();
     pairs.dedup();
     pairs
 }
