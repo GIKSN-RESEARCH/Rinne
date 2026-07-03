@@ -13,15 +13,58 @@ use crate::worker::{ContextPacket, InlinedFile, WorkerFamily};
 use crate::{Result, BLACKBOARD_DIR};
 use rinne_types::Blackboard;
 
+const COMMON_NAMES: &[&str] = &["new", "run", "get", "set", "build", "main", "init", "from", "into"];
+const MIN_IDENT_LEN: usize = 4;
+
+/// Picks symbol names to attach from the graph for a given node instruction.
+///
+/// Returns exact identifier tokens in `instruction` that match a known symbol
+/// name, plus symbols named like a mentioned file's stem. Deduplicates output.
+/// Skips tokens shorter than `MIN_IDENT_LEN` and tokens in `COMMON_NAMES`.
+pub fn resolve_symbols(
+    graph: &dyn rinne_types::graph::CodeGraph,
+    instruction: &str,
+    mentioned: &[std::path::PathBuf],
+    known: &[String],
+) -> Vec<String> {
+    let known_set: std::collections::HashSet<&str> = known.iter().map(|s| s.as_str()).collect();
+    let mut out: Vec<String> = Vec::new();
+    // Exact identifier tokens from the instruction that name a known symbol.
+    for tok in instruction.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if tok.len() >= MIN_IDENT_LEN
+            && !COMMON_NAMES.contains(&tok)
+            && known_set.contains(tok)
+            && !out.iter().any(|o| o == tok)
+        {
+            out.push(tok.to_string());
+        }
+    }
+    // Symbols named like a mentioned file's stem (best-effort).
+    for m in mentioned {
+        if let Some(stem) = m.file_stem().and_then(|s| s.to_str()) {
+            if known_set.contains(stem) && !out.iter().any(|o| o == stem) {
+                out.push(stem.to_string());
+            }
+        }
+    }
+    let _ = graph;
+    out
+}
+
 /// Builds context packets against a plan and its blackboard.
 pub struct ContextAssembler<'a> {
     blackboard: &'a dyn Blackboard,
     plan: &'a Plan,
+    graph: Option<&'a dyn rinne_types::graph::CodeGraph>,
 }
 
 impl<'a> ContextAssembler<'a> {
-    pub fn new(blackboard: &'a dyn Blackboard, plan: &'a Plan) -> Self {
-        Self { blackboard, plan }
+    pub fn new(
+        blackboard: &'a dyn Blackboard,
+        plan: &'a Plan,
+        graph: Option<&'a dyn rinne_types::graph::CodeGraph>,
+    ) -> Self {
+        Self { blackboard, plan, graph }
     }
 
     /// Assemble the packet for `node`, shaped for the target worker `family`.
@@ -84,6 +127,18 @@ impl<'a> ContextAssembler<'a> {
             }
         }
 
+        // Attach graph neighborhoods for resolved symbols (additive; never
+        // replaces pinned_paths / inlined_files set above).
+        if let Some(graph) = self.graph {
+            let known = graph.symbol_names();
+            let picked = resolve_symbols(graph, &node.instruction, mentioned, &known);
+            for name in &picked {
+                if let Some(neighborhood) = graph.neighborhood(name) {
+                    packet.symbol_map.push(neighborhood);
+                }
+            }
+        }
+
         Ok(packet)
     }
 }
@@ -122,4 +177,39 @@ fn read_inlined(workspace: &Path, rel: &Path) -> Option<InlinedFile> {
         path: rel.to_path_buf(),
         contents,
     })
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+    use rinne_types::graph::{CodeGraph, Neighborhood, SymbolRef};
+
+    struct FakeGraph;
+    impl CodeGraph for FakeGraph {
+        fn neighborhood(&self, symbol: &str) -> Option<Neighborhood> {
+            (symbol == "HttpTransport").then(|| Neighborhood {
+                definition: SymbolRef { name: "HttpTransport".into(), file: "t.rs".into(), line: 10 },
+                callers: vec![SymbolRef { name: "send".into(), file: "s.rs".into(), line: 3 }],
+                callees: vec![],
+                imports: vec![],
+                stale: false,
+            })
+        }
+        fn resolve_in_file(&self, _f: &str, _n: &str) -> Option<SymbolRef> { None }
+        fn symbol_names(&self) -> Vec<String> { vec!["HttpTransport".into()] }
+    }
+
+    #[test]
+    fn attaches_neighborhood_for_exact_identifier_in_instruction() {
+        let names = FakeGraph.symbol_names();
+        let picked = resolve_symbols(&FakeGraph, "add retry to HttpTransport", &[], &names);
+        assert_eq!(picked, vec!["HttpTransport".to_string()]);
+    }
+
+    #[test]
+    fn skips_common_short_names() {
+        let names = vec!["new".to_string(), "run".to_string()];
+        let picked = resolve_symbols(&FakeGraph, "run the new thing", &[], &names);
+        assert!(picked.is_empty());
+    }
 }

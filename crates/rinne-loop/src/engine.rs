@@ -400,7 +400,7 @@ impl<'a> Engine<'a> {
             if critique.is_some() { " [with critique]" } else { "" }
         ))?;
 
-        let assembler = ContextAssembler::new(self.blackboard, &self.plan);
+        let assembler = ContextAssembler::new(self.blackboard, &self.plan, None);
         let mut packet = assembler.build(node, family, critique)?;
         packet.skill_text = self.skill_text(node);
         if let Ok(json) = serde_json::to_string_pretty(&packet) {
@@ -848,7 +848,7 @@ impl<'a> Engine<'a> {
         sink: &Option<EngineSink>,
     ) -> Option<String> {
         match candidate {
-            Some(m) if descriptor.models.is_empty() || descriptor.models.iter().any(|wm| *wm == m) => {
+            Some(m) if descriptor.models.is_empty() || descriptor.models.contains(&m) => {
                 Some(m)
             }
             Some(m) => {
@@ -1130,7 +1130,7 @@ impl EvalContext for GradeCtx<'_, '_> {
             worker: worker_name.clone(),
         });
 
-        let assembler = ContextAssembler::new(e.blackboard, &e.plan);
+        let assembler = ContextAssembler::new(e.blackboard, &e.plan, None);
         let mut packet = assembler.build(node, family, None)?;
         packet.skill_text = e.skill_text(node);
         let candidate = e.resolve_model(node, &worker_name);
