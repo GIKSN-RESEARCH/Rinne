@@ -250,6 +250,20 @@ impl Store {
             .ok()
     }
 
+    /// Returns (files, symbols, edges) counts for `rinne graph stats`.
+    pub fn stats(&self) -> (usize, usize, usize) {
+        let count = |sql: &str| -> usize {
+            self.conn
+                .query_row(sql, [], |row| row.get::<_, i64>(0))
+                .unwrap_or(0) as usize
+        };
+        (
+            count("SELECT COUNT(*) FROM graph_files"),
+            count("SELECT COUNT(*) FROM graph_symbols"),
+            count("SELECT COUNT(*) FROM graph_edges"),
+        )
+    }
+
     /// Returns all symbols defined in a given file.
     pub fn symbols_in(&self, path: &str) -> Vec<Symbol> {
         self.conn

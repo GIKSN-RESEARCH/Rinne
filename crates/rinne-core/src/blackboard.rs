@@ -86,6 +86,13 @@ impl Blackboard {
         self.graph.is_some()
     }
 
+    /// Returns the concrete `Graph` handle for CLI inspection commands
+    /// (`rinne graph stats/symbols/neighborhood`). Returns `None` when the
+    /// graph is disabled (`--no-graph`) or failed to open.
+    pub fn concrete_graph(&self) -> Option<Arc<Graph>> {
+        self.graph.clone()
+    }
+
     /// Synchronously re-index a single file against the code graph.
     /// A no-op when the graph is not enabled.
     pub fn reindex_file(&self, abs: &Path) {

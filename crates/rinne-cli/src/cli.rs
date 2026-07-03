@@ -27,6 +27,11 @@ pub struct Cli {
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
+    /// Disable the code graph for this run (faster startup; skips indexing).
+    /// Also useful as a benchmark toggle to measure graph overhead.
+    #[arg(long, global = true)]
+    pub no_graph: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -137,4 +142,33 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Inspect the local code graph (symbols, call edges, file coverage).
+    ///
+    /// Subcommands: `stats`, `symbols <file>`, `neighborhood <symbol>`.
+    /// Reads from `.rinne/state.db`; does not require a running plan.
+    Graph {
+        #[command(subcommand)]
+        cmd: GraphCmd,
+    },
 }
+
+/// Subcommands for `rinne graph`.
+#[derive(Debug, Subcommand)]
+pub enum GraphCmd {
+    /// Show indexed file, symbol, and edge counts.
+    Stats,
+
+    /// List all symbols indexed from a given file.
+    Symbols {
+        /// Path to the file (relative to workspace root or absolute).
+        file: String,
+    },
+
+    /// Show the neighborhood (callers, callees, imports) of a symbol.
+    Neighborhood {
+        /// Exact symbol name to look up.
+        symbol: String,
+    },
+}
+

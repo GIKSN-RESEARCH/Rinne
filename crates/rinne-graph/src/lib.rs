@@ -44,6 +44,22 @@ impl Graph {
         }
         Ok(())
     }
+
+    /// Returns (files, symbols, edges) counts for display in `rinne graph stats`.
+    pub fn stats(&self) -> (usize, usize, usize) {
+        self.store
+            .lock()
+            .expect("graph store lock poisoned")
+            .stats()
+    }
+
+    /// Returns all symbols defined in a given file (for `rinne graph symbols <file>`).
+    pub fn symbols_in(&self, path: &str) -> Vec<crate::model::Symbol> {
+        self.store
+            .lock()
+            .expect("graph store lock poisoned")
+            .symbols_in(path)
+    }
 }
 
 impl CodeGraph for Graph {

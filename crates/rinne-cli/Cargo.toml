@@ -25,6 +25,7 @@ rinne-config.workspace = true
 rinne-workers.workspace = true
 rinne-conductor.workspace = true
 rinne-mcp.workspace = true
+rinne-graph.workspace = true
 
 clap.workspace = true
 tokio.workspace = true
