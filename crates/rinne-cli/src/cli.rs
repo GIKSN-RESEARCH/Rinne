@@ -36,7 +36,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_ai: bool,
 
-    /// Open the output file in the default browser after writing (learn explain).
+    /// Print an 'open in browser' hint with the output path (learn explain).
     #[arg(long, global = true)]
     pub open: bool,
 

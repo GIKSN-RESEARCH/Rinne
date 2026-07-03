@@ -126,21 +126,49 @@ fn extract_doc(lines: &[String], sym_idx: usize) -> String {
     doc_lines.join("\n")
 }
 
-/// Scan `text` for `CONTEXT.md §N` or `PHASE.md §N` patterns without regex.
+/// Scan `text` for doc-file section references without regex.
+///
+/// Matches plain `CONTEXT.md §N` and backtick-wrapped `` `CONTEXT.md` §N `` forms
+/// for each of CONTEXT.md, PHASE.md, and MCP_SKILLS.md.
 fn collect_refs(text: &str, out: &mut Vec<(String, u32)>) {
-    for docfile in &["CONTEXT.md", "PHASE.md"] {
-        let marker = format!("{} §", docfile);
-        let mut search = text;
-        while let Some(pos) = search.find(marker.as_str()) {
-            let after = &search[pos + marker.len()..];
-            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if !digits.is_empty() {
+    // `§` is 2 bytes in UTF-8: 0xC2 0xA7.
+    const SECTION_SIGN: &str = "§";
+
+    let mut i = 0;
+    while i < text.len() {
+        // Find next `§` character.
+        let rest = &text[i..];
+        let Some(sign_pos) = rest.find(SECTION_SIGN) else {
+            break;
+        };
+
+        // Parse digits after `§`.
+        let after_sign = &rest[sign_pos + SECTION_SIGN.len()..];
+        let digits: String = after_sign.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let abs_sign = i + sign_pos;
+        if digits.is_empty() {
+            // Advance past this `§` (2 bytes) and keep scanning.
+            i = abs_sign + SECTION_SIGN.len();
+            continue;
+        }
+
+        // Look backward in the ~20-char window before `§` for a known docfile name.
+        let window_start = abs_sign.saturating_sub(20);
+        // Strip backticks and spaces from the window to find the filename.
+        let window = &text[window_start..abs_sign];
+        let clean: String = window.chars().filter(|&c| c != '`' && c != ' ').collect();
+
+        for docfile in &["CONTEXT.md", "PHASE.md", "MCP_SKILLS.md"] {
+            if clean.ends_with(docfile) {
                 if let Ok(n) = digits.parse::<u32>() {
                     out.push((docfile.to_string(), n));
                 }
+                break;
             }
-            search = &search[pos + 1..];
         }
+
+        // Advance past this `§` occurrence (§ is 2 bytes in UTF-8).
+        i = abs_sign + SECTION_SIGN.len();
     }
 }
 
@@ -150,16 +178,27 @@ struct SectionResult {
 }
 
 fn extract_section(content: &str, n: u32) -> Option<SectionResult> {
-    let needle = format!("§{}", n);
+    let section_sign_needle = format!("§{}", n);
+    let numbered_prefix = format!("## {}.", n);
+    let numbered_space = format!("## {} ", n);
+    let numbered_exact = format!("## {}", n);
     let lines: Vec<&str> = content.lines().collect();
 
-    // Find the line that contains §N.
-    let start = lines.iter().position(|l| l.contains(&needle))?;
+    // Find a heading line that either:
+    //   - starts with `## N.` or `## N ` or is exactly `## N` (the `## N. Title` form), OR
+    //   - contains `§N` (fallback form used in tests/older docs).
+    let start = lines.iter().position(|l| {
+        let trimmed = l.trim();
+        trimmed.contains(&section_sign_needle)
+            || trimmed.starts_with(&numbered_prefix)
+            || trimmed.starts_with(&numbered_space)
+            || trimmed == numbered_exact.as_str()
+    })?;
     let heading = lines[start].trim().to_string();
 
     let mut body_lines: Vec<&str> = Vec::new();
     for line in lines.iter().skip(start + 1) {
-        if line.starts_with("## ") || line.contains('§') {
+        if line.starts_with("## ") {
             break;
         }
         body_lines.push(line);
@@ -222,5 +261,52 @@ mod tests {
         assert!(out.contains(&("CONTEXT.md".to_string(), 12)));
         assert!(out.contains(&("CONTEXT.md".to_string(), 7)));
         assert!(out.contains(&("PHASE.md".to_string(), 3)));
+    }
+
+    #[test]
+    fn reads_backtick_ref_and_numbered_heading() {
+        let dir = std::env::temp_dir().join(format!("rinne-backtick-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("m.rs"),
+            "/// Key design (`CONTEXT.md` §7).\nfn thing() { work(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("CONTEXT.md"),
+            "## 7. The Section\nreal rationale here\n## 8. Next\nother content\n",
+        )
+        .unwrap();
+
+        let cluster = Cluster {
+            topic: "thing".into(),
+            symbols: vec![ClusterSymbol {
+                name: "thing".into(),
+                file: "m.rs".into(),
+                line: 2,
+                kind: "symbol".into(),
+            }],
+            files: vec!["m.rs".into()],
+        };
+        let (_, sections) = assemble(&dir, &cluster);
+        assert!(
+            sections.iter().any(|s| s.body.contains("real rationale here")),
+            "backtick ref `CONTEXT.md` §7 with ## N. heading not resolved"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_refs_handles_backticks_and_mcp_skills() {
+        let mut out = Vec::new();
+        collect_refs("see `CONTEXT.md` §7 and `MCP_SKILLS.md` §6", &mut out);
+        assert!(
+            out.contains(&("CONTEXT.md".to_string(), 7)),
+            "backtick CONTEXT.md §7 not found"
+        );
+        assert!(
+            out.contains(&("MCP_SKILLS.md".to_string(), 6)),
+            "backtick MCP_SKILLS.md §6 not found"
+        );
     }
 }
