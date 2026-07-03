@@ -326,6 +326,28 @@ impl HarnessAdapter {
     }
 }
 
+/// Render the symbol map neighborhoods into a `## Relevant code structure` section.
+/// Returns an empty string when the slice is empty so callers can push it unconditionally.
+pub(crate) fn render_symbol_map(neighborhoods: &[rinne_types::graph::Neighborhood]) -> String {
+    if neighborhoods.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\n## Relevant code structure\n");
+    for nb in neighborhoods {
+        let def = &nb.definition;
+        s.push_str(&format!("{} ({}:{})\n", def.name, def.file, def.line));
+        if !nb.callers.is_empty() {
+            let names: Vec<&str> = nb.callers.iter().map(|r| r.name.as_str()).collect();
+            s.push_str(&format!("  called by: {}\n", names.join(", ")));
+        }
+        if !nb.callees.is_empty() {
+            let names: Vec<&str> = nb.callees.iter().map(|r| r.name.as_str()).collect();
+            s.push_str(&format!("  calls: {}\n", names.join(", ")));
+        }
+    }
+    s
+}
+
 /// Compose a harness prompt from the request: the instruction, any critique fed
 /// back on loop-back, ambient steering, and the pinned file paths the worker
 /// should read itself.
@@ -362,6 +384,8 @@ pub fn compose_prompt(request: &ExecuteRequest) -> String {
         }
     }
 
+    out.push_str(&render_symbol_map(&request.context.symbol_map));
+
     out
 }
 
@@ -384,6 +408,25 @@ mod tests {
             tools: Vec::new(),
             mcp_servers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn symbol_map_is_rendered_into_harness_prompt() {
+        use rinne_types::graph::{Neighborhood, SymbolRef};
+        let nb = Neighborhood {
+            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1 },
+            callers: vec![SymbolRef { name: "main".into(), file: "main.rs".into(), line: 5 }],
+            callees: vec![],
+            imports: vec![],
+            stale: false,
+        };
+        let mut r = req("");
+        r.context.symbol_map = vec![nb];
+        let prompt = compose_prompt(&r);
+        assert!(prompt.contains("## Relevant code structure"), "section header missing");
+        assert!(prompt.contains("helper"), "definition name missing");
+        assert!(prompt.contains("m.rs:1"), "definition file:line missing");
+        assert!(prompt.contains("main"), "caller name missing");
     }
 
     #[test]

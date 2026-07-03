@@ -17,6 +17,7 @@ use rinne_core::worker::{
 };
 use rinne_core::{Result, RinneError};
 
+use crate::adapters::common::render_symbol_map;
 use crate::transport::http::{ChatMessage, ChatRequest, ChatTurn, OpenAiClient};
 
 /// An API worker backed by an OpenAI-compatible endpoint, with an optional pool
@@ -381,5 +382,45 @@ fn compose_message(request: &ExecuteRequest) -> String {
         out.push_str("\n```\n");
     }
 
+    out.push_str(&render_symbol_map(&request.context.symbol_map));
+
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rinne_core::worker::{ContextPacket, Constraints, Role};
+    use std::path::PathBuf;
+
+    fn req(instruction: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            role: Role::Generator,
+            instruction: instruction.into(),
+            context: ContextPacket::default(),
+            workspace: PathBuf::from("/tmp"),
+            constraints: Constraints::default(),
+            tools: Vec::new(),
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn symbol_map_is_rendered_into_api_message() {
+        use rinne_types::graph::{Neighborhood, SymbolRef};
+        let nb = Neighborhood {
+            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1 },
+            callers: vec![SymbolRef { name: "main".into(), file: "main.rs".into(), line: 5 }],
+            callees: vec![],
+            imports: vec![],
+            stale: false,
+        };
+        let mut r = req("do the task");
+        r.context.symbol_map = vec![nb];
+        let msg = compose_message(&r);
+        assert!(msg.contains("## Relevant code structure"), "section header missing");
+        assert!(msg.contains("helper"), "definition name missing");
+        assert!(msg.contains("m.rs:1"), "definition file:line missing");
+        assert!(msg.contains("main"), "caller name missing");
+    }
 }

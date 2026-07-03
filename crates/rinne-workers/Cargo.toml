@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 rinne-core.workspace = true
+rinne-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

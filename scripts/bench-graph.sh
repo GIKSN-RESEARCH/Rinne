@@ -20,8 +20,8 @@ measure() {
 
 echo "== graph OFF =="
 rm -rf .rinne
-measure "no-graph" rinne --no-graph run "$TASK"
+measure "no-graph" rinne --no-graph -p "$TASK"
 
 echo "== graph ON =="
 rm -rf .rinne
-measure "graph" rinne run "$TASK"
+measure "graph" rinne -p "$TASK"
