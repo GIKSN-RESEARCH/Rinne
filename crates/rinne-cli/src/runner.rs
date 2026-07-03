@@ -274,8 +274,17 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
     let template = plan_template(&config, &registry, catalog);
     let conductor = build_conductor(&config, &registry, blackboard.workspace().to_path_buf())?
         .with_context(template.clone());
+    let structure: Vec<rinne_types::graph::Neighborhood> =
+        if let Some(g) = rinne_types::Blackboard::code_graph(blackboard) {
+            let known = g.symbol_names();
+            let picked = rinne_loop::assembler::resolve_symbols(g, goal, &[], &known);
+            picked.iter().filter_map(|name| g.neighborhood(name)).collect()
+        } else {
+            Vec::new()
+        };
     let input = ConductorInput {
         goal: goal.to_string(),
+        structure,
         ..template
     };
 

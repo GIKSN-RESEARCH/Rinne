@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 rinne-types.workspace = true
 rinne-core.workspace = true
+rinne-loop.workspace = true
 rinne-config.workspace = true
 rinne-workers.workspace = true
 rinne-conductor.workspace = true

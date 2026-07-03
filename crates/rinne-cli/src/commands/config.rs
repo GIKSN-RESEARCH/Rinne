@@ -46,11 +46,12 @@ pub async fn run(args: &[String]) -> Result<()> {
 /// comes from. Backs `/config` with no subcommand and `rinne config`.
 pub fn show_lines(cwd: &Path) -> Result<Vec<String>> {
     let config = rinne_config::load(cwd)?;
-    let mut out = Vec::new();
-    out.push("rinne config — resolved (defaults ← global ← project ← env)".to_string());
-    out.push(String::new());
-    out.push(toml::to_string_pretty(&config)?.trim_end().to_string());
-    out.push(String::new());
+    let mut out = vec![
+        "rinne config — resolved (defaults ← global ← project ← env)".to_string(),
+        String::new(),
+        toml::to_string_pretty(&config)?.trim_end().to_string(),
+        String::new(),
+    ];
 
     // Conductor auth — secrets are never printed, only their presence + source.
     if let Some((provider, env)) = rinne_conductor::conductor_credential(&config.conductor) {

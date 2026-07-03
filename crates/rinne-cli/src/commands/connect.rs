@@ -127,6 +127,7 @@ fn connect_harness(harness: &KnownHarness, out: &mut Vec<String>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_api(
     name: &str,
     known: Option<&'static KnownApiProvider>,
