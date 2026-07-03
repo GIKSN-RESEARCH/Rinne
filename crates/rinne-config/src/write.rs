@@ -219,59 +219,6 @@ pub fn write_api_provider_to(
     atomic_write(path, &doc.to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Config;
-
-    #[test]
-    fn writes_provider_and_reparses() {
-        let mut path = std::env::temp_dir();
-        path.push(format!("rinne-write-{}.toml", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-
-        write_api_provider_to(
-            &path,
-            "deepseek",
-            "DEEPSEEK_API_KEY",
-            "https://api.deepseek.com/v1",
-            &["deepseek-chat", "deepseek-reasoner"],
-        )
-        .unwrap();
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[backends.api.deepseek]"));
-
-        // It must parse back as a valid Config with the provider present.
-        let cfg: Config = crate::load::load_layered(Some(&path), None, false).unwrap();
-        let p = cfg.backends.api.providers.get("deepseek").unwrap();
-        assert_eq!(p.key_env, "DEEPSEEK_API_KEY");
-        assert_eq!(p.models.len(), 2);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn preserves_other_entries() {
-        let mut path = std::env::temp_dir();
-        path.push(format!("rinne-write2-{}.toml", std::process::id()));
-        std::fs::write(&path, "[conductor]\nbackend = \"groq\"\n").unwrap();
-
-        write_api_provider_to(&path, "openai", "OPENAI_API_KEY", "https://api.openai.com/v1", &[])
-            .unwrap();
-
-        let cfg: Config = crate::load::load_layered(Some(&path), None, false).unwrap();
-        // Pre-existing setting survives the edit.
-        assert_eq!(
-            cfg.conductor.backend,
-            crate::model::ConductorBackend::Groq
-        );
-        assert!(cfg.backends.api.providers.contains_key("openai"));
-
-        let _ = std::fs::remove_file(&path);
-    }
-}
-
 /// Write (or overwrite) an `[mcp.servers.<name>]` table at `path`,
 /// format-preserving and validated. Secrets are never written here.
 pub fn write_mcp_server_to(path: &Path, name: &str, server: &McpServer) -> Result<()> {
@@ -368,4 +315,57 @@ pub fn remove_mcp_server_from(path: &Path, name: &str) -> Result<bool> {
         validate_and_write(path, doc)?;
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+
+    #[test]
+    fn writes_provider_and_reparses() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("rinne-write-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        write_api_provider_to(
+            &path,
+            "deepseek",
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com/v1",
+            &["deepseek-chat", "deepseek-reasoner"],
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[backends.api.deepseek]"));
+
+        // It must parse back as a valid Config with the provider present.
+        let cfg: Config = crate::load::load_layered(Some(&path), None, false).unwrap();
+        let p = cfg.backends.api.providers.get("deepseek").unwrap();
+        assert_eq!(p.key_env, "DEEPSEEK_API_KEY");
+        assert_eq!(p.models.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn preserves_other_entries() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("rinne-write2-{}.toml", std::process::id()));
+        std::fs::write(&path, "[conductor]\nbackend = \"groq\"\n").unwrap();
+
+        write_api_provider_to(&path, "openai", "OPENAI_API_KEY", "https://api.openai.com/v1", &[])
+            .unwrap();
+
+        let cfg: Config = crate::load::load_layered(Some(&path), None, false).unwrap();
+        // Pre-existing setting survives the edit.
+        assert_eq!(
+            cfg.conductor.backend,
+            crate::model::ConductorBackend::Groq
+        );
+        assert!(cfg.backends.api.providers.contains_key("openai"));
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

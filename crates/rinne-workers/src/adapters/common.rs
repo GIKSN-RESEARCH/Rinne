@@ -438,6 +438,8 @@ mod tests {
             headers: vec![],
             token_env: None,
             token: None,
+            auth: None,
+            auth_header: None,
         }];
         r
     }

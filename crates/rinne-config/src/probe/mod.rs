@@ -190,42 +190,6 @@ fn classify_auth(harness: &KnownHarness, override_active: bool) -> (AuthMode, Ve
     (auth_mode, warnings)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn claude() -> &'static KnownHarness {
-        harness_by_name("claude-code").unwrap()
-    }
-
-    #[test]
-    fn subscription_when_no_override() {
-        let (mode, warns) = classify_auth(claude(), false);
-        assert_eq!(mode, AuthMode::Subscription);
-        assert!(warns.is_empty());
-    }
-
-    #[test]
-    fn footgun_flips_to_metered_with_loud_warning() {
-        let (mode, warns) = classify_auth(claude(), true);
-        assert_eq!(mode, AuthMode::ApiKey);
-        assert!(mode.is_metered());
-        assert_eq!(warns.len(), 1);
-        assert!(warns[0].contains("ANTHROPIC_API_KEY"));
-        assert!(warns[0].contains("OVERRIDES"));
-    }
-
-    #[test]
-    fn non_footgun_override_warns_softly() {
-        let grok = harness_by_name("grok").unwrap();
-        let (mode, warns) = classify_auth(grok, true);
-        assert_eq!(mode, AuthMode::ApiKey);
-        assert_eq!(warns.len(), 1);
-        assert!(warns[0].contains("XAI_API_KEY"));
-        assert!(!warns[0].contains("OVERRIDES"));
-    }
-}
-
 /// Probe an API worker: present and metered iff a key is available (from the
 /// env var or the OS keychain).
 fn probe_api(name: &str, key_env: &str) -> WorkerProbe {
@@ -298,4 +262,40 @@ fn find_on_path(binary: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claude() -> &'static KnownHarness {
+        harness_by_name("claude-code").unwrap()
+    }
+
+    #[test]
+    fn subscription_when_no_override() {
+        let (mode, warns) = classify_auth(claude(), false);
+        assert_eq!(mode, AuthMode::Subscription);
+        assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn footgun_flips_to_metered_with_loud_warning() {
+        let (mode, warns) = classify_auth(claude(), true);
+        assert_eq!(mode, AuthMode::ApiKey);
+        assert!(mode.is_metered());
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("ANTHROPIC_API_KEY"));
+        assert!(warns[0].contains("OVERRIDES"));
+    }
+
+    #[test]
+    fn non_footgun_override_warns_softly() {
+        let grok = harness_by_name("grok").unwrap();
+        let (mode, warns) = classify_auth(grok, true);
+        assert_eq!(mode, AuthMode::ApiKey);
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("XAI_API_KEY"));
+        assert!(!warns[0].contains("OVERRIDES"));
+    }
 }

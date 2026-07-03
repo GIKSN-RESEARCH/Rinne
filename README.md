@@ -649,6 +649,12 @@ This is a deliberate, documented exception to the "Rinne holds no credentials" p
 
 Runtime state lives under `.rinne/` in the working directory: the plan, run progress, and logs (`.rinne/logs/`).
 
+### Local code graph
+
+Rinne builds and maintains a **local, incremental structural index** of the repo — stored in the blackboard SQLite alongside the plan — using tree-sitter for language parsing. The graph records symbols (functions, classes, types), imports, and call edges for Rust, TypeScript/JavaScript, and Python files. When the context assembler resolves `@`-mentions for a task, it can retrieve a **symbol's neighborhood** (the symbol itself, its direct callers, and its direct callees) instead of inlining entire files, giving harnesses and API workers focused, accurate context.
+
+The graph is shared across all harnesses active in a run, so every worker reads the same fresh snapshot rather than each indexing the repo independently. It is re-indexed on demand (before context assembly) so it stays consistent with the working tree even mid-run. The `rinne graph` subcommand lets you inspect the index — list files, look up a symbol, and view its neighborhood — without starting a full run. Pass `--no-graph` to any `rinne` invocation to skip graph indexing if you want to isolate that behavior or profile without it.
+
 ## Development
 
 ```bash
