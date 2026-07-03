@@ -6,6 +6,7 @@
 mod catalog;
 mod cli;
 mod commands;
+mod learn;
 mod mcp_pool;
 mod runner;
 mod telemetry;
