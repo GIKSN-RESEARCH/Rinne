@@ -80,16 +80,32 @@ impl Indexer {
             tracing::warn!("indexer: ensure_current({:?}): {}", rel, e);
         }
     }
+
+    /// Synchronously walk the whole repo and index every supported, in-size
+    /// source file, returning the number of files indexed. Unlike the background
+    /// warm, this does not sleep between files — it is the on-demand path used by
+    /// `rinne graph index`. Errors on individual files are logged and skipped.
+    pub fn index_all(&self) -> usize {
+        walk_and_index(&self.graph, &self.root, false)
+    }
 }
 
 fn warm_background(graph: Arc<Graph>, root: PathBuf) {
-    let mut stack = vec![root.clone()];
+    walk_and_index(&graph, &root, true);
+}
+
+/// Walk `root` and index each supported source file. When `throttle` is set, a
+/// brief sleep between files keeps the background warm a good citizen; the
+/// synchronous `index_all` path passes `false`. Returns the count indexed.
+fn walk_and_index(graph: &Arc<Graph>, root: &Path, throttle: bool) -> usize {
+    let mut indexed = 0;
+    let mut stack = vec![root.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) => {
-                tracing::debug!("indexer warm: read_dir({:?}): {}", dir, e);
+                tracing::debug!("indexer walk: read_dir({:?}): {}", dir, e);
                 continue;
             }
         };
@@ -108,7 +124,7 @@ fn warm_background(graph: Arc<Graph>, root: PathBuf) {
                     stack.push(path);
                 }
             } else if file_type.is_file() {
-                let rel = match path.strip_prefix(&root) {
+                let rel = match path.strip_prefix(root) {
                     Ok(r) => r.to_string_lossy().replace('\\', "/"),
                     Err(_) => continue,
                 };
@@ -139,13 +155,19 @@ fn warm_background(graph: Arc<Graph>, root: PathBuf) {
                 };
 
                 if let Err(e) = graph.ensure_current(&rel, &source, mtime) {
-                    tracing::warn!("indexer warm: ensure_current({:?}): {}", rel, e);
+                    tracing::warn!("indexer walk: ensure_current({:?}): {}", rel, e);
+                    continue;
                 }
+                indexed += 1;
 
-                std::thread::sleep(Duration::from_millis(5));
+                if throttle {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
         }
     }
+
+    indexed
 }
 
 #[cfg(test)]
@@ -166,6 +188,35 @@ mod tests {
 
         use rinne_types::graph::CodeGraph;
         assert!(CodeGraph::neighborhood(graph.as_ref(), "helper").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_all_walks_repo_and_counts_files() {
+        let dir = std::env::temp_dir().join(format!("rinne-idxall-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap(); // skipped dir
+        std::fs::write(dir.join("src/a.rs"), "fn alpha() { beta(); }\n").unwrap();
+        std::fs::write(dir.join("src/b.py"), "def gamma():\n    pass\n").unwrap();
+        std::fs::write(dir.join("README.md"), "not source\n").unwrap(); // unsupported
+        std::fs::write(dir.join("target/junk.rs"), "fn skipme() {}\n").unwrap();
+
+        let graph = Arc::new(crate::Graph::open(&dir.join("state.db")).unwrap());
+        let indexer = Indexer::new(graph.clone(), dir.clone());
+        let count = indexer.index_all();
+
+        // Two supported files under non-skipped dirs; README (unsupported) and
+        // target/ (skipped) excluded.
+        assert_eq!(count, 2, "should index a.rs and b.py only");
+
+        use rinne_types::graph::CodeGraph;
+        assert!(CodeGraph::neighborhood(graph.as_ref(), "alpha").is_some());
+        assert!(CodeGraph::neighborhood(graph.as_ref(), "gamma").is_some());
+        assert!(
+            CodeGraph::neighborhood(graph.as_ref(), "skipme").is_none(),
+            "target/ must be skipped"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

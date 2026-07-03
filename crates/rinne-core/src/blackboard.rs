@@ -101,6 +101,13 @@ impl Blackboard {
         }
     }
 
+    /// Synchronously index the whole repo into the code graph, returning the
+    /// number of files indexed. Powers `rinne graph index`. Returns `0` when the
+    /// graph is disabled (`--no-graph`).
+    pub fn index_repo(&self) -> usize {
+        self.indexer.as_ref().map(|idx| idx.index_all()).unwrap_or(0)
+    }
+
     /// Whether a blackboard already exists for a repo (i.e. there is a plan to
     /// resume).
     pub fn exists(workspace: &Path) -> bool {

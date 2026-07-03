@@ -156,6 +156,11 @@ pub enum Command {
 /// Subcommands for `rinne graph`.
 #[derive(Debug, Subcommand)]
 pub enum GraphCmd {
+    /// Index (or re-index) the whole repo into the code graph now, then report
+    /// how many files were indexed. Runs synchronously; useful for populating
+    /// and inspecting the graph without starting a full run.
+    Index,
+
     /// Show indexed file, symbol, and edge counts.
     Stats,
 

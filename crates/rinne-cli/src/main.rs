@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
         Some(Command::Graph { cmd }) => {
             let cwd = std::env::current_dir()?;
             let graph_cmd = match cmd {
+                CliGraphCmd::Index => commands::graph::GraphCmd::Index,
                 CliGraphCmd::Stats => commands::graph::GraphCmd::Stats,
                 CliGraphCmd::Symbols { file } => commands::graph::GraphCmd::Symbols { file },
                 CliGraphCmd::Neighborhood { symbol } => commands::graph::GraphCmd::Neighborhood { symbol },

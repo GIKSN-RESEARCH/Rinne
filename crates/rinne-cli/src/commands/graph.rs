@@ -10,6 +10,7 @@ use rinne_types::graph::Neighborhood;
 
 /// Which `rinne graph …` variant to run.
 pub enum GraphCmd {
+    Index,
     Stats,
     Symbols { file: String },
     Neighborhood { symbol: String },
@@ -20,6 +21,16 @@ pub async fn run(cmd: GraphCmd, cwd: std::path::PathBuf) -> Result<()> {
     let bb = Blackboard::open(&cwd)?;
 
     match cmd {
+        GraphCmd::Index => {
+            let count = bb.index_repo();
+            let (files, symbols, edges) = bb
+                .concrete_graph()
+                .as_ref()
+                .map(|g| g.stats())
+                .unwrap_or((0, 0, 0));
+            println!("indexed {count} file(s)");
+            println!("{}", format_stats(files, symbols, edges));
+        }
         GraphCmd::Stats => {
             let concrete = bb.concrete_graph();
             let (files, symbols, edges) = concrete
@@ -27,6 +38,12 @@ pub async fn run(cmd: GraphCmd, cwd: std::path::PathBuf) -> Result<()> {
                 .map(|g| g.stats())
                 .unwrap_or((0, 0, 0));
             println!("{}", format_stats(files, symbols, edges));
+            if files == 0 {
+                println!(
+                    "\n(graph is empty — run `rinne graph index` to index the repo now, \
+                     or it fills in automatically during a run)"
+                );
+            }
         }
         GraphCmd::Symbols { file } => {
             let concrete = bb.concrete_graph();
