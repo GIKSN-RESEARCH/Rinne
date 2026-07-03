@@ -169,7 +169,7 @@ mod tests {
         let src = "def a():\n    b()\ndef b():\n    pass\n";
         let (symbols, edges) = extract("python", src).unwrap();
         assert!(symbols.iter().any(|s| s.name == "a"));
-        assert!(edges.iter().any(|e| e.dst_name == "b"));
+        assert!(edges.iter().any(|e| e.dst_name == "b" && e.src_name.as_deref() == Some("a")));
     }
 
     #[test]
@@ -177,6 +177,6 @@ mod tests {
         let src = "function f() { g(); }\nfunction g() {}\n";
         let (symbols, edges) = extract("typescript", src).unwrap();
         assert!(symbols.iter().any(|s| s.name == "f"));
-        assert!(edges.iter().any(|e| e.dst_name == "g"));
+        assert!(edges.iter().any(|e| e.dst_name == "g" && e.src_name.as_deref() == Some("f")));
     }
 }
