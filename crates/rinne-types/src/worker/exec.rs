@@ -43,6 +43,12 @@ pub struct ContextPacket {
     /// §11). Injected verbatim into the worker's prompt, both families.
     #[serde(default)]
     pub skill_text: String,
+    /// Graph-derived neighborhoods (definition + callers/callees/imports with
+    /// file:line coordinates) for symbols this node is expected to touch, so a
+    /// harness finds the right code without re-scanning. Empty when the graph
+    /// resolved nothing; never removes the pinned paths.
+    #[serde(default)]
+    pub symbol_map: Vec<crate::graph::Neighborhood>,
 }
 
 /// A file inlined into an API worker's context.
@@ -226,4 +232,20 @@ pub struct ExecuteResult {
     /// A session id the worker can be resumed with, if it supports continuation.
     #[serde(default)]
     pub session_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_packet_defaults_empty_symbol_map() {
+        let p = ContextPacket::default();
+        assert!(p.symbol_map.is_empty());
+        let json = serde_json::to_string(&p).unwrap();
+        // Round-trips without requiring the field to be present.
+        let back: ContextPacket = serde_json::from_str("{}").unwrap();
+        assert!(back.symbol_map.is_empty());
+        let _ = json;
+    }
 }
