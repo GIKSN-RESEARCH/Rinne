@@ -400,7 +400,16 @@ impl<'a> Engine<'a> {
             if critique.is_some() { " [with critique]" } else { "" }
         ))?;
 
-        let assembler = ContextAssembler::new(self.blackboard, &self.plan, None);
+        // Reindex-on-read: bring the graph up-to-date for every pinned mention
+        // before building the packet so the assembler sees fresh symbol data.
+        let workspace = self.blackboard.workspace();
+        for m in &self.plan.mentioned {
+            let abs = if m.is_absolute() { m.clone() } else { workspace.join(m) };
+            self.blackboard.reindex_file(&abs);
+        }
+
+        let graph = self.blackboard.code_graph();
+        let assembler = ContextAssembler::new(self.blackboard, &self.plan, graph);
         let mut packet = assembler.build(node, family, critique)?;
         packet.skill_text = self.skill_text(node);
         if let Ok(json) = serde_json::to_string_pretty(&packet) {

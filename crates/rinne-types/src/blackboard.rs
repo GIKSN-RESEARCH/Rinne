@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::dag::Plan;
+use crate::graph::CodeGraph;
 use crate::worker::Usage;
 use crate::Result;
 
@@ -89,4 +90,16 @@ pub trait Blackboard {
     fn total_usage(&self) -> Result<Usage>;
     fn set_meta(&self, key: &str, value: &str) -> Result<()>;
     fn meta(&self, key: &str) -> Result<Option<String>>;
+
+    // ----- code graph (optional) ----------------------------------------------
+
+    /// Return the code graph if the blackboard was opened with graph support
+    /// enabled, or `None` if the graph is disabled (`--no-graph`).
+    fn code_graph(&self) -> Option<&dyn CodeGraph> {
+        None
+    }
+
+    /// Synchronously re-index a single file against the code graph.
+    /// A no-op when `code_graph()` is `None`.
+    fn reindex_file(&self, _abs: &Path) {}
 }
