@@ -152,8 +152,13 @@ fn collect_refs(text: &str, out: &mut Vec<(String, u32)>) {
             continue;
         }
 
-        // Look backward in the ~20-char window before `§` for a known docfile name.
-        let window_start = abs_sign.saturating_sub(20);
+        // Look backward in the ~20-byte window before `§` for a known docfile
+        // name. Snap the start to a char boundary so the slice can't panic when a
+        // multi-byte character straddles the window edge.
+        let mut window_start = abs_sign.saturating_sub(20);
+        while window_start < abs_sign && !text.is_char_boundary(window_start) {
+            window_start += 1;
+        }
         // Strip backticks and spaces from the window to find the filename.
         let window = &text[window_start..abs_sign];
         let clean: String = window.chars().filter(|&c| c != '`' && c != ' ').collect();
@@ -249,6 +254,15 @@ mod tests {
             "referenced CONTEXT.md §12 section pulled in"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_refs_handles_non_ascii_before_marker_without_panic() {
+        // A multi-byte char (é, emoji) within the 20-byte lookback window before a
+        // `§` must not cause a non-char-boundary slice panic.
+        let mut out = Vec::new();
+        collect_refs("café note 🚀 `CONTEXT.md` §7 detail", &mut out);
+        assert!(out.contains(&("CONTEXT.md".to_string(), 7)));
     }
 
     #[test]
