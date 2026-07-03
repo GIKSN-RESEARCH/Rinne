@@ -11,6 +11,7 @@ pub mod dag;
 pub mod error;
 pub mod evaluator;
 pub mod replanner;
+pub mod skip;
 pub mod skill;
 pub mod worker;
 

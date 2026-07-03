@@ -18,6 +18,7 @@ name = "rinne"
 path = "src/main.rs"
 
 [dependencies]
+rinne-types.workspace = true
 rinne-core.workspace = true
 rinne-config.workspace = true
 rinne-workers.workspace = true
