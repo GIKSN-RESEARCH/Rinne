@@ -40,8 +40,8 @@ impl Indexer {
     /// `graph.ensure_current`. Errors are logged and swallowed.
     pub fn ensure_now(&self, path: &Path) {
         let rel = match path.strip_prefix(&self.root) {
-            Ok(r) => r.to_string_lossy().into_owned(),
-            Err(_) => path.to_string_lossy().into_owned(),
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => return,
         };
 
         if skip::source_lang(&rel).is_none() {
@@ -109,7 +109,7 @@ fn warm_background(graph: Arc<Graph>, root: PathBuf) {
                 }
             } else if file_type.is_file() {
                 let rel = match path.strip_prefix(&root) {
-                    Ok(r) => r.to_string_lossy().into_owned(),
+                    Ok(r) => r.to_string_lossy().replace('\\', "/"),
                     Err(_) => continue,
                 };
 
@@ -166,6 +166,39 @@ mod tests {
 
         use rinne_types::graph::CodeGraph;
         assert!(CodeGraph::neighborhood(graph.as_ref(), "helper").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_now_uses_forward_slash_key() {
+        let dir = std::env::temp_dir().join(format!("rinne-fwd-{}", std::process::id()));
+        let nested = dir.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("mod.rs");
+        std::fs::write(&file, "fn nested_fn() {}\n").unwrap();
+
+        let graph = Arc::new(crate::Graph::open(&dir.join("state.db")).unwrap());
+        let indexer = Indexer::new(graph.clone(), dir.clone());
+        indexer.ensure_now(&file);
+
+        use rinne_types::graph::CodeGraph;
+
+        // Symbol must resolve — proves the key the indexer stored is reachable.
+        assert!(
+            CodeGraph::neighborhood(graph.as_ref(), "nested_fn").is_some(),
+            "nested_fn should be indexed and resolvable"
+        );
+
+        // Key must not contain backslashes — proves forward-slash normalization.
+        let names = CodeGraph::symbol_names(graph.as_ref());
+        // The stored path key is part of every symbol's qualified name; none should contain '\'.
+        for name in &names {
+            assert!(
+                !name.contains('\\'),
+                "symbol name/key contains backslash: {name}"
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
