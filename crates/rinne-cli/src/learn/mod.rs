@@ -6,30 +6,28 @@ pub mod translate;
 pub mod render;
 
 /// A symbol within a cluster: represents a function, type, or other named entity.
-/// Consumed by Tasks 5-9.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClusterSymbol {
     pub name: String,
     pub file: String,
     pub line: u32,
+    // Reserved for future filtering/display; not yet consumed by the renderer.
+    #[allow(dead_code)]
     pub kind: String,
 }
 
 /// A cluster of related symbols around a topic.
-/// Consumed by Tasks 5-9.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Cluster {
+    // Carried for serialisation and future use; the renderer uses symbols/files.
+    #[allow(dead_code)]
     pub topic: String,
     pub symbols: Vec<ClusterSymbol>,
     pub files: Vec<String>,
 }
 
 /// A snippet of code with associated metadata.
-/// Consumed by Tasks 5-9.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Snippet {
     pub symbol: String,
     pub file: String,
@@ -39,9 +37,7 @@ pub struct Snippet {
 }
 
 /// A section of documentation extracted from sources.
-/// Consumed by Tasks 5-9.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DocSection {
     pub source: String,
     pub heading: String,
@@ -49,9 +45,7 @@ pub struct DocSection {
 }
 
 /// A learned document combining code snippets, flow, and documentation.
-/// Consumed by Tasks 5-9.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LearnDoc {
     pub topic: String,
     pub snippets: Vec<Snippet>,
@@ -60,13 +54,15 @@ pub struct LearnDoc {
 }
 
 /// A narration of architecture and design decisions.
-/// Consumed by Tasks 5-9.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Narration {
     pub overview: String,
+    // Reserved for richer rendering in future tasks.
+    #[allow(dead_code)]
     pub components: Vec<(String, String)>,
+    #[allow(dead_code)]
     pub decisions: String,
+    #[allow(dead_code)]
     pub concepts: String,
 }
 

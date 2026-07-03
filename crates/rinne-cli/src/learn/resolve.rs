@@ -9,7 +9,6 @@ use crate::learn::{Cluster, ClusterSymbol};
 /// Seeds are symbols whose name or file path contains `topic` (case-insensitive).
 /// One hop of callers and callees is added, then results are deduped by
 /// (name, file, line) and truncated to `cap`. Files are sorted and deduplicated.
-#[allow(dead_code)]
 pub fn resolve_cluster(graph: &dyn CodeGraph, topic: &str, cap: usize) -> Cluster {
     let topic_lower = topic.to_lowercase();
 

@@ -1,7 +1,5 @@
 //! Translation of code and documentation into narrative.
 
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

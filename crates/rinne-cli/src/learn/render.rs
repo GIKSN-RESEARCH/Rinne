@@ -2,7 +2,6 @@
 
 use crate::learn::{LearnDoc, Narration};
 
-#[allow(dead_code)]
 fn esc(s: &str) -> String {
     // Escape & FIRST to avoid double-escaping subsequent substitutions.
     s.replace('&', "&amp;")
@@ -11,7 +10,6 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-#[allow(dead_code)]
 pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     let overview = narration
         .map(|n| esc(&n.overview))
@@ -109,7 +107,6 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     html
 }
 
-#[allow(dead_code)]
 fn include_style() -> &'static str {
     r#"
 body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; line-height: 1.6; }

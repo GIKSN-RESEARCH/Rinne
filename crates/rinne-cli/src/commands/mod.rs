@@ -5,6 +5,7 @@ pub mod connect;
 pub mod doctor;
 pub mod forget;
 pub mod graph;
+pub mod learn;
 pub mod logs;
 pub mod mcp;
 pub mod models;

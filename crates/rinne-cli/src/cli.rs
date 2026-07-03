@@ -32,6 +32,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_graph: bool,
 
+    /// Skip AI narration for `learn explain` (template-only HTML, no worker needed).
+    #[arg(long, global = true)]
+    pub no_ai: bool,
+
+    /// Open the output file in the default browser after writing (learn explain).
+    #[arg(long, global = true)]
+    pub open: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -150,6 +158,26 @@ pub enum Command {
     Graph {
         #[command(subcommand)]
         cmd: GraphCmd,
+    },
+
+    /// Synthesise a code-literacy document for a topic or symbol.
+    ///
+    /// Subcommands: `explain <topic>` — resolves symbols, assembles snippets,
+    /// optionally narrates with an AI worker, and writes `.rinne/learn/<topic>.html`.
+    Learn {
+        #[command(subcommand)]
+        cmd: LearnCmd,
+    },
+}
+
+/// Subcommands for `rinne learn`.
+#[derive(Debug, Subcommand)]
+pub enum LearnCmd {
+    /// Explain a topic: resolve related symbols, assemble code snippets,
+    /// optionally narrate with an AI worker, and write an HTML document.
+    Explain {
+        /// The topic, symbol name, or path fragment to explain.
+        topic: String,
     },
 }
 

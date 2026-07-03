@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command, GraphCmd as CliGraphCmd};
+use cli::{Cli, Command, GraphCmd as CliGraphCmd, LearnCmd as CliLearnCmd};
 use rinne_core::BLACKBOARD_DIR;
 
 #[tokio::main]
@@ -29,6 +29,8 @@ async fn main() -> Result<()> {
     let _log_guard = telemetry::init(&blackboard, args.verbose);
 
     let no_graph = args.no_graph;
+    let no_ai = args.no_ai;
+    let open = args.open;
 
     // A `-p` prompt means one-shot headless mode regardless of subcommand.
     if let Some(task) = args.prompt.as_deref() {
@@ -71,6 +73,15 @@ async fn main() -> Result<()> {
                 CliGraphCmd::Neighborhood { symbol } => commands::graph::GraphCmd::Neighborhood { symbol },
             };
             commands::graph::run(graph_cmd, cwd).await
+        }
+        Some(Command::Learn { cmd }) => {
+            let cwd = std::env::current_dir()?;
+            let learn_cmd = match cmd {
+                CliLearnCmd::Explain { topic } => {
+                    commands::learn::LearnCmd::Explain { topic }
+                }
+            };
+            commands::learn::run(learn_cmd, cwd, no_ai, open).await
         }
     }
 }

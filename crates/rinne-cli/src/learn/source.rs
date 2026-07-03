@@ -1,7 +1,5 @@
 //! Source code extraction and retrieval.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::Path;
 
