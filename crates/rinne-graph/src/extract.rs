@@ -117,11 +117,28 @@ fn walk(
                 let def_text = std::str::from_utf8(&source[start_byte..end_byte]).unwrap_or("");
                 let signature = def_text.lines().next().map(|l| l.trim().to_string());
 
+                let start_line = def_node.start_position().row as u32 + 1;
+                let end_line = def_node.end_position().row as u32 + 1;
+
+                // A definition can match more than one query pattern (e.g. a Rust
+                // method inside an `impl` matches both `function_item` and the
+                // `impl_item`-method pattern). Dedup by span, keeping the more
+                // specific kind (Method over Function) so it is counted once.
+                if let Some(existing) = symbols
+                    .iter_mut()
+                    .find(|s: &&mut RawSymbol| s.name == name && s.start_line == start_line)
+                {
+                    if kind == SymbolKind::Method && existing.kind == SymbolKind::Function {
+                        existing.kind = SymbolKind::Method;
+                    }
+                    continue;
+                }
+
                 symbols.push(RawSymbol {
                     name,
                     kind,
-                    start_line: def_node.start_position().row as u32 + 1,
-                    end_line: def_node.end_position().row as u32 + 1,
+                    start_line,
+                    end_line,
                     signature,
                 });
             } else if cap_name.starts_with("call.") {
@@ -162,6 +179,18 @@ mod tests {
         assert!(names.contains(&"helper"));
         assert!(names.contains(&"main"));
         assert!(edges.iter().any(|e| e.dst_name == "helper" && e.src_name.as_deref() == Some("main")));
+    }
+
+    #[test]
+    fn impl_methods_are_not_duplicated() {
+        // A method inside an impl block matches both the `function_item` and the
+        // `impl_item`-method query patterns; it must be extracted exactly once,
+        // and as a Method (the more specific kind), not a plain Function.
+        let src = "struct S;\nimpl S {\n    fn method(&self) {}\n}\n";
+        let (symbols, _edges) = extract("rust", src).unwrap();
+        let methods: Vec<_> = symbols.iter().filter(|s| s.name == "method").collect();
+        assert_eq!(methods.len(), 1, "impl method must not be double-counted");
+        assert_eq!(methods[0].kind, SymbolKind::Method);
     }
 
     #[test]
