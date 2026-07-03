@@ -182,7 +182,7 @@ mod tests {
         let file = dir.join("m.rs");
         std::fs::write(&file, "fn helper() {}\nfn main() { helper(); }\n").unwrap();
 
-        let graph = Arc::new(crate::Graph::open(&dir.join("state.db")).unwrap());
+        let graph = Arc::new(crate::Graph::open(&dir.join("state.db"), &dir).unwrap());
         let indexer = Indexer::new(graph.clone(), dir.clone());
         indexer.ensure_now(&file);
 
@@ -201,7 +201,7 @@ mod tests {
         std::fs::write(dir.join("README.md"), "not source\n").unwrap(); // unsupported
         std::fs::write(dir.join("target/junk.rs"), "fn skipme() {}\n").unwrap();
 
-        let graph = Arc::new(crate::Graph::open(&dir.join("state.db")).unwrap());
+        let graph = Arc::new(crate::Graph::open(&dir.join("state.db"), &dir).unwrap());
         let indexer = Indexer::new(graph.clone(), dir.clone());
         let count = indexer.index_all();
 
@@ -228,7 +228,7 @@ mod tests {
         let file = nested.join("mod.rs");
         std::fs::write(&file, "fn nested_fn() {}\n").unwrap();
 
-        let graph = Arc::new(crate::Graph::open(&dir.join("state.db")).unwrap());
+        let graph = Arc::new(crate::Graph::open(&dir.join("state.db"), &dir).unwrap());
         let indexer = Indexer::new(graph.clone(), dir.clone());
         indexer.ensure_now(&file);
 

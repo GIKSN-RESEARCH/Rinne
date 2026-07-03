@@ -2,7 +2,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
@@ -14,10 +14,11 @@ use rinne_types::skip::source_lang;
 
 pub struct Store {
     pub(crate) conn: Connection,
+    root: PathBuf,
 }
 
 impl Store {
-    pub fn open(db_path: &Path) -> rusqlite::Result<Store> {
+    pub fn open(db_path: &Path, root: &Path) -> rusqlite::Result<Store> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -25,7 +26,7 @@ impl Store {
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         init_graph_schema(&conn)?;
-        Ok(Store { conn })
+        Ok(Store { conn, root: root.to_path_buf() })
     }
 
     /// Stable content hash for freshness comparison.
@@ -213,12 +214,31 @@ impl Store {
             })
             .unwrap_or_default();
 
+        let stale = {
+            let abs = self.root.join(&definition.file);
+            match std::fs::read_to_string(&abs) {
+                Ok(contents) => {
+                    let cur = Self::hash_of(&contents);
+                    let stored: Option<String> = self
+                        .conn
+                        .query_row(
+                            "SELECT content_hash FROM graph_files WHERE path = ?1",
+                            [definition.file.as_str()],
+                            |r| r.get(0),
+                        )
+                        .ok();
+                    stored.map(|s| s != cur).unwrap_or(false)
+                }
+                Err(_) => false,
+            }
+        };
+
         Some(Neighborhood {
             definition,
             callers,
             callees,
             imports,
-            stale: false,
+            stale,
         })
     }
 
@@ -299,7 +319,7 @@ mod tests {
     fn mem_store() -> Store {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::schema::init_graph_schema(&conn).unwrap();
-        Store { conn }
+        Store { conn, root: std::env::temp_dir() }
     }
 
     #[test]
@@ -340,5 +360,26 @@ mod tests {
         store.index_file(path, "fn second_sym() {}\n", 1).unwrap();
         assert!(store.neighborhood("first_sym").is_none(), "old symbol must be gone after reindex");
         assert!(store.neighborhood("second_sym").is_some(), "new symbol must exist after reindex");
+    }
+
+    #[test]
+    fn neighborhood_reports_stale_when_file_changed_on_disk() {
+        let dir = std::env::temp_dir().join(format!("rinne-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.rs");
+        std::fs::write(&file, "fn helper() {}\nfn main() { helper(); }\n").unwrap();
+
+        let store = Store::open(&dir.join("state.db"), &dir).unwrap();
+        let src = std::fs::read_to_string(&file).unwrap();
+        store.index_file("m.rs", &src, 0).unwrap();
+
+        // Fresh: not stale.
+        assert!(!store.neighborhood("helper").unwrap().stale);
+
+        // Mutate the file on disk without reindexing.
+        std::fs::write(&file, "fn helper() {}\nfn main() { helper(); helper(); }\n").unwrap();
+        assert!(store.neighborhood("helper").unwrap().stale, "must report stale after on-disk edit");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

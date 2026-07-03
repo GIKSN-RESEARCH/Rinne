@@ -28,9 +28,10 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// Open (or create) the graph store at `db_path`.
-    pub fn open(db_path: &Path) -> rusqlite::Result<Graph> {
-        let store = Store::open(db_path)?;
+    /// Open (or create) the graph store at `db_path`, resolving repo-relative
+    /// file keys against `root` when computing the `stale` flag.
+    pub fn open(db_path: &Path, root: &Path) -> rusqlite::Result<Graph> {
+        let store = Store::open(db_path, root)?;
         Ok(Graph {
             store: Mutex::new(store),
         })
@@ -95,7 +96,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rinne-graph-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("state.db");
-        let graph = Graph::open(&db).unwrap();
+        let graph = Graph::open(&db, &dir).unwrap();
         graph.ensure_current("m.rs", "fn helper() {}\nfn main() { helper(); }\n", 0).unwrap();
         let nb = CodeGraph::neighborhood(&graph, "helper").unwrap();
         assert_eq!(nb.definition.name, "helper");

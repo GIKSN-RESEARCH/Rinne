@@ -57,7 +57,7 @@ impl Blackboard {
         let state = State::open(&db_path)?;
 
         let (graph, indexer) = if enable_graph {
-            match Graph::open(&db_path) {
+            match Graph::open(&db_path, workspace) {
                 Ok(g) => {
                     let g = Arc::new(g);
                     let idx = Indexer::spawn(Arc::clone(&g), workspace.to_path_buf());
