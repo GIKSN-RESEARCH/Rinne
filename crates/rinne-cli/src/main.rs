@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     }
 
     match args.command {
-        None => run_interactive().await,
+        None => run_interactive(no_graph).await,
         Some(Command::Doctor) => run_doctor().await,
         Some(Command::Run { plan }) => commands::run::run(&plan, no_graph).await,
         Some(Command::Connect { backend, key, models, base_url, add }) => {
@@ -73,8 +73,8 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_interactive() -> Result<()> {
-    tui::run().await
+async fn run_interactive(no_graph: bool) -> Result<()> {
+    tui::run(no_graph).await
 }
 
 async fn run_oneshot(task: &str, json: bool, no_graph: bool) -> Result<()> {

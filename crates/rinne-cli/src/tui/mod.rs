@@ -243,10 +243,11 @@ pub struct App {
     should_quit: bool,
     cancel: Option<CancellationToken>,
     tx: tokio::sync::mpsc::UnboundedSender<AppMsg>,
+    no_graph: bool,
 }
 
 impl App {
-    fn new(index: FileIndex, tx: tokio::sync::mpsc::UnboundedSender<AppMsg>) -> Self {
+    fn new(index: FileIndex, tx: tokio::sync::mpsc::UnboundedSender<AppMsg>, no_graph: bool) -> Self {
         Self {
             goal: None,
             nodes: Vec::new(),
@@ -274,6 +275,7 @@ impl App {
             should_quit: false,
             cancel: None,
             tx,
+            no_graph,
         }
         // `set_intro` is called from `run()` with the loaded config to populate
         // the live intro table; the background probe then resolves availability.
@@ -1048,7 +1050,7 @@ impl App {
         self.running = true;
         self.nodes.clear();
         self.push(FeedKind::Conductor, format!("planning: {goal}"));
-        spawn_run(self.tx.clone(), goal, mentioned, None, cancel);
+        spawn_run(self.tx.clone(), goal, mentioned, None, cancel, self.no_graph);
     }
 
     fn resume_with(&mut self, decision: HumanDecision) {
@@ -1062,7 +1064,7 @@ impl App {
         self.cancel = Some(cancel.clone());
         let resume = ResumeInput { node: None, decision };
         self.push(FeedKind::Conductor, "resuming with your decision");
-        spawn_run(self.tx.clone(), String::new(), Vec::new(), Some(resume), cancel);
+        spawn_run(self.tx.clone(), String::new(), Vec::new(), Some(resume), cancel, self.no_graph);
     }
 
     fn resume_plain(&mut self) {
@@ -1070,7 +1072,7 @@ impl App {
         self.cancel = Some(cancel.clone());
         self.running = true;
         self.push(FeedKind::Conductor, "resuming");
-        spawn_run(self.tx.clone(), String::new(), Vec::new(), None, cancel);
+        spawn_run(self.tx.clone(), String::new(), Vec::new(), None, cancel, self.no_graph);
     }
 
     fn resolve_mentions(&self, input: &str) -> std::result::Result<(String, Vec<PathBuf>), String> {
@@ -1293,6 +1295,7 @@ fn spawn_run(
     mentioned: Vec<PathBuf>,
     resume: Option<ResumeInput>,
     cancel: CancellationToken,
+    no_graph: bool,
 ) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -1303,7 +1306,7 @@ fn spawn_run(
             }
         };
         rt.block_on(async move {
-            match do_run(tx.clone(), goal, mentioned, resume, cancel).await {
+            match do_run(tx.clone(), goal, mentioned, resume, cancel, no_graph).await {
                 Ok(report) => {
                     let _ = tx.send(AppMsg::Finished(report));
                 }
@@ -1321,10 +1324,11 @@ async fn do_run(
     mentioned: Vec<PathBuf>,
     resume: Option<ResumeInput>,
     cancel: CancellationToken,
+    no_graph: bool,
 ) -> Result<RunReport> {
     let config = rinne_config::load_cwd()?;
     let cwd = std::env::current_dir()?;
-    let bb = Blackboard::open(&cwd)?;
+    let bb = Blackboard::open_with(&cwd, !no_graph)?;
     let (executor, tool_specs, mcp_servers) = runner::host_setup(&config).await;
     let (registry, _) = runner::build_registry_with_tools(&config, executor).await?;
     if registry.is_empty() {
@@ -1385,7 +1389,7 @@ async fn do_run(
 }
 
 /// Entry point: set up an inline viewport and run the event loop.
-pub async fn run() -> Result<()> {
+pub async fn run(no_graph: bool) -> Result<()> {
     if !io::stdout().is_terminal() {
         println!("rinne: the interactive TUI needs a terminal. Use `rinne -p \"<task>\"` for headless runs.");
         return Ok(());
@@ -1409,7 +1413,7 @@ pub async fn run() -> Result<()> {
     // Clone the sender for the background availability probe before `App` takes
     // ownership of the original.
     let tx_for_probe = tx.clone();
-    let mut app = App::new(index, tx);
+    let mut app = App::new(index, tx, no_graph);
     // Persist prompt history across sessions under the project blackboard.
     app.attach_history(cwd.join(rinne_core::BLACKBOARD_DIR).join("history"));
 
@@ -1529,7 +1533,7 @@ mod tests {
 
     fn app_for(dir: &std::path::Path) -> App {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        App::new(FileIndex::build(dir), tx)
+        App::new(FileIndex::build(dir), tx, false)
     }
 
     #[test]
