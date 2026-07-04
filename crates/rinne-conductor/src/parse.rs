@@ -7,8 +7,19 @@
 use rinne_core::dag::Plan;
 use rinne_core::{Result, RinneError};
 
+/// Largest model response we'll attempt to parse. A real plan is a few KB; a
+/// backend streaming megabytes is misbehaving, so reject before the sanitizer
+/// makes several full copies.
+const MAX_RAW_BYTES: usize = 1024 * 1024;
+
 /// Sanitize and parse a model response into a validated [`Plan`].
 pub fn parse_plan(raw: &str) -> Result<Plan> {
+    if raw.len() > MAX_RAW_BYTES {
+        return Err(RinneError::Conductor(format!(
+            "conductor output too large ({} bytes) to be a plan",
+            raw.len()
+        )));
+    }
     let stripped = strip_code_fence(raw);
     let object = extract_outer_object(stripped).ok_or_else(|| {
         RinneError::Conductor(format!(
@@ -218,6 +229,12 @@ mod tests {
         let plan = parse_plan(raw).unwrap();
         assert_eq!(plan.goal, "build it");
         assert_eq!(plan.nodes[0].needs.len(), 1);
+    }
+
+    #[test]
+    fn rejects_oversized_raw_output() {
+        let big = "x".repeat(2 * 1024 * 1024);
+        assert!(parse_plan(&big).is_err());
     }
 
     #[test]

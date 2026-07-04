@@ -1290,31 +1290,78 @@ fn redact_secret(text: &str) -> String {
     text.to_string()
 }
 
-/// The slash-command reference, formatted as command (left) · description
-/// (right). Newlines are preserved by the transcript renderer.
+/// The full command reference: every slash command grouped by purpose, with its
+/// arguments and flags. Newlines are preserved by the transcript renderer.
 fn help_text() -> String {
-    let rows = [
-        ("/plan", "show the current plan"),
-        ("/learn <topic>", "explain a subsystem as an HTML doc (.rinne/learn/)"),
-        ("/workers", "list workers + connected APIs and their auth"),
-        ("/connect <b>", "connect a harness, or an API provider + key (e.g. /connect deepseek sk-…)"),
-        ("/forget <p>", "delete a stored API key from the OS keychain"),
-        ("/models [p]", "all workers + ladders, or a provider's full catalog"),
-        ("/config", "show/edit config: conductor <b> [--key <t>], set <k> <v>, init, edit"),
-        ("/steer <text>", "give guidance to a parked node (or just type while parked)"),
-        ("/approve", "accept the current state and continue"),
-        ("/reject", "throw out the approach and replan"),
-        ("/pause", "pause the running loop (state is saved)"),
-        ("/resume", "resume a paused run"),
-        ("/budget <min>", "adjust the time budget"),
-        ("/route <n> <w>", "pin a node to a worker"),
-        ("/clear", "wipe the screen and reset the session (ctrl-l = wipe only)"),
-        ("/logs", "where logs are written (.rinne/logs/)"),
-        ("/quit", "exit (or ctrl-q)"),
+    // (indent, text). A leading section title has no indent; commands indent 2;
+    // continuation/flag lines indent 6.
+    let lines: &[(usize, &str)] = &[
+        (0, "COMMANDS  —  type a goal to start a run (use @file to attach context)"),
+        (0, ""),
+        (0, "RUN CONTROL"),
+        (2, "/plan                       show the current plan (the DAG)"),
+        (2, "/steer <text>               guide the active/parked node (or just type while parked)"),
+        (2, "/approve                    accept the current state and continue"),
+        (2, "/reject                     throw out the approach and replan"),
+        (2, "/pause                      pause the running loop (state is saved)"),
+        (2, "/resume                     resume a paused run"),
+        (2, "/budget <minutes>           adjust the time budget"),
+        (2, "/route <node> <worker>      pin a node to a specific worker"),
+        (0, ""),
+        (0, "WORKERS & PROVIDERS"),
+        (2, "/workers                    list workers, auth mode, and quota  (alias: /doctor)"),
+        (2, "/connect <backend> [key]    connect a harness, or an API provider + key"),
+        (6, "--model <id>            model id(s) to use, repeatable (API providers)"),
+        (6, "--base-url <url>        custom OpenAI-compatible endpoint"),
+        (6, "--add                   add the key to the rotation pool instead of replacing"),
+        (2, "/forget <provider>          delete a stored API key from the keychain"),
+        (2, "/models [provider]          all worker ladders, or a provider's live catalog"),
+        (0, ""),
+        (0, "MCP SERVERS  (tools your workers can call)"),
+        (2, "/mcp add <link>             connect a server; <link> = an http(s) URL (remote) or a launch command (local)"),
+        (6, "--name <name>           name it (otherwise derived from the link)"),
+        (6, "--bearer <token>        remote auth: Authorization: Bearer <token>"),
+        (6, "--api-key <token>       remote auth: a custom header ([--auth-header <NAME>], default X-API-Key)"),
+        (6, "--oauth [--client-id <id>]   remote auth: browser login (OAuth 2.1); also auto-tried on a 401"),
+        (6, "--secret-env <VAR>=<token>   local auth: token as a server env var"),
+        (6, "--header <k=v> / --env <k=v> non-secret header (remote) / env (local), repeatable"),
+        (6, "--host-only             always route this server's tools through Rinne, not the harness"),
+        (2, "/mcp list                   list connected servers"),
+        (2, "/mcp tools <name>           list a server's tools"),
+        (2, "/mcp test <name>            check a server is reachable"),
+        (2, "/mcp login <name>           (re)authorize a server via OAuth"),
+        (2, "/mcp remove <name>          disconnect a server"),
+        (0, ""),
+        (0, "SKILLS  (instruction packs your workers follow)"),
+        (2, "/skill add <path>           install a skill: a folder, or a SKILL.md file"),
+        (2, "/skill list                 list installed skills"),
+        (2, "/skill show <name>          print a skill's instructions"),
+        (2, "/skill remove <name>        uninstall a skill"),
+        (0, ""),
+        (0, "CONFIG"),
+        (2, "/config                     show the resolved config and its sources"),
+        (2, "/config conductor <backend> [model] [--key <token>]   set the planner backend"),
+        (2, "/config prefer harness|api|balanced                   routing preference"),
+        (2, "/config role <role> <worker> · model <worker> <id>    pin a role / a worker's model"),
+        (2, "/config set <key> <value> · unset <key>               set / clear any field"),
+        (2, "/config init · edit · path                            scaffold / open / locate the file"),
+        (0, ""),
+        (0, "SESSION"),
+        (2, "/learn <topic>              explain a subsystem as an HTML doc (.rinne/learn/)"),
+        (2, "/logs                       where logs are written (.rinne/logs/)"),
+        (2, "/clear                      wipe the screen and reset the session  (alias: /new, ctrl-l wipes only)"),
+        (2, "/help                       this reference"),
+        (2, "/quit                       exit  (alias: /q, ctrl-q)"),
+        (0, ""),
+        (0, "Add --project to an mcp / skill / config command to scope it to this repo (default: global)."),
     ];
-    let mut s = String::from("commands:");
-    for (cmd, desc) in rows {
-        s.push_str(&format!("\n  {cmd:<18}{desc}"));
+    let mut s = String::new();
+    for (indent, text) in lines {
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(&" ".repeat(*indent));
+        s.push_str(text);
     }
     s
 }

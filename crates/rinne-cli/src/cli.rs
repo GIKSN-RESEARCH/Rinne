@@ -133,20 +133,23 @@ pub enum Command {
 
     /// Connect and manage MCP servers (tools available to your workers).
     ///
-    /// Subcommands: `add <name> --stdio "<cmd>" | --http <url>`, `list`,
-    /// `tools <name>`, `test <name>`, `remove <name>`.
+    /// `add <link> [--name <name>]` where link is an http(s) URL or a launch
+    /// command. Auth: `--bearer <token>`, `--api-key <token> [--auth-header
+    /// <NAME>]`, or `--oauth` (browser login) for remote; `--secret-env
+    /// <VAR>=<token>` for local. Also `list`, `tools <name>`, `test <name>`,
+    /// `login <name>`, `remove <name>`.
     Mcp {
-        /// The subcommand and its arguments (e.g. `add fs --stdio "npx …"`).
+        /// The subcommand and its arguments (e.g. `add https://mcp.example.com/x`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
 
     /// Install and manage Agent Skills (instructions your workers can follow).
     ///
-    /// Subcommands: `install <path> [--project]`, `list`, `show <name>`,
-    /// `remove <name>`. A skill is a folder with a `SKILL.md`.
+    /// Subcommands: `add <path>` (a skill folder or a `SKILL.md` file), `list`,
+    /// `show <name>`, `remove <name>`.
     Skill {
-        /// The subcommand and its arguments (e.g. `install ./skills/pdf-forms`).
+        /// The subcommand and its arguments (e.g. `add ./skills/pdf-forms`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

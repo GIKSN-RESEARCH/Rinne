@@ -35,6 +35,7 @@ The orchestration idea is a *conductor* composing a pool of models into ad-hoc t
 - [How a run works](#how-a-run-works)
 - [Workers](#workers)
 - [The conductor](#the-conductor)
+- [MCP tools & Skills](#mcp-tools--skills)
 - [Requirements](#requirements)
 - [Install & build](#install--build)
 - [First-run setup](#first-run-setup)
@@ -84,6 +85,8 @@ These are locked.
 - **`@`-file mentions** — fuzzy picker over the repo; references are resolved to paths (for harnesses) or inlined as contents (for API workers).
 - **Tab-completion** — slash commands and `/config` subcommands/values complete as you type.
 - **Persistent, format-preserving config** — view and edit everything via `/config` subcommands or by hand-editing a scaffolded, validated TOML file.
+- **MCP tools** — connect any Model Context Protocol server (local `stdio` or remote HTTP); the conductor attaches a server's tools to the nodes that need them, and Rinne runs them by driving an agentic tool loop (API workers) or provisioning the server into the harness (claude-code). Auth via bearer token, API key, or OAuth 2.1 — auto-triggered on a 401.
+- **Agent Skills** — install `SKILL.md` instruction packs; the conductor attaches a skill to a node when it fits and injects its instructions into that worker's prompt.
 - **Doctor** — detects installed workers, their auth mode (subscription / api-key / free), and warns about metered-billing footguns.
 
 ## Architecture
@@ -125,15 +128,18 @@ These are locked.
 
 In one sentence: you prompt Rinne, the conductor turns the prompt plus current state into a JSON DAG, the loop engine schedules that DAG across workers through the blackboard, evaluators gate each result, and the conductor re-plans when something fails — until the goal is met or the budget runs out.
 
-The five crates of the workspace map onto this:
+The eight crates of the workspace map onto this:
 
 | Crate | Responsibility |
 |-------|----------------|
 | `rinne-cli` | Binary entry point, the inline TUI, headless `-p` mode, all subcommands |
-| `rinne-core` | Loop engine, DAG/plan model, blackboard, context assembler, the `Worker` contract |
+| `rinne-types` | Shared base: DAG/plan model, the `Worker` / `Evaluator` / `Replanner` / `Blackboard` trait seams, capability, tool, and skill types |
+| `rinne-loop` | The loop engine, scheduler, context assembler, and evaluator gate over the trait seams |
+| `rinne-core` | Concrete blackboard + SQLite state, plus the wiring that re-exports the engine |
 | `rinne-conductor` | Prompt assembly, plan parsing, conductor backends (`PlanBackend`) |
-| `rinne-workers` | Worker adapters (harness subprocess + OpenAI-compatible HTTP) and transports |
-| `rinne-config` | Layered config, the worker/provider catalogs, doctor probing, keychain secrets |
+| `rinne-workers` | Worker adapters (harness subprocess + OpenAI-compatible HTTP), the host tool loop, and transports |
+| `rinne-config` | Layered config, worker/provider catalogs, MCP + skill storage, doctor probing, keychain secrets |
+| `rinne-mcp` | A framework-free MCP client: `stdio` + Streamable-HTTP transports, tool calls, and OAuth 2.1 |
 
 ## How a run works
 
@@ -221,6 +227,55 @@ rinne config key <TOKEN>          # stores it for the current conductor backend
 ```
 
 After setting one, `rinne config` shows `Conductor … key present (keychain)` and planning runs there — independent of which harnesses you have installed.
+
+## MCP tools & Skills
+
+Beyond a worker's built-in abilities, you can extend every run with **MCP tools** (live actions — query a database, search the web, hit an API) and **Skills** (reusable instruction packs). The conductor sees a cheap name+description catalog of both, attaches the relevant ones to the nodes that need them, and Rinne wires them in at run time. Progressive disclosure: a tool's full schema and a skill's full body load only when a node that uses them runs.
+
+### MCP servers
+
+Connect any [Model Context Protocol](https://modelcontextprotocol.io) server — a local `stdio` subprocess or a remote Streamable-HTTP endpoint. Rinne infers the transport from the link and connects to verify it.
+
+```bash
+rinne mcp add "npx -y @modelcontextprotocol/server-filesystem ."   # local (stdio)
+rinne mcp add https://mcp.example.com/mcp                          # remote (http)
+rinne mcp list                     # connected servers + auth status
+rinne mcp tools <name>             # a server's tools
+rinne mcp test <name>              # reachability check
+rinne mcp remove <name>
+```
+
+A name is derived from the link (override with `--name`); the same endpoint can't be added twice.
+
+**Two paths, one source.** When the conductor attaches a tool to a node, how it runs depends on the worker that lands it — and Rinne routes tool nodes to a worker that can actually serve them, so tools are never silently dropped:
+
+- **API worker → host loop.** Rinne offers the tool's schema to the model, executes the tool call over a warm MCP connection, feeds the result back, and repeats until the model answers.
+- **Harness (`claude-code`) → provisioning.** Rinne writes a scoped `.mcp.json` and hands it to the harness so it calls the tool natively.
+
+**Authentication.** Every secret goes to the OS keychain, never the config file:
+
+| Server needs | How to add it |
+|--------------|---------------|
+| nothing (public) | `rinne mcp add <url>` |
+| bearer token (e.g. a GitHub PAT) | `--bearer <token>` |
+| API key in a header | `--api-key <token> [--auth-header <NAME>]` (default `X-API-Key`) |
+| OAuth 2.1 (hosted Notion / GitHub, X, …) | `--oauth [--client-id <id>]` — opens your browser |
+| a local server's env token | `--secret-env <VAR>=<token>` |
+
+A plain `add` that hits a **401 auto-falls back to OAuth** (discovers the authorization server, runs the browser PKCE flow, and stores refreshable tokens). Re-authorize any time with `rinne mcp login <name>`. Add non-secret headers/env with `--header k=v` (remote) / `--env k=v` (local), and force the host loop for a sensitive server with `--host-only`.
+
+### Skills
+
+A skill is a folder with a `SKILL.md`: YAML frontmatter (`name`, `description`, optional `allowed-tools`) plus a markdown body of instructions, following the [Anthropic Agent Skills](https://modelcontextprotocol.io) format so existing skills work unchanged. Install one, and the conductor attaches it to any node whose work matches; its body is injected into that worker's prompt, for either worker family.
+
+```bash
+rinne skill add ./skills/pdf-forms      # a skill folder, or a path to a SKILL.md
+rinne skill list
+rinne skill show <name>
+rinne skill remove <name>
+```
+
+Both `mcp` and `skill` commands take `--project` to scope to the current repo (default: global), and everything here works identically as `/mcp …` and `/skill …` inside the TUI.
 
 ## Requirements
 
@@ -427,6 +482,36 @@ rinne run plan.json                   # load a hand-written plan DAG and run it
 rinne logs                            # view local trajectory logs
 ```
 
+### `rinne mcp` — connect MCP servers
+
+```
+rinne mcp add <link> [--name <n>] [auth] [--header k=v] [--env k=v] [--host-only] [--project]
+```
+
+`<link>` is an http(s) URL (remote) or a launch command (local `stdio`). See [MCP tools & Skills](#mcp-tools--skills) for the auth flags in context.
+
+| Subcommand | What it does |
+|------------|--------------|
+| `mcp add <link>` | Connect a server; transport inferred from the link, then connect-tested |
+| `mcp add … --bearer <token>` | Remote auth: `Authorization: Bearer <token>` (keychain) |
+| `mcp add … --api-key <token> [--auth-header <NAME>]` | Remote auth: a custom header (default `X-API-Key`) |
+| `mcp add … --oauth [--client-id <id>]` | Remote auth: browser OAuth 2.1 login (also auto-tried on a 401) |
+| `mcp add … --secret-env <VAR>=<token>` | Local auth: token set as a server env var |
+| `mcp list` | List connected servers, endpoint, and auth status |
+| `mcp tools <name>` | List a server's tools |
+| `mcp test <name>` | Check a server is reachable |
+| `mcp login <name>` | (Re)authorize a remote server via OAuth |
+| `mcp remove <name>` | Disconnect a server (and clear its stored secret) |
+
+### `rinne skill` — install Agent Skills
+
+```
+rinne skill add <path> [--project]      # a skill folder, or a path to its SKILL.md
+rinne skill list                        # installed skills
+rinne skill show <name>                 # print a skill's instructions
+rinne skill remove <name>               # uninstall
+```
+
 ### `rinne config` — view/edit configuration
 
 See [Configuration](#configuration) for the full subcommand reference. Everything there works identically as `rinne config <sub>` (shell) and `/config <sub>` (TUI).
@@ -441,6 +526,8 @@ Inside the interactive harness, every CLI command above is also available as `/<
 | `/models <provider>` | List the models a provider key can access |
 | `/forget <provider>` | Delete a stored API key |
 | `/config [subcommand …]` | Show or edit configuration (see Configuration) |
+| `/mcp [add \| list \| tools \| test \| login \| remove …]` | Connect and manage MCP servers (same as the CLI) |
+| `/skill [add \| list \| show \| remove …]` | Install and manage Agent Skills |
 | `/workers` (`/doctor`) | List workers + connected APIs and their auth |
 | `/plan` | Show the current plan |
 | `/steer <text>` | Inject guidance into a parked node (or just type while parked) |
@@ -615,6 +702,7 @@ When you run `rinne connect <provider> <key>` (or `/config conductor <backend> -
 - **Multiple keys.** `connect ... --add` stores a **pool** (a JSON array under the same entry) that Rinne rotates across rate limits. `connect` without `--add` replaces the pool.
 - **Resolution order.** At call time Rinne looks at the **environment variable first** (the `key_env` name, e.g. `DEEPSEEK_API_KEY`), then the **keychain**. So an exported env var transparently overrides the stored key for a one-off, and your existing env-var workflow is unchanged.
 - **Inspect without revealing.** `rinne config` and `rinne workers` report `key present (keychain)` / `(env)` / `NO KEY` — they confirm a key is found and *where from*, never the value itself. Transcript echoes of `connect`/`--key` are redacted to `***`.
+- **MCP server secrets too.** Bearer tokens, API keys, and OAuth sessions for MCP servers are stored the same way, under the accounts `mcp:<name>` and `mcp-oauth:<name>` — never in the config file, which only records the auth *scheme*. `rinne mcp remove <name>` clears them.
 - **Remove it.** `rinne forget <provider>` deletes the entry from the keychain (or delete the `rinne` item directly in your OS keychain UI).
 - **No keychain available?** On a headless box with no Secret Service, storage fails gracefully — Rinne tells you and falls back to `export <KEY_ENV>=<value>`. Nothing breaks; you just lose the "set once and forget" convenience.
 - **Prompt history is safe too.** `.rinne/history` (used for ↑/↓ recall across sessions) filters out any command containing a key/token, so secrets never land there either.
@@ -635,16 +723,20 @@ This is a deliberate, documented exception to the "Rinne holds no credentials" p
 
 ```
 .
-├── Cargo.toml                 # workspace (5 crates)
+├── Cargo.toml                 # workspace (8 crates)
 ├── CONTEXT.md                 # the build specification
+├── MCP_SKILLS.md              # the MCP + Skills design
 ├── PHASE.md                   # phased build plan (P0–P7)
 ├── README.md
 └── crates/
     ├── rinne-cli/             # binary, TUI, subcommands
-    ├── rinne-core/            # loop engine, DAG, blackboard, worker contract
+    ├── rinne-types/           # shared DAG/plan model + trait seams
+    ├── rinne-loop/            # loop engine, scheduler, assembler, evaluator
+    ├── rinne-core/            # concrete blackboard + SQLite state, wiring
     ├── rinne-conductor/       # planning prompts, parsing, backends
-    ├── rinne-workers/         # harness + HTTP adapters, transports
-    └── rinne-config/          # config, catalogs, doctor, keychain
+    ├── rinne-workers/         # harness + HTTP adapters, host tool loop, transports
+    ├── rinne-config/          # config, catalogs, MCP/skill storage, doctor, keychain
+    └── rinne-mcp/             # framework-free MCP client (stdio + HTTP, OAuth)
 ```
 
 Runtime state lives under `.rinne/` in the working directory: the plan, run progress, and logs (`.rinne/logs/`).
