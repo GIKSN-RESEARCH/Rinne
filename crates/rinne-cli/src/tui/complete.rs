@@ -50,19 +50,20 @@ const CONFIG_SUBCOMMANDS: &[(&str, &str, &str)] = &[
 
 /// `/mcp` subcommands.
 const MCP_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("add",    "<name> --stdio \"<cmd>\" | --http <url>", "connect a server"),
+    ("add",    "<link> [--name] [--bearer|--api-key|--oauth|--secret-env]", "connect a server (URL or launch command)"),
     ("list",   "", "list connected servers"),
     ("tools",  "<name>", "list a server's tools"),
     ("test",   "<name>", "check a server is reachable"),
+    ("login",  "<name>", "authorize a server via OAuth (browser)"),
     ("remove", "<name>", "disconnect a server"),
 ];
 
 /// `/skill` subcommands.
 const SKILL_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("install", "<path> [--project]", "install a skill folder"),
-    ("list",    "", "list installed skills"),
-    ("show",    "<name>", "print a skill's instructions"),
-    ("remove",  "<name>", "uninstall a skill"),
+    ("add",    "<path>", "install a skill (folder or SKILL.md)"),
+    ("list",   "", "list installed skills"),
+    ("show",   "<name>", "print a skill's instructions"),
+    ("remove", "<name>", "uninstall a skill"),
 ];
 
 /// Backends accepted by `/config conductor <backend>`.
