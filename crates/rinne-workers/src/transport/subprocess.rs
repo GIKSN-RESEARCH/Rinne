@@ -16,6 +16,11 @@ use tokio_util::sync::CancellationToken;
 use rinne_core::worker::{emit, EventSink, ExecStatus, WorkerEvent};
 use rinne_core::{Result, RinneError};
 
+/// Cap on captured stdout/stderr so a chatty or runaway CLI can't OOM Rinne. The
+/// subprocess boundary is exactly where a byte ceiling belongs; live events are
+/// still streamed past the cap, only the retained buffer is bounded.
+const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+
 /// How to invoke a subprocess worker.
 pub struct SubprocessSpec {
     pub program: String,
@@ -92,16 +97,18 @@ pub async fn run(
         .take()
         .ok_or_else(|| RinneError::Worker("no stderr pipe".into()))?;
 
-    // Drain stderr concurrently so a chatty child can't deadlock on a full pipe.
+    // Drain stderr concurrently so a chatty child can't deadlock on a full pipe,
+    // bounded so it can't grow without limit.
     let stderr_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        let mut rdr = BufReader::new(stderr);
-        let _ = rdr.read_to_string(&mut buf).await;
-        buf
+        let mut buf = Vec::new();
+        let mut rdr = BufReader::new(stderr).take(MAX_CAPTURE_BYTES as u64);
+        let _ = rdr.read_to_end(&mut buf).await;
+        String::from_utf8_lossy(&buf).into_owned()
     });
 
     let mut lines = BufReader::new(stdout).lines();
     let mut captured = String::new();
+    let mut truncated = false;
 
     // A far-future deadline stands in when no timeout is configured, so the
     // select arm is always well-formed.
@@ -119,8 +126,14 @@ pub async fn run(
             line = lines.next_line() => {
                 match line {
                     Ok(Some(l)) => {
-                        captured.push_str(&l);
-                        captured.push('\n');
+                        // Always stream live events; only bound the retained buffer.
+                        if captured.len() < MAX_CAPTURE_BYTES {
+                            captured.push_str(&l);
+                            captured.push('\n');
+                        } else if !truncated {
+                            truncated = true;
+                            captured.push_str("\n…[output truncated]\n");
+                        }
                         for ev in mapper(&l) {
                             emit(events, ev);
                         }
@@ -145,11 +158,26 @@ pub async fn run(
         }
     }
 
-    let wait_status = child
-        .wait()
+    // Bound the reap: a child that closed stdout but won't exit (daemonized, or a
+    // grandchild holding the pipe) must not hang past a short grace period and
+    // defeat the timeout above. On expiry, kill and reap.
+    let wait_status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(r) => r.map_err(|e| RinneError::Worker(format!("wait failed: {e}")))?,
+        Err(_) => {
+            let _ = child.start_kill();
+            child
+                .wait()
+                .await
+                .map_err(|e| RinneError::Worker(format!("wait failed: {e}")))?
+        }
+    };
+    // The stderr drain finishes once the (now-dead) child's pipe hits EOF; bound
+    // it too so a lingering pipe can't stall the return.
+    let stderr_str = tokio::time::timeout(Duration::from_secs(2), stderr_task)
         .await
-        .map_err(|e| RinneError::Worker(format!("wait failed: {e}")))?;
-    let stderr_str = stderr_task.await.unwrap_or_default();
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
     let exit_code = wait_status.code();
 
     let status = terminal.unwrap_or_else(|| {
