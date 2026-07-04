@@ -39,10 +39,15 @@ pub struct WorkerTranslator {
 
 fn teach_prompt(doc: &LearnDoc) -> String {
     format!(
-        "You are a senior engineer writing a concise architectural narration.\n\
+        "You are a senior engineer writing a concise architectural narration that teaches a reader this codebase area.\n\
          Topic: {topic}\n\n\
-         Explain the design decisions, key components, and how the pieces fit together.\n\
-         Output a clear overview the reader can use to understand this codebase area.",
+         Requirements:\n\
+         - Structure the overview with Markdown headings (##), short paragraphs, and lists.\n\
+         - Explain the design decisions, key components, and how the pieces fit together.\n\
+         - Include AT LEAST ONE Mermaid diagram in a ```mermaid fenced block: a `flowchart` \
+         showing how the main components connect, and a `sequenceDiagram` if there is a clear \
+         request/response path. Keep node labels short; avoid characters that break Mermaid ids.\n\
+         Output Markdown only (it will be rendered to HTML).",
         topic = doc.topic
     )
 }
@@ -134,5 +139,14 @@ mod tests {
     async fn null_translator_returns_none() {
         let doc = LearnDoc { topic: "x".into(), snippets: vec![], flow: vec![], doc_sections: vec![] };
         assert!(NullTranslator.translate(&doc).await.is_none());
+    }
+
+    #[test]
+    fn teach_prompt_demands_markdown_and_mermaid() {
+        let doc = LearnDoc { topic: "harness".into(), snippets: vec![], flow: vec![], doc_sections: vec![] };
+        let p = teach_prompt(&doc);
+        assert!(p.contains("harness"), "topic missing");
+        assert!(p.to_lowercase().contains("mermaid"), "no mermaid instruction");
+        assert!(p.contains("flowchart") || p.contains("sequenceDiagram"), "no diagram type");
     }
 }
