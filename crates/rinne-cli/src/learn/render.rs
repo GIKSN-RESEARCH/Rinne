@@ -1,6 +1,7 @@
 //! Rendering of learned documents and narrations.
 
 use crate::learn::{LearnDoc, Narration};
+use crate::learn::markdown::render_markdown;
 
 fn esc(s: &str) -> String {
     // Escape & FIRST to avoid double-escaping subsequent substitutions.
@@ -10,11 +11,48 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Build a Mermaid `flowchart LR` from caller→callee pairs.
+///
+/// Mermaid node IDs can't contain `::`, spaces, or angle brackets, so each
+/// unique symbol name is mapped to a safe `n{index}` id with the original name
+/// kept as the bracketed label. Returns an empty string for empty input.
+fn flow_mermaid(flow: &[(String, String)]) -> String {
+    if flow.is_empty() {
+        return String::new();
+    }
+
+    let mut ids: Vec<(String, String)> = Vec::new(); // (name, id)
+    let id_of = |name: &str, ids: &mut Vec<(String, String)>| -> String {
+        if let Some((_, id)) = ids.iter().find(|(n, _)| n == name) {
+            return id.clone();
+        }
+        let id = format!("n{}", ids.len());
+        ids.push((name.to_string(), id.clone()));
+        id
+    };
+
+    let mut edges = String::new();
+    for (caller, callee) in flow {
+        let a = id_of(caller, &mut ids);
+        let b = id_of(callee, &mut ids);
+        edges.push_str(&format!("  {a} --> {b}\n"));
+    }
+
+    // Mermaid labels: quote to survive `.`, `<`, etc. Escape quotes in names.
+    let mut nodes = String::new();
+    for (name, id) in &ids {
+        let label = name.replace('"', "&quot;");
+        nodes.push_str(&format!("  {id}[\"{label}\"]\n"));
+    }
+
+    format!("<pre class=\"mermaid\">flowchart LR\n{nodes}{edges}</pre>\n")
+}
+
 pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     let overview = narration
-        .map(|n| esc(&n.overview))
+        .map(|n| render_markdown(&n.overview))
         .unwrap_or_else(|| {
-            "Structural overview (run with a configured worker for narration).".into()
+            "<p>Structural overview (run with a configured worker for narration).</p>".into()
         });
 
     let mut html = String::new();
@@ -32,7 +70,8 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     // Overview section
     html.push_str("<section id=\"overview\">\n");
     html.push_str("<h2>Overview</h2>\n");
-    html.push_str(&format!("<p>{overview}</p>\n"));
+    html.push_str(&overview);
+    html.push('\n');
     html.push_str("</section>\n");
 
     // Components / architecture section
@@ -60,15 +99,7 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     if doc.flow.is_empty() {
         html.push_str("<p>No call flow recorded.</p>\n");
     } else {
-        html.push_str("<ul>\n");
-        for (caller, callee) in &doc.flow {
-            html.push_str(&format!(
-                "<li><code>{}</code> &rarr; <code>{}</code></li>\n",
-                esc(caller),
-                esc(callee),
-            ));
-        }
-        html.push_str("</ul>\n");
+        html.push_str(&flow_mermaid(&doc.flow));
     }
     html.push_str("</section>\n");
 
@@ -97,7 +128,8 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
                 esc(&ds.heading),
                 esc(&ds.source),
             ));
-            html.push_str(&format!("<p>{}</p>\n", esc(&ds.body)));
+            html.push_str(&render_markdown(&ds.body));
+            html.push('\n');
             html.push_str("</article>\n");
         }
         html.push_str("</section>\n");
@@ -129,6 +161,27 @@ li { margin: .3rem 0; }
 mod tests {
     use super::*;
     use crate::learn::{DocSection, LearnDoc, Snippet};
+
+    #[test]
+    fn flow_becomes_sanitized_mermaid_flowchart() {
+        let flow = vec![
+            ("compose_prompt".to_string(), "render_symbol_map".to_string()),
+            ("Foo::bar".to_string(), "baz".to_string()),
+        ];
+        let out = flow_mermaid(&flow);
+        assert!(out.contains("<pre class=\"mermaid\">"), "got: {out}");
+        assert!(out.contains("flowchart LR"), "got: {out}");
+        // Node IDs must be sanitized: no raw `::` in an id position.
+        assert!(!out.contains("Foo::bar["), "unsanitized id: {out}");
+        // Human label is preserved in brackets.
+        assert!(out.contains("Foo::bar"), "label lost: {out}");
+        assert!(out.contains("-->"), "no edge: {out}");
+    }
+
+    #[test]
+    fn empty_flow_yields_empty_mermaid() {
+        assert_eq!(flow_mermaid(&[]), "");
+    }
 
     #[test]
     fn renders_self_contained_html_with_real_symbols() {
