@@ -41,7 +41,7 @@ fn flow_mermaid(flow: &[(String, String)]) -> String {
     // Mermaid labels: quote to survive `.`, `<`, etc. Escape quotes in names.
     let mut nodes = String::new();
     for (name, id) in &ids {
-        let label = name.replace('"', "&quot;");
+        let label = esc(name);
         nodes.push_str(&format!("  {id}[\"{label}\"]\n"));
     }
 
@@ -181,6 +181,15 @@ mod tests {
     #[test]
     fn empty_flow_yields_empty_mermaid() {
         assert_eq!(flow_mermaid(&[]), "");
+    }
+
+    #[test]
+    fn flow_mermaid_escapes_html_in_labels() {
+        let flow = vec![("Vec<T>".to_string(), "a & b".to_string())];
+        let out = flow_mermaid(&flow);
+        assert!(out.contains("Vec&lt;T&gt;"), "angle brackets not escaped: {out}");
+        assert!(out.contains("a &amp; b"), "ampersand not escaped: {out}");
+        assert!(!out.contains("Vec<T>"), "raw < leaked into label: {out}");
     }
 
     #[test]
