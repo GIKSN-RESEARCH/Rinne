@@ -6,8 +6,8 @@
 
 use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-/// Escape the five HTML-significant characters. Kept local so the module is
-/// self-contained; matches the escaper in `render.rs`.
+/// Escape the HTML-significant characters (`&`, `<`, `>`, `"`). Kept local so
+/// the module is self-contained; matches the escaper in `render.rs`.
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
