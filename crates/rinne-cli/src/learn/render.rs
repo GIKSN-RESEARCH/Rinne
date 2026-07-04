@@ -135,6 +135,14 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
         html.push_str("</section>\n");
     }
 
+    if html.contains("class=\"mermaid\"") {
+        html.push_str(
+            "<script type=\"module\">import mermaid from \
+             \"https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs\";\
+             mermaid.initialize({startOnLoad:true});</script>\n",
+        );
+    }
+
     html.push_str("</body>\n</html>");
     html
 }
@@ -154,6 +162,7 @@ section { margin-bottom: 2.5rem; }
 article.snippet, article.doc-section { margin-bottom: 1.5rem; border-bottom: 1px solid #eee; padding-bottom: 1rem; }
 ul { padding-left: 1.5rem; }
 li { margin: .3rem 0; }
+pre.mermaid { background: none; border: none; padding: 0; text-align: center; }
 "#
 }
 
@@ -215,10 +224,51 @@ mod tests {
         assert!(html.contains("HarnessAdapter"));
         assert!(html.contains("run_node"));
         assert!(html.contains("the why"));
-        // Self-contained: no network refs.
-        assert!(!html.contains("src=\"http"));
-        assert!(!html.contains("href=\"http"));
+        // The doc's own assets are self-contained: no external stylesheet,
+        // no <img>, no <script src>/<link href> http refs.
+        assert!(!html.contains("<link"), "no external stylesheet");
+        assert!(!html.contains("<img"), "no external images");
+        assert!(!html.contains("src=\"http"), "no <script src>/<img src> http refs");
+        assert!(!html.contains("href=\"http"), "no <link href> http refs");
+        // The sole permitted remote dependency is the mermaid runtime, loaded
+        // as an ES-module import (not an src=/href= attribute).
+        assert!(
+            html.contains("cdn.jsdelivr.net/npm/mermaid"),
+            "mermaid CDN import present for the flow diagram"
+        );
         // Escaped: raw <b> from code must not appear as a live tag.
         assert!(html.contains("&lt;b&gt;"));
+    }
+
+    #[test]
+    fn mermaid_script_only_when_diagram_present() {
+        // Doc WITH flow → mermaid block → CDN loader present.
+        let with_flow = LearnDoc {
+            topic: "t".into(),
+            snippets: vec![],
+            flow: vec![("a".into(), "b".into())],
+            doc_sections: vec![],
+        };
+        let html = render_html(&with_flow, None);
+        assert!(html.contains("class=\"mermaid\""), "no diagram: {html}");
+        assert!(html.contains("mermaid.initialize"), "init missing: {html}");
+        assert!(
+            html.contains("cdn.jsdelivr.net/npm/mermaid"),
+            "cdn loader missing: {html}"
+        );
+
+        // Doc with NO flow and NO diagram → no mermaid loader emitted.
+        let no_flow = LearnDoc {
+            topic: "t".into(),
+            snippets: vec![],
+            flow: vec![],
+            doc_sections: vec![],
+        };
+        let html2 = render_html(&no_flow, None);
+        assert!(!html2.contains("mermaid.initialize"), "init leaked: {html2}");
+        assert!(
+            !html2.contains("cdn.jsdelivr.net"),
+            "cdn leaked into diagram-free doc: {html2}"
+        );
     }
 }
