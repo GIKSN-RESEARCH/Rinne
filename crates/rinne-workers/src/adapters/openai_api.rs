@@ -261,11 +261,22 @@ impl OpenAiWorker {
                     "\n[tool] {} {}\n",
                     call.function.name, call.function.arguments
                 ));
-                let args = serde_json::from_str(&call.function.arguments)
-                    .unwrap_or(serde_json::Value::Null);
-                let result = match executor.call(&call.function.name, args).await {
-                    Ok(r) => r,
-                    Err(e) => format!("tool error: {e}"),
+                // Empty args are valid (a no-arg tool); only non-empty garbage is
+                // an error we hand back so the model can retry with valid JSON.
+                let trimmed = call.function.arguments.trim();
+                let result = if trimmed.is_empty() {
+                    executor
+                        .call(&call.function.name, serde_json::Value::Object(Default::default()))
+                        .await
+                        .unwrap_or_else(|e| format!("tool error: {e}"))
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(trimmed) {
+                        Ok(args) => executor
+                            .call(&call.function.name, args)
+                            .await
+                            .unwrap_or_else(|e| format!("tool error: {e}")),
+                        Err(e) => format!("tool error: arguments were not valid JSON ({e})"),
+                    }
                 };
                 transcript.push_str(&format!("[result] {}\n", truncate(&result, 400)));
                 messages.push(ChatMessage::tool_result(call.id.clone(), result));
