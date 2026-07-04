@@ -63,17 +63,39 @@ pub async fn run(cmd: LearnCmd, cwd: PathBuf, no_ai: bool, open: bool) -> Result
 /// but returns the output lines for the feed instead of printing to stdout
 /// (printing would corrupt the inline TUI). Always narrates when a worker is
 /// available, degrading to template-only otherwise.
-pub async fn run_lines(topic: &str, cwd: PathBuf) -> Vec<String> {
-    match explain_to_lines(topic, cwd, false).await {
+/// Reports phase milestones through `on_progress` while the pipeline runs, so
+/// the TUI can surface progress during the slow AI phase. Pass a no-op sink for
+/// silent operation.
+pub async fn run_lines_with_progress(
+    topic: &str,
+    cwd: PathBuf,
+    on_progress: &(dyn Fn(String) + Send + Sync),
+) -> Vec<String> {
+    match explain_with_progress(topic, cwd, false, on_progress).await {
         Ok(lines) => lines,
         Err(e) => vec![format!("learn failed: {e}")],
     }
 }
 
+/// The shared pipeline with a no-op progress sink. See [`explain_with_progress`].
+async fn explain_to_lines(topic: &str, cwd: PathBuf, no_ai: bool) -> Result<Vec<String>> {
+    explain_with_progress(topic, cwd, no_ai, &|_| {}).await
+}
+
 /// The shared pipeline: resolve → refresh → assemble → translate → render →
 /// write. Returns the human-readable result lines (e.g. `wrote <path>` or the
 /// "no code found" note); the caller decides how to surface them.
-async fn explain_to_lines(topic: &str, cwd: PathBuf, no_ai: bool) -> Result<Vec<String>> {
+///
+/// `on_progress` is invoked with a short milestone string at each phase
+/// boundary so a long-running caller (the TUI) can show it is alive; the CLI
+/// passes a no-op. The AI-narration phase is the slow one (up to the worker
+/// timeout), so its milestone fires before the `translate` await, not after.
+async fn explain_with_progress(
+    topic: &str,
+    cwd: PathBuf,
+    no_ai: bool,
+    on_progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<Vec<String>> {
     let topic = topic.to_string();
 
     let bb = Blackboard::open_with(&cwd, true)?;
@@ -111,6 +133,7 @@ async fn explain_to_lines(topic: &str, cwd: PathBuf, no_ai: bool) -> Result<Vec<
         .unwrap_or(0)
         == 0
     {
+        on_progress("indexing repository…".to_string());
         bb.index_repo();
     }
 
@@ -127,6 +150,12 @@ async fn explain_to_lines(topic: &str, cwd: PathBuf, no_ai: bool) -> Result<Vec<
             "no code found for topic `{topic}`. try a symbol or path fragment."
         )]);
     }
+
+    on_progress(format!(
+        "resolved {} symbols across {} files",
+        cluster.symbols.len(),
+        cluster.files.len(),
+    ));
 
     // Phase 2: reindex the cluster's files before reading snippets.
     // cluster.files contains owned Strings — no borrow conflict.
@@ -159,6 +188,13 @@ async fn explain_to_lines(topic: &str, cwd: PathBuf, no_ai: bool) -> Result<Vec<
             .unwrap_or_else(|_| (WorkerRegistry::new(), vec![])),
         Err(_) => (WorkerRegistry::new(), vec![]),
     };
+
+    // The AI phase is the slow one; narrate its start before awaiting so the
+    // TUI isn't silent for up to the worker timeout. Only when a real worker
+    // will run — the template-only path (no_ai / empty registry) is instant.
+    if !no_ai && !registry.is_empty() {
+        on_progress("narrating with AI (may take ~1–2 min)…".to_string());
+    }
 
     let translator = crate::learn::translate::build_translator(no_ai, &registry, &workspace);
     let narration = translator.translate(&doc).await;
@@ -209,7 +245,7 @@ mod tests {
         .unwrap();
 
         // No worker configured in the test env → template-only, must not error.
-        let lines = run_lines("harness", dir.clone()).await;
+        let lines = run_lines_with_progress("harness", dir.clone(), &|_| {}).await;
 
         assert!(
             lines.iter().any(|l| l.starts_with("wrote ") && l.contains("harness.html")),
@@ -220,12 +256,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn progress_callback_reports_phase_milestones() {
+        use std::sync::Mutex;
+        let dir = std::env::temp_dir().join(format!("rinne-learn-prog-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/harness.rs"),
+            "/// The harness adapter.\npub fn harness_run() { helper(); }\nfn helper() {}\n",
+        )
+        .unwrap();
+
+        let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        // no_ai = true → template-only path, no worker required; the resolve
+        // milestone must still fire.
+        let lines = explain_with_progress("harness", dir.clone(), true, &|m| {
+            seen.lock().unwrap().push(m);
+        })
+        .await
+        .unwrap();
+
+        let seen = seen.into_inner().unwrap();
+        assert!(
+            seen.iter().any(|m| m.contains("resolved")),
+            "resolve milestone reported, got: {seen:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("wrote ")),
+            "still returns wrote path, got: {lines:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn run_lines_reports_no_match_topic() {
         let dir = std::env::temp_dir().join(format!("rinne-learn-nomatch-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/a.rs"), "fn alpha() {}\n").unwrap();
 
-        let lines = run_lines("zzz-nonexistent-topic", dir.clone()).await;
+        let lines = run_lines_with_progress("zzz-nonexistent-topic", dir.clone(), &|_| {}).await;
         assert!(
             lines.iter().any(|l| l.contains("no code found")),
             "reports no-match, got: {lines:?}"

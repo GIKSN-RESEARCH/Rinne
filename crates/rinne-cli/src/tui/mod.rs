@@ -954,7 +954,14 @@ impl App {
                     let tx = self.tx.clone();
                     self.push(FeedKind::System, format!("learning `{topic}`…"));
                     tokio::spawn(async move {
-                        let lines = crate::commands::learn::run_lines(&topic, cwd).await;
+                        let progress_tx = tx.clone();
+                        let on_progress = move |m: String| {
+                            let _ = progress_tx.send(AppMsg::Note(m));
+                        };
+                        let lines = crate::commands::learn::run_lines_with_progress(
+                            &topic, cwd, &on_progress,
+                        )
+                        .await;
                         let _ = tx.send(AppMsg::Note(lines.join("\n")));
                     });
                 }
