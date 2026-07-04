@@ -9,6 +9,7 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Build a Mermaid `flowchart LR` from caller→callee pairs.
