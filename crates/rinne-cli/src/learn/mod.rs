@@ -4,6 +4,7 @@ pub mod resolve;
 pub mod source;
 pub mod translate;
 pub mod render;
+pub mod markdown;
 
 /// A symbol within a cluster: represents a function, type, or other named entity.
 #[derive(Debug, Clone)]
