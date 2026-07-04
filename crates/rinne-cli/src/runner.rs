@@ -199,8 +199,16 @@ pub async fn oneshot_json(goal: &str) -> Result<serde_json::Value> {
     opts.mcp_servers = mcp_servers;
     let mut engine = Engine::new(&bb, plan.clone(), &registry, opts);
     engine = engine.with_replanner(conductor);
+    // Ctrl-C cancels the headless run cleanly (state persists for `rinne resume`)
+    // instead of leaving it unkillable short of SIGKILL.
+    let cancel = CancellationToken::new();
+    let cancel_handle = cancel.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        cancel_handle.cancel();
+    });
     // None sink → no streaming output; just run to completion.
-    let report = engine.run(CancellationToken::new(), None, None).await?;
+    let report = engine.run(cancel, None, None).await?;
 
     // The plan may have been amended by a replan; reload the current one.
     let final_plan = bb.load_plan().unwrap_or(plan);
@@ -389,13 +397,12 @@ pub async fn host_setup(
 ) {
     // Provision-path specs: every enabled server, with its token resolved into
     // memory (never to disk — the provisioner references it via env expansion).
-    let mcp_servers: std::collections::HashMap<String, rinne_core::McpServerSpec> = config
-        .mcp
-        .servers
-        .iter()
-        .filter(|(_, s)| s.enabled)
-        .map(|(name, s)| (name.clone(), server_spec(name, s)))
-        .collect();
+    // OAuth tokens are refreshed here if expired, so the resolve is async.
+    let mut mcp_servers: std::collections::HashMap<String, rinne_core::McpServerSpec> =
+        std::collections::HashMap::new();
+    for (name, s) in config.mcp.servers.iter().filter(|(_, s)| s.enabled) {
+        mcp_servers.insert(name.clone(), server_spec(name, s).await);
+    }
 
     let pool = Arc::new(crate::mcp_pool::McpPool::from_config(config));
     if pool.is_empty() {
@@ -422,13 +429,10 @@ pub async fn host_setup(
 }
 
 /// Map a configured MCP server to the engine's connection spec, resolving its
-/// token from the keychain (or env) into memory.
-fn server_spec(name: &str, s: &rinne_config::model::McpServer) -> rinne_core::McpServerSpec {
+/// token (keychain/env, or a refreshed OAuth access token) into memory.
+async fn server_spec(name: &str, s: &rinne_config::model::McpServer) -> rinne_core::McpServerSpec {
     use rinne_config::model::McpTransport;
-    let token = s
-        .key_env
-        .as_ref()
-        .and_then(|ke| rinne_config::secrets::resolve_api_key(&format!("mcp:{name}"), ke));
+    let token = crate::commands::mcp::resolve_token(name, s).await;
     rinne_core::McpServerSpec {
         name: name.to_string(),
         transport: match s.transport {
@@ -442,6 +446,8 @@ fn server_spec(name: &str, s: &rinne_config::model::McpServer) -> rinne_core::Mc
         headers: s.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         token_env: s.key_env.clone(),
         token,
+        auth: s.auth.clone(),
+        auth_header: s.auth_header.clone(),
     }
 }
 
