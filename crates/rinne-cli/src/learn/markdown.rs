@@ -21,14 +21,20 @@ fn esc(s: &str) -> String {
 /// Allow only benign URL schemes; neutralize everything else to `#`.
 /// Permits http(s), mailto, relative (`/…`, `./…`, `#…`), and protocol-relative-safe paths.
 fn safe_url(url: &str) -> String {
-    let lower = url.trim_start().to_ascii_lowercase();
+    let trimmed = url.trim_start();
+    // Protocol-relative (`//host`) URLs inherit the page scheme — harmless under
+    // file:// but a beacon/SSRF vector if these docs are ever served over HTTP.
+    if trimmed.starts_with("//") {
+        return "#".to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
     let ok = lower.starts_with("http://")
         || lower.starts_with("https://")
         || lower.starts_with("mailto:")
-        || url.starts_with('#')
-        || url.starts_with('/')
-        || url.starts_with("./")
-        || url.starts_with("../")
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
         || !lower.contains(':'); // scheme-less relative refs (e.g. `page.html`)
     if ok { url.to_string() } else { "#".to_string() }
 }
@@ -155,5 +161,12 @@ mod tests {
         let html = render_markdown("[a](https://example.com) and [b](./page.md)");
         assert!(html.contains("https://example.com"), "https dropped: {html}");
         assert!(html.contains("./page.md"), "relative dropped: {html}");
+    }
+
+    #[test]
+    fn protocol_relative_url_is_neutralized() {
+        let html = render_markdown("[x](//evil.com/beacon)");
+        assert!(!html.contains("//evil.com"), "protocol-relative leaked: {html}");
+        assert!(html.contains("href=\"#\""), "not neutralized: {html}");
     }
 }
