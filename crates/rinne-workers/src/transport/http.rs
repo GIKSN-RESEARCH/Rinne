@@ -135,8 +135,18 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        // Bound connection setup and idle reads so a dead/stalled endpoint can
+        // never wedge a call forever (reqwest has no default timeout). A total
+        // request timeout would cut off legitimately long streamed generations,
+        // so streaming relies on `read_timeout` (idle-between-bytes cap) and the
+        // non-streaming calls add their own per-request total timeout.
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
         Self {
-            http: reqwest::Client::new(),
+            http,
             base_url: normalize_base_url(&base_url.into()),
             api_key,
         }
@@ -147,7 +157,7 @@ impl OpenAiClient {
     /// so the result doubles as a price-ordered tier ladder.
     pub async fn list_models(&self) -> Result<Vec<DiscoveredModel>> {
         let url = format!("{}/models", self.base_url);
-        let mut builder = self.http.get(&url);
+        let mut builder = self.http.get(&url).timeout(std::time::Duration::from_secs(30));
         if let Some(key) = &self.api_key {
             builder = builder.bearer_auth(key);
         }
@@ -243,7 +253,13 @@ impl OpenAiClient {
             }
         }
 
-        let mut builder = self.http.post(&url).json(&body);
+        // Non-streaming completion → a total per-request timeout is safe (no long
+        // stream to cut off) and bounds a stalled host tool-loop turn.
+        let mut builder = self
+            .http
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(120))
+            .json(&body);
         if let Some(key) = &self.api_key {
             builder = builder.bearer_auth(key);
         }
@@ -330,7 +346,11 @@ impl OpenAiClient {
         let mut content = String::new();
         let mut usage = Usage::default();
         let mut finish_reason = None;
-        let mut buf = String::new();
+        // Accumulate raw bytes and decode only complete lines: a multi-byte UTF-8
+        // codepoint can straddle two network chunks, so decoding each chunk in
+        // isolation would corrupt it (`�`). `\n` (0x0A) never appears inside a
+        // multi-byte sequence, so splitting on it is safe.
+        let mut buf: Vec<u8> = Vec::new();
 
         let mut stream = resp.bytes_stream();
         loop {
@@ -341,10 +361,10 @@ impl OpenAiClient {
                 chunk = stream.next() => {
                     let Some(chunk) = chunk else { break };
                     let bytes = chunk.map_err(|e| RinneError::Worker(format!("stream error: {e}")))?;
-                    buf.push_str(&String::from_utf8_lossy(&bytes));
+                    buf.extend_from_slice(&bytes);
                     // SSE frames are separated by newlines; process complete lines.
-                    while let Some(nl) = buf.find('\n') {
-                        let line = buf[..nl].trim().to_string();
+                    while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                        let line = String::from_utf8_lossy(&buf[..nl]).trim().to_string();
                         buf.drain(..=nl);
                         let parsed = parse_sse_line(&line, &mut usage, &mut finish_reason)?;
                         if let Some(reasoning) = parsed.reasoning {
