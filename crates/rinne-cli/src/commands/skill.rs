@@ -54,14 +54,20 @@ pub fn run_lines(args: &[String], cwd: &Path) -> Vec<String> {
 }
 
 fn usage() -> String {
-    "usage: rinne skill install <path> [--project]\n       rinne skill list · show <name> · remove <name>".to_string()
+    "usage: rinne skill add <path> [--project]   (a skill folder or a SKILL.md file)\n       rinne skill list · show <name> · remove <name>".to_string()
 }
 
 fn install(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     let Some(src) = rest.first().copied() else {
-        return vec!["usage: rinne skill install <path-to-skill-folder>".to_string()];
+        return vec!["usage: rinne skill add <path>   (a skill folder or a SKILL.md file)".to_string()];
     };
-    let source = resolve(cwd, src);
+    // Accept either the skill folder or a path straight to its SKILL.md.
+    let mut source = resolve(cwd, src);
+    if source.is_file() {
+        if let Some(parent) = source.parent() {
+            source = parent.to_path_buf();
+        }
+    }
     match skills::install(&source, scope, cwd) {
         Ok(s) => {
             let mut out = vec![format!(
