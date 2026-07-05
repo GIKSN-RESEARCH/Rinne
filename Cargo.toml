@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -23,13 +23,13 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 # Internal crates — path for local builds, version for crates.io publishing.
-rinne-types = { path = "crates/rinne-types", version = "0.1.6" }
-rinne-core = { path = "crates/rinne-core", version = "0.1.6" }
-rinne-loop = { path = "crates/rinne-loop", version = "0.1.6" }
-rinne-mcp = { path = "crates/rinne-mcp", version = "0.1.6" }
-rinne-conductor = { path = "crates/rinne-conductor", version = "0.1.6" }
-rinne-workers = { path = "crates/rinne-workers", version = "0.1.6" }
-rinne-config = { path = "crates/rinne-config", version = "0.1.6" }
+rinne-types = { path = "crates/rinne-types", version = "0.1.7" }
+rinne-core = { path = "crates/rinne-core", version = "0.1.7" }
+rinne-loop = { path = "crates/rinne-loop", version = "0.1.7" }
+rinne-mcp = { path = "crates/rinne-mcp", version = "0.1.7" }
+rinne-conductor = { path = "crates/rinne-conductor", version = "0.1.7" }
+rinne-workers = { path = "crates/rinne-workers", version = "0.1.7" }
+rinne-config = { path = "crates/rinne-config", version = "0.1.7" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
