@@ -44,6 +44,15 @@ impl OpenAiBackend {
             model: model.to_string(),
         }
     }
+
+    /// Switch the model for the next `complete()` call (conductor self-escalation).
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 #[async_trait]
@@ -201,4 +210,14 @@ pub fn resolve_openai(config: &ConductorConfig) -> Result<Option<OpenAiBackend>>
         api_key,
         &config.model,
     )))
+}
+
+/// Like [`resolve_openai`] but pins the model id (planner ladder rung).
+pub fn resolve_openai_model(config: &ConductorConfig, model: &str) -> Result<Option<OpenAiBackend>> {
+    let mut backend = match resolve_openai(config)? {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+    backend.set_model(model);
+    Ok(Some(backend))
 }
