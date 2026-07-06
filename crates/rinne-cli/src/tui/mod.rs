@@ -31,8 +31,10 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio_util::sync::CancellationToken;
 
 use rinne_conductor::ConductorInput;
+use rinne_config::Config;
 use rinne_core::{
-    Blackboard, Engine, EngineEvent, HumanDecision, NodeStatus, ResumeInput, RunReport, StopReason,
+    Blackboard, Engine, EngineEvent, HumanDecision, HumanSession, NodeStatus, ResumeInput,
+    RunReport, StopReason,
 };
 
 use crate::runner;
@@ -935,6 +937,12 @@ impl App {
                 let lines = crate::commands::skill::run_lines(&args, &cwd);
                 self.push(FeedKind::System, lines.join("\n"));
             }
+            "human" => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let args = split_args(&rest);
+                let lines = crate::commands::human::run_lines(&args, &cwd);
+                self.push(FeedKind::System, lines.join("\n"));
+            }
             "steer" if !rest.is_empty() => self.resume_with(HumanDecision::Steer(rest)),
             "approve" => self.resume_with(HumanDecision::Approve),
             "reject" => self.resume_with(HumanDecision::Reject),
@@ -1269,6 +1277,7 @@ fn help_text() -> String {
         (0, ""),
         (0, "RUN CONTROL"),
         (2, "/plan                       show the current plan (the DAG)"),
+        (2, "/human [sub …]              pin conductor/generator/evaluator for this run"),
         (2, "/steer <text>               guide the active/parked node (or just type while parked)"),
         (2, "/approve                    accept the current state and continue"),
         (2, "/reject                     throw out the approach and replan"),
@@ -1381,9 +1390,18 @@ async fn do_run(
     // carries it as its replanner template throughout the run.
     let catalog = crate::catalog::gather(&config, &cwd).await;
     let template = runner::plan_template(&config, &registry, catalog);
-    let conductor = runner::build_conductor(&config, &registry, cwd.clone())
-        .ok()
-        .map(|c| Arc::new(c.with_context(template.clone())));
+    let session = HumanSession::load(bb.root());
+    let cond_cfg = runner::conductor_config_with_session(&config, &session);
+    let conductor = runner::build_conductor(
+        &Config {
+            conductor: cond_cfg,
+            ..config.clone()
+        },
+        &registry,
+        cwd.clone(),
+    )
+    .ok()
+    .map(|c| Arc::new(c.with_context(template.clone())));
 
     if resume.is_none() {
         let conductor = conductor
@@ -1422,6 +1440,7 @@ async fn do_run(
     });
 
     let mut opts = runner::options_with_pool(&config, &registry, &cwd);
+    runner::apply_human_session(&session, &mut opts);
     opts.tool_specs = tool_specs;
     opts.mcp_servers = mcp_servers;
     let mut engine = Engine::new(&bb, plan, &registry, opts);

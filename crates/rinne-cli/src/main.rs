@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
         Some(Command::Mcp { args }) => commands::mcp::run(&args).await,
         Some(Command::Skill { args }) => commands::skill::run(&args).await,
         Some(Command::Logs) => run_logs().await,
+        Some(Command::Human { args }) => run_human(&args).await,
     }
 }
 
@@ -81,4 +82,12 @@ async fn run_status() -> Result<()> {
 
 async fn run_logs() -> Result<()> {
     commands::logs::run().await
+}
+
+async fn run_human(args: &[String]) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    for line in commands::human::run_lines(args, &cwd) {
+        println!("{line}");
+    }
+    Ok(())
 }

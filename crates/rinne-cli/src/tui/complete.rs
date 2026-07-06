@@ -19,6 +19,7 @@ const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
     ("models",  "<provider>",                   "list an API provider's models"),
     ("forget",  "<provider>",                   "delete a stored API key"),
     ("plan",    "",                              "show the current plan"),
+    ("human",   "[sub …]",                       "pin roles for this run"),
     ("steer",   "<text>",                        "guide a parked node"),
     ("approve", "",                              "accept the current state"),
     ("reject",  "",                              "throw out the approach and replan"),

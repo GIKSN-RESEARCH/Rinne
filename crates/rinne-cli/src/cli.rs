@@ -118,6 +118,14 @@ pub enum Command {
     /// View trajectory logs (local only).
     Logs,
 
+    /// Session-scoped human control: pin roles, show active overrides.
+    ///
+    /// Subcommands mirror the TUI `/human` slash command (`CONDUCTOR_LOOP_PLAN.md` §4).
+    Human {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Connect and manage MCP servers (tools available to your workers).
     ///
     /// `add <link> [--name <name>]` where link is an http(s) URL or a launch
