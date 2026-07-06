@@ -11,11 +11,13 @@ use anyhow::{anyhow, Result};
 use tokio_util::sync::CancellationToken;
 
 use rinne_conductor::{resolve_openai, Conductor, ConductorInput, HarnessBackend, PlanBackend};
-use rinne_config::model::PreferFamily;
+use rinne_config::model::{ConductorBackend, ConductorConfig, PreferFamily};
 use rinne_config::probe::WorkerFamily;
 use rinne_config::Config;
 use rinne_core::worker::{Capability, Worker};
-use rinne_core::{Blackboard, Engine, EngineEvent, EngineOptions, RunReport, WorkerRegistry};
+use rinne_core::{
+    Blackboard, Engine, EngineEvent, EngineOptions, HumanSession, RunReport, WorkerRegistry,
+};
 use rinne_workers::adapters::{
     aider, antigravity, claude_code, codex, cursor, grok, opencode, OpenAiWorker,
 };
@@ -118,6 +120,17 @@ fn api_capabilities() -> Vec<Capability> {
     ]
 }
 
+fn parse_conductor_backend(s: &str) -> Option<ConductorBackend> {
+    match s.trim().to_lowercase().as_str() {
+        "cloudflare" | "cf" => Some(ConductorBackend::Cloudflare),
+        "groq" => Some(ConductorBackend::Groq),
+        "nvidia" => Some(ConductorBackend::Nvidia),
+        "local" | "ollama" => Some(ConductorBackend::Local),
+        "harness" => Some(ConductorBackend::Harness),
+        _ => None,
+    }
+}
+
 /// Default OpenAI-compatible base URL for known providers.
 fn default_api_base(provider: &str) -> Option<&'static str> {
     match provider {
@@ -143,10 +156,12 @@ pub fn build_conductor(
 ) -> Result<Conductor> {
     let mut backends: Vec<Box<dyn PlanBackend>> = Vec::new();
 
-    match resolve_openai(&config.conductor) {
-        Ok(Some(api)) => backends.push(Box::new(api)),
-        Ok(None) => {} // not configured or key missing → rely on fallback
-        Err(e) => return Err(anyhow!(e.to_string())),
+    // The API planner is invoked from `Conductor::run_once` via `resolve_openai_model`
+    // (supports per-rung model switching). Harness workers are fallbacks only.
+    if resolve_openai(&config.conductor)?.is_none() && registry.is_empty() {
+        return Err(anyhow!(
+            "no conductor API key and no harness workers — configure [conductor] or install a harness"
+        ));
     }
 
     // Fallback planners, tried in order: every installed harness first (usually
@@ -160,12 +175,9 @@ pub fn build_conductor(
         backends.push(Box::new(HarnessBackend::new(worker, workspace.clone())));
     }
 
-    Conductor::new(backends).map_err(|e| {
-        anyhow!(
-            "{} (configure a conductor backend or install a harness)",
-            e
-        )
-    })
+    Ok(Conductor::new(backends)
+        .map_err(|e| anyhow!("{e}"))?
+        .with_conductor_config(config.conductor.clone()))
 }
 
 /// One-shot headless run that returns a structured JSON result instead of
@@ -280,8 +292,17 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
 
     let catalog = crate::catalog::gather(&config, blackboard.workspace()).await;
     let template = plan_template(&config, &registry, catalog);
-    let conductor = build_conductor(&config, &registry, blackboard.workspace().to_path_buf())?
-        .with_context(template.clone());
+    let session = HumanSession::load(blackboard.root());
+    let cond_cfg = conductor_config_with_session(&config, &session);
+    let conductor = build_conductor(
+        &Config {
+            conductor: cond_cfg,
+            ..config.clone()
+        },
+        &registry,
+        blackboard.workspace().to_path_buf(),
+    )?
+    .with_context(template.clone());
     let input = ConductorInput {
         goal: goal.to_string(),
         ..template
@@ -335,10 +356,48 @@ pub fn plan_template(
         tools: catalog.tools,
         skills: catalog.skills,
         prefer: Some(prefer_label(config.preferences.prefer).to_string()),
+        role_prefers: config.preferences.roles.clone().into_iter().collect(),
         budget_minutes: Some(config.loop_.global_budget_minutes as u64),
         max_iterations_per_node: config.loop_.max_iterations_per_node,
         ..Default::default()
     }
+}
+
+/// Merge an active human session over config-derived engine options.
+pub fn apply_human_session(session: &HumanSession, opts: &mut EngineOptions) {
+    if !session.active {
+        return;
+    }
+    if let Some(w) = &session.pins.generator_worker {
+        opts.role_prefers.insert("generator".into(), w.clone());
+    }
+    if let Some(m) = &session.pins.generator_model {
+        opts.role_models.insert("generator".into(), m.clone());
+    }
+    if let Some(ev) = &session.pins.evaluator {
+        opts.role_prefers.insert("evaluator".into(), ev.clone());
+    }
+}
+
+/// Apply conductor pins from a human session onto a config clone.
+pub fn conductor_config_with_session(
+    config: &Config,
+    session: &HumanSession,
+) -> ConductorConfig {
+    let mut c = config.conductor.clone();
+    if !session.active {
+        return c;
+    }
+    if session.pins.conductor_model.is_some() || session.pins.conductor_backend.is_some() {
+        c.auto_escalate = false;
+    }
+    if let Some(m) = &session.pins.conductor_model {
+        c.model = m.clone();
+    }
+    if let Some(b) = &session.pins.conductor_backend {
+        c.backend = parse_conductor_backend(b).unwrap_or(c.backend);
+    }
+    c
 }
 
 /// Engine options derived from config (`[loop]`, `[models]`, `[preferences]`).
@@ -350,6 +409,7 @@ pub fn options_from_config(config: &Config) -> EngineOptions {
         stuck_loop_threshold: config.loop_.stuck_loop_threshold,
         test_ratchet: config.loop_.test_ratchet,
         role_models: config.preferences.models.clone().into_iter().collect(),
+        role_prefers: config.preferences.roles.clone().into_iter().collect(),
         worker_models: config.models.by_worker.clone().into_iter().collect(),
         ..Default::default()
     }
@@ -490,15 +550,23 @@ pub async fn run_plan_with(
         cancel_handle.cancel();
     });
 
+    let session = HumanSession::load(blackboard.root());
     let mut opts = options_with_pool(&config, &registry, blackboard.workspace());
+    apply_human_session(&session, &mut opts);
     opts.tool_specs = tool_specs;
     opts.mcp_servers = mcp_servers;
     let mut engine = Engine::new(blackboard, plan, &registry, opts);
     // Attach the conductor as the replanner so the loop can amend the DAG
     // (best-effort: if no backend is available, replan paths simply block).
-    if let Ok(conductor) =
-        build_conductor(&config, &registry, blackboard.workspace().to_path_buf())
-    {
+    let cond_cfg = conductor_config_with_session(&config, &session);
+    if let Ok(conductor) = build_conductor(
+        &Config {
+            conductor: cond_cfg,
+            ..config.clone()
+        },
+        &registry,
+        blackboard.workspace().to_path_buf(),
+    ) {
         engine = engine.with_replanner(std::sync::Arc::new(conductor));
     }
     let report = engine.run(cancel, Some(tx), resume).await?;
