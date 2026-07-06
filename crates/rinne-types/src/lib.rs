@@ -10,12 +10,14 @@ pub mod blackboard;
 pub mod dag;
 pub mod error;
 pub mod evaluator;
+pub mod human;
 pub mod replanner;
 pub mod skill;
 pub mod worker;
 
 pub use blackboard::{Blackboard, NodeStatus};
 pub use error::{Result, RinneError};
+pub use human::{HumanSession, RolePins, HUMAN_SESSION_FILE};
 pub use evaluator::{EvalContext, Evaluator, Gate};
 pub use replanner::Replanner;
 pub use skill::Skill;
