@@ -38,6 +38,8 @@ pub struct EngineOptions {
     pub test_ratchet: bool,
     /// Per-role model defaults (role name → model), from config.
     pub role_models: HashMap<String, String>,
+    /// Per-role worker pins (role name → worker name), from `preferences.roles`.
+    pub role_prefers: HashMap<String, String>,
     /// Per-worker model defaults (worker name → model), from config.
     pub worker_models: HashMap<String, String>,
     /// Per-worker cascade ladders (worker name → models cheap→strong), used to
@@ -69,6 +71,7 @@ impl Default for EngineOptions {
             stuck_loop_threshold: 3,
             test_ratchet: true,
             role_models: HashMap::new(),
+            role_prefers: HashMap::new(),
             worker_models: HashMap::new(),
             model_ladders: HashMap::new(),
             single_family_pool: false,
@@ -344,9 +347,10 @@ impl<'a> Engine<'a> {
         // Tool-aware routing (`MCP_SKILLS.md` §6): a node that attaches tools
         // prefers a worker that can actually serve them.
         let needs_tools = !node.tools.is_empty();
+        let prefer = self.effective_prefer(node);
         let Some((worker, tools_servable)) =
             self.registry
-                .resolve_for(&node.needs, node.prefer.as_deref(), needs_tools)
+                .resolve_for(&node.needs, prefer.as_deref(), needs_tools)
         else {
             // Unsatisfiable node: never silently assign an incapable worker —
             // park for the human instead (`CONTEXT.md` §7).
@@ -454,6 +458,19 @@ impl<'a> Engine<'a> {
         if result.status == ExecStatus::Cancelled {
             return Ok(Some(StopReason::Cancelled));
         }
+
+        if status == NodeStatus::Succeeded
+            && node.checkpoint == Some(Checkpoint::After)
+            && state.meta(&ckpt_key(&node.id))?.is_none()
+        {
+            let question = format!("review output of {} before continuing?", node.id);
+            self.park(state, sink, &node.id, "checkpoint", &node.id, &question)?;
+            return Ok(Some(StopReason::NeedsHuman {
+                node: node.id.clone(),
+                question,
+            }));
+        }
+
         Ok(None)
     }
 
@@ -679,9 +696,16 @@ impl<'a> Engine<'a> {
         match input.decision {
             HumanDecision::Approve => {
                 if kind == "checkpoint" {
-                    // Grant the checkpoint and let the node run.
                     state.set_meta(&ckpt_key(&parked), "ok")?;
-                    state.set_status(&parked, NodeStatus::Pending)?;
+                    let after = self
+                        .plan
+                        .node(&parked)
+                        .is_some_and(|n| n.checkpoint == Some(Checkpoint::After));
+                    if after {
+                        state.set_status(&parked, NodeStatus::Succeeded)?;
+                    } else {
+                        state.set_status(&parked, NodeStatus::Pending)?;
+                    }
                 } else {
                     // Accept current state: the parked evaluator passes.
                     state.set_status(&parked, NodeStatus::Succeeded)?;
@@ -775,6 +799,16 @@ impl<'a> Engine<'a> {
             state.set_status(&id, NodeStatus::Pending)?;
         }
         Ok(())
+    }
+
+    /// Soft worker preference for dispatch: the node's own `prefer`, then a
+    /// per-role pin from config or `/human` (`CONDUCTOR_LOOP_PLAN.md` §4).
+    fn effective_prefer(&self, node: &Node) -> Option<String> {
+        if let Some(p) = &node.prefer {
+            return Some(p.clone());
+        }
+        let role = format!("{:?}", node.role).to_lowercase();
+        self.options.role_prefers.get(&role).cloned()
     }
 
     /// Resolve the model to run for a node, in precedence order: the node's own
