@@ -64,6 +64,33 @@ pub struct ConductorConfig {
     /// Cloudflare account id, required to build its OpenAI-compatible URL.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// Frontier planner model on the same backend (used when auto-escalating).
+    #[serde(default)]
+    pub escalation_model: Option<String>,
+    /// Full conductor ladder cheap→frontier. When non-empty, overrides `model` +
+    /// `escalation_model`.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Escalate the planner among eligible models when the goal or validation demands it.
+    #[serde(default = "default_true")]
+    pub auto_escalate: bool,
+    /// Max planner rung steps per plan/replan invocation.
+    #[serde(default = "default_max_conductor_escalations")]
+    pub max_escalations: u8,
+    /// Reject non-conductor-eligible models in the ladder (`CONDUCTOR_LOOP_PLAN.md` §3.9.1).
+    #[serde(default = "default_true")]
+    pub only_eligible_models: bool,
+    /// Extra model ids the user trusts as planners (bypasses the built-in gate).
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
+fn default_max_conductor_escalations() -> u8 {
+    2
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ConductorConfig {
@@ -74,7 +101,29 @@ impl Default for ConductorConfig {
             base_url: None,
             key_env: None,
             account_id: None,
+            escalation_model: None,
+            models: Vec::new(),
+            auto_escalate: true,
+            max_escalations: 2,
+            only_eligible_models: true,
+            allowlist: Vec::new(),
         }
+    }
+}
+
+impl ConductorConfig {
+    /// Resolved planner ladder: `models[]` if set, else `[model, escalation?]`.
+    pub fn planner_ladder(&self) -> Vec<String> {
+        if !self.models.is_empty() {
+            return self.models.clone();
+        }
+        let mut ladder = vec![self.model.clone()];
+        if let Some(ref esc) = self.escalation_model {
+            if esc != &self.model {
+                ladder.push(esc.clone());
+            }
+        }
+        ladder
     }
 }
 
