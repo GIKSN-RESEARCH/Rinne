@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::assembler::ContextAssembler;
+use crate::gate::{approve_gate, before_gate_for_node, gate_for_node, mark_active, write_review};
 use crate::dag::{Checkpoint, EvaluatorKind, Node, OnFail, Plan};
 use crate::evaluator::{self, AiEvaluator, HumanEvaluator, ToolEvaluator};
 use crate::ratchet;
@@ -24,6 +25,7 @@ use crate::worker::{
     WorkerDescriptor, WorkerEvent, WorkerFamily,
 };
 use crate::Result;
+use rinne_types::human::{gate_iter_key, CheckpointTrigger, NamedCheckpoint};
 use rinne_types::{Blackboard, EvalContext, Evaluator, Gate, NodeStatus, Replanner, RinneError};
 
 /// Tunable limits for a run, merged from config and the plan's own budget.
@@ -60,6 +62,8 @@ pub struct EngineOptions {
     /// provisions into a harness whose node attaches a tool from that server
     /// (`MCP_SKILLS.md` §6).
     pub mcp_servers: HashMap<String, McpServerSpec>,
+    /// Named review gates from `/human checkpoint` (active session overlay).
+    pub gates: Vec<NamedCheckpoint>,
 }
 
 impl Default for EngineOptions {
@@ -78,6 +82,7 @@ impl Default for EngineOptions {
             skill_bodies: HashMap::new(),
             tool_specs: HashMap::new(),
             mcp_servers: HashMap::new(),
+            gates: Vec::new(),
         }
     }
 }
@@ -93,7 +98,12 @@ pub enum StopReason {
     Cancelled,
     /// A node is parked awaiting the user (checkpoint, human evaluator, or a
     /// stuck escalation). Resume with [`ResumeInput`] (`CONTEXT.md` §11).
-    NeedsHuman { node: String, question: String },
+    NeedsHuman {
+        node: String,
+        question: String,
+        /// Named gate when parked at a `/human checkpoint`.
+        gate: Option<String>,
+    },
 }
 
 /// A user's response when resuming a parked run (`CONTEXT.md` §11).
@@ -313,7 +323,17 @@ impl<'a> Engine<'a> {
                 break StopReason::NeedsHuman {
                     node: node.id.clone(),
                     question: format!("approve before running {}?", node.id),
+                    gate: None,
                 };
+            }
+
+            if let Some(gate) = before_gate_for_node(&self.options.gates, &node.id, state) {
+                if let Some(stop) = self
+                    .park_named_gate(&node, state, &sink, gate)
+                    .await?
+                {
+                    break stop;
+                }
             }
 
             let is_evaluator =
@@ -363,6 +383,7 @@ impl<'a> Engine<'a> {
             return Ok(Some(StopReason::NeedsHuman {
                 node: node.id.clone(),
                 question,
+                gate: None,
             }));
         };
         let worker_name = worker.descriptor().name.clone();
@@ -468,7 +489,12 @@ impl<'a> Engine<'a> {
             return Ok(Some(StopReason::NeedsHuman {
                 node: node.id.clone(),
                 question,
+                gate: None,
             }));
+        }
+
+        if let Some(gate) = gate_for_node(&self.options.gates, &self.plan, &node.id, state) {
+            return self.park_named_gate(node, state, sink, gate).await;
         }
 
         Ok(None)
@@ -590,6 +616,7 @@ impl<'a> Engine<'a> {
             return Ok(Some(StopReason::NeedsHuman {
                 node: node.id.clone(),
                 question,
+                gate: None,
             }));
         }
 
@@ -695,7 +722,25 @@ impl<'a> Engine<'a> {
 
         match input.decision {
             HumanDecision::Approve => {
-                if kind == "checkpoint" {
+                if kind == "named_gate" {
+                    approve_gate(state, &target)?;
+                    let before = self
+                        .options
+                        .gates
+                        .iter()
+                        .find(|g| g.name == target)
+                        .is_some_and(|g| {
+                            matches!(
+                                &g.trigger,
+                                CheckpointTrigger::BeforeNode { node } if node == &parked
+                            )
+                        });
+                    if before {
+                        state.set_status(&parked, NodeStatus::Pending)?;
+                    } else {
+                        state.set_status(&parked, NodeStatus::Succeeded)?;
+                    }
+                } else if kind == "checkpoint" {
                     state.set_meta(&ckpt_key(&parked), "ok")?;
                     let after = self
                         .plan
@@ -720,6 +765,22 @@ impl<'a> Engine<'a> {
                 self.do_replan(state, &None).await
             }
             HumanDecision::Steer(text) => {
+                if kind == "named_gate" {
+                    let iter = state
+                        .meta(&gate_iter_key(&target))?
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(1);
+                    let path = format!("checkpoints/{target}/feedback-v{iter}.md");
+                    self.blackboard.write_artifact(&path, &text)?;
+                    tracker.critiques.insert(parked.clone(), text.clone());
+                    state.set_status(&parked, NodeStatus::Pending)?;
+                    self.reset_subtree(state, &parked)?;
+                    tracker.failures.remove(&parked);
+                    self.blackboard.append_progress(&format!(
+                        "resume: gate {target} fix → loop-back {parked}"
+                    ))?;
+                    return Ok(None);
+                }
                 // The user's words become the critique that flows into the loop.
                 self.blackboard.write_artifact("eval-human.md", &text)?;
                 tracker.critiques.insert(target.clone(), text);
@@ -732,6 +793,28 @@ impl<'a> Engine<'a> {
                 Ok(None)
             }
         }
+    }
+
+    /// Park at a named `/human checkpoint` gate and write the review artifact.
+    async fn park_named_gate(
+        &self,
+        node: &Node,
+        state: &dyn Blackboard,
+        sink: &Option<EngineSink>,
+        gate: &NamedCheckpoint,
+    ) -> Result<Option<StopReason>> {
+        let iter = mark_active(state, gate)?;
+        write_review(state, gate, node, iter)?;
+        let question = format!(
+            "gate '{}' — review artifacts/checkpoints/{}/review-v{iter}.md, then /approve or /steer",
+            gate.name, gate.name
+        );
+        self.park(state, sink, &node.id, "named_gate", &gate.name, &question)?;
+        Ok(Some(StopReason::NeedsHuman {
+            node: node.id.clone(),
+            question: question.clone(),
+            gate: Some(gate.name.clone()),
+        }))
     }
 
     /// Park a node for the user, recording how to resume it.
@@ -1037,6 +1120,7 @@ impl<'a> Engine<'a> {
                 Ok(Some(StopReason::NeedsHuman {
                     node: node.id.clone(),
                     question,
+                    gate: None,
                 }))
             }
             Gate::Fail { critique, policy } => {
