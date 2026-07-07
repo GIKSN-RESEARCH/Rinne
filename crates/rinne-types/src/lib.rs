@@ -17,7 +17,10 @@ pub mod worker;
 
 pub use blackboard::{Blackboard, NodeStatus};
 pub use error::{Result, RinneError};
-pub use human::{HumanSession, RolePins, HUMAN_SESSION_FILE};
+pub use human::{
+    gate_iter_key, gate_ok_key, CheckpointTrigger, HumanSession, NamedCheckpoint, RolePins,
+    GATE_ACTIVE_KEY, HUMAN_SESSION_FILE,
+};
 pub use evaluator::{EvalContext, Evaluator, Gate};
 pub use replanner::Replanner;
 pub use skill::Skill;
