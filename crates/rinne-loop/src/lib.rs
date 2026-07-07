@@ -14,6 +14,7 @@ pub use rinne_types::{
 
 pub mod assembler;
 pub mod engine;
+pub mod gate;
 pub mod evaluator;
 pub mod pool;
 pub mod priors;
