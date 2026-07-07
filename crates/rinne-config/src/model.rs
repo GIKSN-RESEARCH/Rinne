@@ -21,6 +21,8 @@ pub struct Config {
     pub update: UpdateConfig,
     /// Connected MCP servers (`MCP_SKILLS.md` §10), keyed by name.
     pub mcp: McpConfig,
+    /// Tier routing rules (`CONDUCTOR_LOOP_PLAN.md` §3.5).
+    pub routing: RoutingConfig,
 }
 
 /// `[update]` — automatic new-release notification.
@@ -159,6 +161,65 @@ impl Default for LoopConfig {
             global_budget_minutes: 120,
             test_ratchet: true,
             stuck_loop_threshold: 3,
+        }
+    }
+}
+
+/// `[routing]` — tier matrix overrides (`CONDUCTOR_LOOP_PLAN.md` §3.5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutingConfig {
+    pub rules_file: Option<String>,
+    pub exemplars_file: Option<String>,
+    #[serde(default)]
+    pub tiers: std::collections::BTreeMap<String, TierRoutingRule>,
+    #[serde(default)]
+    pub combinations: CombinationRules,
+    #[serde(default)]
+    pub goal_keywords: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert(
+            "T4".into(),
+            TierRoutingRule {
+                require_human_checkpoint: true,
+                ..Default::default()
+            },
+        );
+        Self {
+            rules_file: None,
+            exemplars_file: Some(".rinne/routing-exemplars.toml".into()),
+            tiers,
+            combinations: CombinationRules::default(),
+            goal_keywords: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// Per-tier routing rule from config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct TierRoutingRule {
+    pub min_cost: Option<String>,
+    pub max_cost: Option<String>,
+    pub require_tool_eval: bool,
+    pub require_human_checkpoint: bool,
+}
+
+/// Cross-cutting combination rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CombinationRules {
+    pub allow_same_family_ai_review: bool,
+}
+
+impl Default for CombinationRules {
+    fn default() -> Self {
+        Self {
+            allow_same_family_ai_review: true,
         }
     }
 }
