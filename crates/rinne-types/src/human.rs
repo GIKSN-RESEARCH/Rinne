@@ -19,6 +19,8 @@ pub struct HumanSession {
     /// When true, pins in this file override config defaults for the run.
     pub active: bool,
     pub pins: RolePins,
+    /// Named review gates registered via `/human checkpoint`.
+    pub checkpoints: Vec<NamedCheckpoint>,
 }
 
 /// Role pins set via `/human` or `rinne human …`.
@@ -31,6 +33,22 @@ pub struct RolePins {
     pub generator_model: Option<String>,
     /// `tool`, `human`, or `ai` (optional `ai:<worker>:<model>`).
     pub evaluator: Option<String>,
+}
+
+/// A named human review gate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NamedCheckpoint {
+    pub name: String,
+    pub trigger: CheckpointTrigger,
+}
+
+/// When a named gate fires.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointTrigger {
+    AfterNode { node: String },
+    BeforeNode { node: String },
+    OnBuildSuccess,
 }
 
 impl HumanSession {
@@ -55,6 +73,15 @@ impl HumanSession {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(&path, json)?;
         Ok(())
+    }
+
+    /// Active named checkpoints (session must be on).
+    pub fn active_gates(&self) -> &[NamedCheckpoint] {
+        if self.active {
+            &self.checkpoints
+        } else {
+            &[]
+        }
     }
 
     /// One-line summary for `/human` with no args.
@@ -84,9 +111,28 @@ impl HumanSession {
         if let Some(e) = &self.pins.evaluator {
             lines.push(format!("  evaluator: {e}"));
         }
+        if !self.checkpoints.is_empty() {
+            lines.push(format!("  checkpoints: {}", self.checkpoints.len()));
+            for cp in &self.checkpoints {
+                lines.push(format!("    - {} ({:?})", cp.name, cp.trigger));
+            }
+        }
         if lines.len() == 1 {
             lines.push("  (no pins yet)".into());
         }
         lines.join("\n")
     }
+}
+
+/// Blackboard meta key: gate approved.
+pub fn gate_ok_key(name: &str) -> String {
+    format!("gate_ok:{name}")
+}
+
+/// Blackboard meta key: active gate name.
+pub const GATE_ACTIVE_KEY: &str = "gate_active";
+
+/// Blackboard meta key: gate review iteration.
+pub fn gate_iter_key(name: &str) -> String {
+    format!("gate_iter:{name}")
 }
