@@ -1,5 +1,8 @@
 //! Post-plan routing matrix: tier repair, evaluator injection, T4 human gates.
 
+use std::path::Path;
+
+use rinne_config::model::RoutingConfig;
 use rinne_core::dag::{ComplexityTier, EvaluatorKind, Node, Plan};
 use rinne_core::worker::{Capability, Role, WorkerDescriptor};
 
@@ -25,9 +28,24 @@ pub fn apply_routing(plan: &mut Plan, input: &ConductorInput, classification: &C
         apply_tier_defaults(node, tier, &input.workers);
     }
 
-    ensure_evaluators(plan, floor);
+    ensure_evaluators(plan, floor, input.workspace.as_deref());
+    apply_tier_rules(plan, &input.routing);
     errors.extend(validate_plan_routing(plan, &input.workers));
     errors
+}
+
+fn apply_tier_rules(plan: &mut Plan, routing: &RoutingConfig) {
+    for node in &mut plan.nodes {
+        let Some(tier) = node.complexity_tier else { continue };
+        let key = tier.label().to_string();
+        let Some(rule) = routing.tiers.get(&key) else { continue };
+        if rule.require_human_checkpoint
+            && node.checkpoint.is_none()
+            && matches!(node.role, Role::Generator | Role::Synthesizer)
+        {
+            node.checkpoint = Some(rinne_core::dag::Checkpoint::After);
+        }
+    }
 }
 
 fn infer_node_tier(node: &Node, floor: ComplexityTier) -> ComplexityTier {
@@ -74,7 +92,7 @@ fn apply_tier_defaults(node: &mut Node, tier: ComplexityTier, workers: &[WorkerD
     node.model = ladder.get(idx).or_else(|| ladder.last()).cloned();
 }
 
-fn ensure_evaluators(plan: &mut Plan, floor: ComplexityTier) {
+fn ensure_evaluators(plan: &mut Plan, floor: ComplexityTier, workspace: Option<&Path>) {
     if floor < ComplexityTier::T1 {
         return;
     }
@@ -100,7 +118,7 @@ fn ensure_evaluators(plan: &mut Plan, floor: ComplexityTier) {
         depends_on: vec![gen_id.clone()],
         evaluator: Some(EvaluatorKind::Tool),
         acceptance: Some(rinne_core::dag::Acceptance {
-            command: detect_test_command(),
+            command: detect_test_command(workspace),
             must_exit: 0,
         }),
         on_fail: Some(format!("loop_back({gen_id}, critique=artifacts/review.md)")),
@@ -108,11 +126,23 @@ fn ensure_evaluators(plan: &mut Plan, floor: ComplexityTier) {
     });
 }
 
-fn detect_test_command() -> String {
-    if std::path::Path::new("Cargo.toml").exists() {
+/// Detect the project's test command from markers under `workspace`.
+pub fn detect_test_command(workspace: Option<&Path>) -> String {
+    let root = workspace.unwrap_or_else(|| Path::new("."));
+    if root.join("package.json").exists() {
+        if root.join("pnpm-lock.yaml").exists() {
+            "pnpm test".into()
+        } else if root.join("yarn.lock").exists() {
+            "yarn test".into()
+        } else {
+            "npm test".into()
+        }
+    } else if root.join("Cargo.toml").exists() {
         "cargo test".into()
-    } else if std::path::Path::new("package.json").exists() {
-        "npm test".into()
+    } else if root.join("go.mod").exists() {
+        "go test ./...".into()
+    } else if root.join("pyproject.toml").exists() || root.join("setup.py").exists() {
+        "pytest".into()
     } else {
         "true".into()
     }
@@ -202,6 +232,21 @@ fn default_node() -> Node {
 mod tests {
     use super::*;
     use rinne_core::dag::ComplexityTier;
+    use std::fs;
+
+    #[test]
+    fn detect_test_command_uses_workspace_not_cwd() {
+        let ws = std::env::temp_dir().join(format!(
+            "rinne-routing-{}-{}",
+            std::process::id(),
+            "ws"
+        ));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(detect_test_command(Some(ws.as_path())), "cargo test");
+        let _ = fs::remove_dir_all(&ws);
+    }
 
     #[test]
     fn t4_injects_checkpoint_after() {
