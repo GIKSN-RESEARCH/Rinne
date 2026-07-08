@@ -457,9 +457,13 @@ impl App {
                             report.total_usage.total_tokens()
                         ),
                     ),
-                    StopReason::NeedsHuman { node, question } => {
+                    StopReason::NeedsHuman { node, question, gate } => {
                         self.parked = Some(question.clone());
-                        self.push(FeedKind::Parked, format!("parked at {node}: {question}"));
+                        let label = gate
+                            .as_ref()
+                            .map(|g| format!("gate '{g}' at {node}"))
+                            .unwrap_or_else(|| format!("parked at {node}"));
+                        self.push(FeedKind::Parked, format!("{label}: {question}"));
                     }
                     other => self.push(FeedKind::NodeFail, format!("stopped: {other:?}")),
                 }
@@ -940,8 +944,20 @@ impl App {
             "human" => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let args = split_args(&rest);
-                let lines = crate::commands::human::run_lines(&args, &cwd);
-                self.push(FeedKind::System, lines.join("\n"));
+                match args.as_slice() {
+                    [cmd] if self.parked.is_some() && matches!(cmd.as_str(), "go" | "approve") => {
+                        self.resume_with(HumanDecision::Approve);
+                    }
+                    [cmd, text @ ..]
+                        if self.parked.is_some() && matches!(cmd.as_str(), "fix" | "steer") =>
+                    {
+                        self.resume_with(HumanDecision::Steer(text.join(" ")));
+                    }
+                    _ => {
+                        let lines = crate::commands::human::run_lines(&args, &cwd);
+                        self.push(FeedKind::System, lines.join("\n"));
+                    }
+                }
             }
             "steer" if !rest.is_empty() => self.resume_with(HumanDecision::Steer(rest)),
             "approve" => self.resume_with(HumanDecision::Approve),
@@ -1389,9 +1405,10 @@ async fn do_run(
     // Build the planning context up front (even on resume) so the conductor
     // carries it as its replanner template throughout the run.
     let catalog = crate::catalog::gather(&config, &cwd).await;
-    let template = runner::plan_template(&config, &registry, catalog);
+    let template = runner::plan_template(&config, &registry, catalog, &cwd);
     let session = HumanSession::load(bb.root());
     let cond_cfg = runner::conductor_config_with_session(&config, &session);
+    let narration_tx = tx.clone();
     let conductor = runner::build_conductor(
         &Config {
             conductor: cond_cfg,
@@ -1401,7 +1418,13 @@ async fn do_run(
         cwd.clone(),
     )
     .ok()
-    .map(|c| Arc::new(c.with_context(template.clone())));
+    .map(|c| {
+        Arc::new(
+            c.with_context(template.clone()).with_narration(move |line| {
+                let _ = narration_tx.send(AppMsg::Engine(EngineEvent::Narration(line)));
+            }),
+        )
+    });
 
     if resume.is_none() {
         let conductor = conductor
