@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
 
     match args.command {
         None => run_interactive().await,
-        Some(Command::Doctor) => run_doctor().await,
+        Some(Command::Doctor { routing }) => commands::doctor::run(false, routing).await,
         Some(Command::Run { plan }) => commands::run::run(&plan).await,
         Some(Command::Connect { backend, key, models, base_url, add }) => {
             commands::connect::run(&backend, key, models, base_url, add).await
@@ -71,9 +71,7 @@ async fn run_oneshot(task: &str, json: bool) -> Result<()> {
     commands::run::oneshot(task, json).await
 }
 
-async fn run_doctor() -> Result<()> {
-    commands::doctor::run(false).await
-}
+
 
 
 async fn run_status() -> Result<()> {
