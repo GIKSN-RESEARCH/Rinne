@@ -10,7 +10,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tokio_util::sync::CancellationToken;
 
-use rinne_conductor::{resolve_openai, Conductor, ConductorInput, HarnessBackend, PlanBackend};
+use rinne_conductor::{
+    load_user_exemplars, resolve_openai, Conductor, ConductorInput, HarnessBackend, PlanBackend,
+};
 use rinne_config::model::{ConductorBackend, ConductorConfig, PreferFamily};
 use rinne_config::probe::WorkerFamily;
 use rinne_config::Config;
@@ -193,7 +195,7 @@ pub async fn oneshot_json(goal: &str) -> Result<serde_json::Value> {
         return Err(anyhow!("no available workers — run `rinne doctor`"));
     }
     let catalog = crate::catalog::gather(&config, &cwd).await;
-    let template = plan_template(&config, &registry, catalog);
+    let template = plan_template(&config, &registry, catalog, &cwd);
     let conductor = std::sync::Arc::new(
         build_conductor(&config, &registry, cwd.clone())?.with_context(template.clone()),
     );
@@ -206,7 +208,9 @@ pub async fn oneshot_json(goal: &str) -> Result<serde_json::Value> {
     bb.save_plan(&plan)?;
     bb.reset_run()?;
 
+    let session = HumanSession::load(bb.root());
     let mut opts = options_with_pool(&config, &registry, &cwd);
+    apply_human_session(&session, &mut opts);
     opts.tool_specs = tool_specs;
     opts.mcp_servers = mcp_servers;
     let mut engine = Engine::new(&bb, plan.clone(), &registry, opts);
@@ -263,7 +267,14 @@ fn stop_reason_parts(s: &rinne_core::StopReason) -> (&'static str, Option<String
         BudgetIterations => ("budget_iterations", None),
         Cancelled => ("cancelled", None),
         NoCapableWorker(n) => ("no_capable_worker", Some(n.clone())),
-        NeedsHuman { node, question } => ("needs_human", Some(format!("{node}: {question}"))),
+        NeedsHuman { node, question, gate } => {
+            let detail = if let Some(g) = gate {
+                format!("{node} (gate {g}): {question}")
+            } else {
+                format!("{node}: {question}")
+            };
+            ("needs_human", Some(detail))
+        }
     }
 }
 
@@ -291,7 +302,7 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
     }
 
     let catalog = crate::catalog::gather(&config, blackboard.workspace()).await;
-    let template = plan_template(&config, &registry, catalog);
+    let template = plan_template(&config, &registry, catalog, blackboard.workspace());
     let session = HumanSession::load(blackboard.root());
     let cond_cfg = conductor_config_with_session(&config, &session);
     let conductor = build_conductor(
@@ -350,7 +361,14 @@ pub fn plan_template(
     config: &Config,
     registry: &WorkerRegistry,
     catalog: crate::catalog::Catalog,
+    workspace: &std::path::Path,
 ) -> ConductorInput {
+    let exemplars_path = config
+        .routing
+        .exemplars_file
+        .as_ref()
+        .map(|p| workspace.join(p))
+        .unwrap_or_else(|| workspace.join(".rinne/routing-exemplars.toml"));
     ConductorInput {
         workers: registry.descriptors(),
         tools: catalog.tools,
@@ -359,6 +377,9 @@ pub fn plan_template(
         role_prefers: config.preferences.roles.clone().into_iter().collect(),
         budget_minutes: Some(config.loop_.global_budget_minutes as u64),
         max_iterations_per_node: config.loop_.max_iterations_per_node,
+        workspace: Some(workspace.to_path_buf()),
+        routing: config.routing.clone(),
+        user_exemplars: load_user_exemplars(&exemplars_path),
         ..Default::default()
     }
 }
@@ -377,6 +398,7 @@ pub fn apply_human_session(session: &HumanSession, opts: &mut EngineOptions) {
     if let Some(ev) = &session.pins.evaluator {
         opts.role_prefers.insert("evaluator".into(), ev.clone());
     }
+    opts.gates = session.active_gates().to_vec();
 }
 
 /// Apply conductor pins from a human session onto a config clone.
