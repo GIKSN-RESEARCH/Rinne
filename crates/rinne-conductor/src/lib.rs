@@ -14,16 +14,19 @@ pub mod ladder;
 pub mod parse;
 pub mod prompt;
 pub mod routing;
+pub mod routing_report;
 pub mod tier_exemplars;
 
 pub use backend::{
     conductor_base_url, conductor_credential, resolve_openai, resolve_openai_model, HarnessBackend,
     OpenAiBackend, PlanBackend,
 };
-pub use classifier::{classify_goal, Classification};
+pub use classifier::{classify_goal, classify_goal_with, Classification};
 pub use conductor::Conductor;
 pub use conductor_eligible::{filter_eligible_ladder, is_conductor_eligible};
 pub use ladder::{ConductorLadder, EscalationReason};
 pub use parse::parse_plan;
 pub use prompt::{ConductorInput, SkillInfo, ToolInfo};
-pub use routing::apply_routing;
+pub use routing::{apply_routing, detect_test_command};
+pub use routing_report::format_routing_report;
+pub use tier_exemplars::{load_user_exemplars, LoadedExemplar};
