@@ -7,7 +7,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use rinne_config::model::RoutingConfig;
 use rinne_core::worker::WorkerDescriptor;
+
+use crate::tier_exemplars::LoadedExemplar;
 
 /// An MCP tool surfaced to the planner as a cheap name+description (the full
 /// schema loads only when a node that attaches it runs — `MCP_SKILLS.md` §11).
@@ -46,6 +49,12 @@ pub struct ConductorInput {
     pub role_prefers: HashMap<String, String>,
     pub budget_minutes: Option<u64>,
     pub max_iterations_per_node: u32,
+    /// Project root for workspace-aware routing (test command detection, etc.).
+    pub workspace: Option<PathBuf>,
+    /// `[routing]` overrides from config.
+    pub routing: RoutingConfig,
+    /// User-provided tier exemplars merged into classification.
+    pub user_exemplars: Vec<LoadedExemplar>,
 }
 
 /// The system prompt: who the conductor is and the exact schema it must emit.
