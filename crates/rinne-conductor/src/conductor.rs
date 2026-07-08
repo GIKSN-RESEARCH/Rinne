@@ -1,6 +1,8 @@
 //! The Conductor: prompt → JSON DAG, with backend fallback and a JSON-repair
 //! retry (`CONTEXT.md` §7, §21).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use rinne_config::model::ConductorConfig;
@@ -9,7 +11,7 @@ use rinne_core::replanner::Replanner;
 use rinne_core::{Result, RinneError};
 
 use crate::backend::{resolve_openai_model, PlanBackend};
-use crate::classifier::classify_goal;
+use crate::classifier::{classify_goal_with, Classification};
 use crate::ladder::{ConductorLadder, EscalationReason};
 use crate::parse::parse_plan;
 use crate::prompt::{exemplar_section, system_prompt, user_prompt, ConductorInput};
@@ -25,6 +27,7 @@ pub struct Conductor {
     /// catalog-aware — the engine's `Replanner` hook only hands us goal+digest.
     context: ConductorInput,
     config: ConductorConfig,
+    narration: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl Conductor {
@@ -35,7 +38,20 @@ impl Conductor {
             backends,
             context: ConductorInput::default(),
             config: ConductorConfig::default(),
+            narration: None,
         })
+    }
+
+    /// Stream planner escalation narration to the UI (`EngineEvent::Narration`).
+    pub fn with_narration(mut self, f: impl Fn(String) + Send + Sync + 'static) -> Self {
+        self.narration = Some(Arc::new(f));
+        self
+    }
+
+    fn narrate(&self, line: String) {
+        if let Some(f) = &self.narration {
+            f(line);
+        }
     }
 
     /// Capture the planning context (workers, tools, skills, preference, budgets)
@@ -59,7 +75,7 @@ impl Conductor {
 
     /// Produce a fresh plan from a goal and context.
     pub async fn plan(&self, input: &ConductorInput) -> Result<Plan> {
-        let classification = classify_goal(&input.goal);
+        let classification = self.classify(input);
         let mut ladder = ConductorLadder::from_config(&self.config);
         ladder.select_starting_rung(&classification);
 
@@ -82,7 +98,9 @@ impl Conductor {
                         if let Some((from, to, why)) =
                             ladder.escalate(EscalationReason::HighNodeCount(plan.nodes.len() as u32))
                         {
-                            tracing::info!("conductor: escalating planner {from} → {to} ({why})");
+                            let msg = format!("escalating planner {from} → {to}: {why}");
+                            tracing::info!("conductor: {msg}");
+                            self.narrate(msg);
                             user.push_str(&format!(
                                 "\n\nESCALATION NOTICE: {why}. Re-plan with fewer, coarser nodes.\n"
                             ));
@@ -99,7 +117,9 @@ impl Conductor {
                     if let Some((from, to, why)) =
                         ladder.escalate(EscalationReason::ValidationFailure(routing_errs.clone()))
                     {
-                        tracing::info!("conductor: escalating planner {from} → {to} ({why})");
+                        let msg = format!("escalating planner {from} → {to}: {why}");
+                        tracing::info!("conductor: {msg}");
+                        self.narrate(msg);
                         user.push_str(&format!(
                             "\n\nESCALATION NOTICE: {why}. Re-plan and fix tier/worker assignments.\n"
                         ));
@@ -113,7 +133,9 @@ impl Conductor {
                 }
                 Err(e) if is_parse_failure(&e) && ladder.can_escalate() => {
                     if let Some((from, to, why)) = ladder.escalate(EscalationReason::ParseFailure) {
-                        tracing::info!("conductor: escalating planner {from} → {to} ({why})");
+                        let msg = format!("escalating planner {from} → {to}: {why}");
+                        tracing::info!("conductor: {msg}");
+                        self.narrate(msg);
                         user.push_str(&format!(
                             "\n\nESCALATION NOTICE: {why}. Return ONLY valid JSON.\n"
                         ));
@@ -184,6 +206,16 @@ impl Conductor {
                 parse_plan(&raw2).map(finalize)
             }
         }
+    }
+}
+
+impl Conductor {
+    fn classify(&self, input: &ConductorInput) -> Classification {
+        classify_goal_with(
+            &input.goal,
+            &input.routing.goal_keywords,
+            &input.user_exemplars,
+        )
     }
 }
 
