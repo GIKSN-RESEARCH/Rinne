@@ -35,7 +35,11 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Detect and report backends, auth mode, and quota.
-    Doctor,
+    Doctor {
+        /// Show planner rungs, execution tiers, and exemplar counts.
+        #[arg(long)]
+        routing: bool,
+    },
 
     /// Load a plan file into the blackboard and run it to completion.
     ///
