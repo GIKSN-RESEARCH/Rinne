@@ -515,3 +515,64 @@ async fn replanner_amends_dag_on_replan_verdict() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+// ----- named gate parks and resumes on approve --------------------------------
+
+#[tokio::test]
+async fn named_gate_parks_and_resumes() {
+    use rinne_core::{CheckpointTrigger, NamedCheckpoint};
+
+    let ws = temp_ws("named-gate");
+    let bb = Blackboard::open(&ws).unwrap();
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "goal": "gate test",
+        "nodes": [
+            {"id":"n1","role":"generator","instruction":"do","needs":["code-edit"]}
+        ]
+    }))
+    .unwrap();
+    bb.save_plan(&plan).unwrap();
+
+    let mut reg = WorkerRegistry::new();
+    reg.register(Arc::new(MockWorker::success("gen", "done")) as Arc<dyn Worker>);
+
+    let gate = NamedCheckpoint {
+        name: "review".into(),
+        trigger: CheckpointTrigger::AfterNode {
+            node: "n1".into(),
+        },
+    };
+    let options = EngineOptions {
+        gates: vec![gate],
+        ..EngineOptions::default()
+    };
+
+    let mut engine = Engine::new(&bb, plan, &reg, options);
+    let first = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            first.stop_reason,
+            StopReason::NeedsHuman {
+                gate: Some(ref g),
+                ..
+            } if g == "review"
+        ),
+        "expected named gate park: {:?}",
+        first.stop_reason
+    );
+
+    let resume = ResumeInput {
+        node: None,
+        decision: HumanDecision::Approve,
+    };
+    let second = engine
+        .run(CancellationToken::new(), None, Some(resume))
+        .await
+        .unwrap();
+    assert!(second.completed, "should finish after gate approve: {:?}", second.stop_reason);
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
