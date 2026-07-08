@@ -7,12 +7,39 @@ use rinne_config::{
     probe::{WorkerFamily, WorkerStatus},
     Config, DoctorReport,
 };
+use rinne_conductor::{format_routing_report, load_user_exemplars, resolve_openai};
 
 /// Run the probe and print a human-readable report.
-pub async fn run(refresh: bool) -> Result<()> {
+pub async fn run(refresh: bool, routing: bool) -> Result<()> {
     let config = rinne_config::load_cwd()?;
+    if routing {
+        print_routing_report(&config).await?;
+        return Ok(());
+    }
     let report = rinne_config::doctor(&config, refresh).await?;
     print_report(&config, &report);
+    Ok(())
+}
+
+async fn print_routing_report(config: &Config) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let (registry, _) = crate::runner::build_registry(config).await?;
+    let exemplars_path = config
+        .routing
+        .exemplars_file
+        .as_ref()
+        .map(|p| cwd.join(p))
+        .unwrap_or_else(|| cwd.join(".rinne/routing-exemplars.toml"));
+    let user_exemplars = load_user_exemplars(&exemplars_path);
+    let api_key_present = resolve_openai(&config.conductor)?.is_some();
+    let report = format_routing_report(
+        &config.conductor,
+        &config.routing,
+        &registry.descriptors(),
+        &user_exemplars,
+        api_key_present,
+    );
+    print!("{report}");
     Ok(())
 }
 
