@@ -1,8 +1,10 @@
 //! Goal tier classification against the exemplar library.
 
+use std::collections::BTreeMap;
+
 use rinne_core::dag::ComplexityTier;
 
-use crate::tier_exemplars::{all, TierExemplar};
+use crate::tier_exemplars::{all, LoadedExemplar, TierExemplar};
 
 /// Result of classifying a user goal.
 #[derive(Debug, Clone)]
@@ -14,17 +16,39 @@ pub struct Classification {
 
 /// Classify a goal by exemplar similarity and risk keywords.
 pub fn classify_goal(goal: &str) -> Classification {
+    classify_goal_with(goal, &BTreeMap::new(), &[])
+}
+
+/// Classify with config goal-keyword overrides and project exemplars.
+pub fn classify_goal_with(
+    goal: &str,
+    goal_keywords: &BTreeMap<String, String>,
+    user_exemplars: &[LoadedExemplar],
+) -> Classification {
     let goal_l = goal.to_lowercase();
-    let risk_floor = risk_keyword_floor(&goal_l);
+    let risk_floor = max_tier(
+        risk_keyword_floor(&goal_l),
+        config_keyword_floor(&goal_l, goal_keywords),
+    );
 
     let mut best_score = 0.0f32;
     let mut best_tier = ComplexityTier::T0;
-    let mut matched: Vec<(f32, &TierExemplar)> = Vec::new();
+    let mut matched: Vec<(f32, String, ComplexityTier)> = Vec::new();
 
     for ex in all() {
-        let score = similarity(&goal_l, ex);
+        let score = similarity_static(&goal_l, ex);
         if score > 0.0 {
-            matched.push((score, ex));
+            matched.push((score, ex.id.to_string(), ex.tier));
+        }
+        if score > best_score {
+            best_score = score;
+            best_tier = ex.tier;
+        }
+    }
+    for ex in user_exemplars {
+        let score = similarity_loaded(&goal_l, ex);
+        if score > 0.0 {
+            matched.push((score, ex.id.clone(), ex.tier));
         }
         if score > best_score {
             best_score = score;
@@ -36,13 +60,13 @@ pub fn classify_goal(goal: &str) -> Classification {
     let matched_ids: Vec<String> = matched
         .iter()
         .take(3)
-        .filter(|(s, _)| *s >= 0.15)
-        .map(|(_, ex)| ex.id.to_string())
+        .filter(|(s, _, _)| *s >= 0.15)
+        .map(|(_, id, _)| id.clone())
         .collect();
 
     let mut floor = max_tier(best_tier, risk_floor);
     if best_score < 0.12 && risk_floor == ComplexityTier::T0 {
-        floor = ComplexityTier::T1; // unknown software goals default to at least T1
+        floor = ComplexityTier::T1;
     }
     if looks_text_only(&goal_l) && risk_floor == ComplexityTier::T0 {
         floor = ComplexityTier::T0;
@@ -56,11 +80,20 @@ pub fn classify_goal(goal: &str) -> Classification {
     }
 }
 
-fn similarity(goal: &str, ex: &TierExemplar) -> f32 {
-    let prompt_l = ex.prompt.to_lowercase();
+fn similarity_static(goal: &str, ex: &TierExemplar) -> f32 {
+    similarity_text(goal, ex.prompt, ex.signals)
+}
+
+fn similarity_loaded(goal: &str, ex: &LoadedExemplar) -> f32 {
+    let sigs: Vec<&str> = ex.signals.iter().map(String::as_str).collect();
+    similarity_text(goal, &ex.prompt, &sigs)
+}
+
+fn similarity_text(goal: &str, prompt: &str, signals: &[&str]) -> f32 {
+    let prompt_l = prompt.to_lowercase();
     let mut hits = 0u32;
     let mut total = 0u32;
-    for sig in ex.signals {
+    for sig in signals {
         total += 1;
         if goal.contains(sig) {
             hits += 2;
@@ -79,6 +112,18 @@ fn similarity(goal: &str, ex: &TierExemplar) -> f32 {
         return 0.0;
     }
     (hits as f32) / (total as f32)
+}
+
+fn config_keyword_floor(goal: &str, keywords: &BTreeMap<String, String>) -> ComplexityTier {
+    let mut floor = ComplexityTier::T0;
+    for (kw, tier_label) in keywords {
+        if goal.contains(kw) {
+            if let Some(t) = ComplexityTier::parse(tier_label) {
+                floor = max_tier(floor, t);
+            }
+        }
+    }
+    floor
 }
 
 fn risk_keyword_floor(goal: &str) -> ComplexityTier {
