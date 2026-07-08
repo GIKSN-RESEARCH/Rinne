@@ -1,6 +1,9 @@
 //! Tier exemplar library for goal classification (`CONDUCTOR_LOOP_PLAN.md` §3.1.1).
 
+use std::path::Path;
+
 use rinne_core::dag::ComplexityTier;
+use serde::Deserialize;
 
 /// One reference prompt that anchors a complexity tier.
 #[derive(Debug, Clone, Copy)]
@@ -14,6 +17,72 @@ pub struct TierExemplar {
 /// All shipped exemplars (12 per tier).
 pub fn all() -> &'static [TierExemplar] {
     EXEMPLARS
+}
+
+/// User-defined exemplar loaded from `.rinne/routing-exemplars.toml`.
+#[derive(Debug, Clone)]
+pub struct LoadedExemplar {
+    pub id: String,
+    pub tier: ComplexityTier,
+    pub prompt: String,
+    pub signals: Vec<String>,
+}
+
+/// Load optional project exemplars; missing or invalid files are ignored.
+pub fn load_user_exemplars(path: &Path) -> Vec<LoadedExemplar> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    #[derive(Debug, Deserialize)]
+    struct File {
+        #[serde(default)]
+        exemplar: Vec<Entry>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct Entry {
+        id: String,
+        tier: String,
+        prompt: String,
+        #[serde(default)]
+        signals: Vec<String>,
+    }
+    let Ok(file) = toml::from_str::<File>(&raw) else {
+        return Vec::new();
+    };
+    file.exemplar
+        .into_iter()
+        .filter_map(|e| {
+            let tier = ComplexityTier::parse(&e.tier)?;
+            Some(LoadedExemplar {
+                id: e.id,
+                tier,
+                prompt: e.prompt,
+                signals: e.signals,
+            })
+        })
+        .collect()
+}
+
+/// Count exemplars per tier (shipped + user).
+pub fn tier_counts(user: &[LoadedExemplar]) -> [usize; 5] {
+    let mut counts = [0usize; 5];
+    for ex in all() {
+        counts[tier_index(ex.tier)] += 1;
+    }
+    for ex in user {
+        counts[tier_index(ex.tier)] += 1;
+    }
+    counts
+}
+
+fn tier_index(t: ComplexityTier) -> usize {
+    match t {
+        ComplexityTier::T0 => 0,
+        ComplexityTier::T1 => 1,
+        ComplexityTier::T2 => 2,
+        ComplexityTier::T3 => 3,
+        ComplexityTier::T4 => 4,
+    }
 }
 
 const EXEMPLARS: &[TierExemplar] = &[
