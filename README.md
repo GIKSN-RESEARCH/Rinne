@@ -8,6 +8,17 @@
 
 ## Install
 
+### macOS app (GUI)
+
+**[Download Rinne for Mac (DMG)](https://github.com/GIKSN-RESEARCH/Rinne/releases/download/v0.1.0/Rinne-0.1.0-macos-arm64.dmg)** — Apple Silicon
+
+1. Open the DMG and drag **Rinne** into **Applications**
+2. First launch: right-click → **Open** if Gatekeeper warns (ad-hoc signed build until notarized)
+3. Optional: run **Install CLI.command** in the DMG to put `rinne` on your PATH
+4. From any project folder: `rinne .` (opens the app on that folder, like `code .`)
+
+### CLI only
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/GIKSN-RESEARCH/Rinne/main/install.sh | sh
 ```
