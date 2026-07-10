@@ -10,7 +10,7 @@
 
 ### macOS app (GUI)
 
-**[Download Rinne for Mac (DMG)](https://github.com/GIKSN-RESEARCH/Rinne/releases/download/v0.1.0/Rinne-0.1.0-macos-arm64.dmg)** — Apple Silicon
+**[Download Rinne for Mac (DMG)](https://github.com/GIKSN-RESEARCH/rinne_macOS/releases/download/v0.1.0/Rinne-0.1.0-macos-arm64.dmg)** — Apple Silicon · [releases](https://github.com/GIKSN-RESEARCH/rinne_macOS/releases)
 
 1. Open the DMG and drag **Rinne** into **Applications**
 2. First launch: right-click → **Open** if Gatekeeper warns (ad-hoc signed build until notarized)
