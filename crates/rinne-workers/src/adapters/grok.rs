@@ -51,7 +51,10 @@ fn descriptor() -> WorkerDescriptor {
         },
         latency: LatencyProfile::Medium,
         transport: Transport::SubprocessJson,
-        models: vec!["grok-composer-2.5-fast".into(), "grok-build".into()],
+        // Fallback ladder only — at registry build time `discover_cli_models`
+        // replaces this with whatever `grok models` currently lists (cheap→strong).
+        // Do not hard-code retired ids like `grok-build`; they block the DAG.
+        models: vec!["grok-composer-2.5-fast".into(), "grok-4.5".into()],
     }
 }
 
@@ -76,9 +79,15 @@ fn build_args(prompt: &str, model: Option<&str>) -> Vec<String> {
 
 /// Accumulate `type:text` token data into the result; read the session id from
 /// the terminal `end` event. Falls back to a non-streaming `{"text":...}` shape.
+///
+/// Grok's streaming-json currently has **no usage field** on `end` (only
+/// `stopReason` / `sessionId` / `requestId`). We therefore estimate completion
+/// tokens from streamed thought+text payload length so the ledger is not 0.
 fn parse(out: &SubprocessOutput) -> ParsedHarness {
     let mut result = String::new();
     let mut session_id = None;
+    let mut thought = String::new();
+    let mut reported = Usage::default();
 
     for line in out.stdout.lines() {
         let line = line.trim();
@@ -94,8 +103,30 @@ fn parse(out: &SubprocessOutput) -> ParsedHarness {
                     result.push_str(d);
                 }
             }
+            Some("thought") => {
+                if let Some(d) = v.get("data").and_then(|d| d.as_str()) {
+                    thought.push_str(d);
+                }
+            }
             Some("end") => {
-                session_id = v.get("sessionId").and_then(|s| s.as_str()).map(String::from);
+                session_id = v
+                    .get("sessionId")
+                    .or_else(|| v.get("session_id"))
+                    .and_then(|s| s.as_str())
+                    .map(String::from);
+                // Future-proof: accept usage if Grok starts emitting it.
+                if let Some(u) = v.get("usage") {
+                    reported.prompt_tokens = u
+                        .get("input_tokens")
+                        .or_else(|| u.get("prompt_tokens"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                    reported.completion_tokens = u
+                        .get("output_tokens")
+                        .or_else(|| u.get("completion_tokens"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                }
             }
             _ => {
                 // Non-streaming json: a single object with a `text` field.
@@ -111,10 +142,18 @@ fn parse(out: &SubprocessOutput) -> ParsedHarness {
     if result.is_empty() {
         return ParsedHarness::raw(&out.stdout);
     }
+
+    let mut usage = reported;
+    if usage.completion_tokens == 0 {
+        // Estimate output from visible text + reasoning stream.
+        let out_text = format!("{thought}{result}");
+        usage.completion_tokens = Usage::estimate_tokens(&out_text);
+    }
+
     ParsedHarness {
         result: result.trim().to_string(),
         session_id,
-        usage: Usage::default(),
+        usage,
         is_error: false,
     }
 }
@@ -142,6 +181,37 @@ fn line_mapper(line: &str) -> Vec<WorkerEvent> {
         }
         // thought, end, system: not shown.
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::subprocess::SubprocessOutput;
+    use rinne_core::worker::ExecStatus;
+
+    #[test]
+    fn parse_estimates_tokens_when_grok_omits_usage() {
+        let stdout = r#"
+{"type":"thought","data":"thinking hard about this"}
+{"type":"text","data":"Hello world from Grok"}
+{"type":"end","stopReason":"EndTurn","sessionId":"abc"}
+"#;
+        let out = SubprocessOutput {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            status: ExecStatus::Success,
+            wall_ms: 100,
+            exit_code: Some(0),
+        };
+        let p = parse(&out);
+        assert!(p.result.contains("Hello world"));
+        assert_eq!(p.session_id.as_deref(), Some("abc"));
+        assert!(
+            p.usage.completion_tokens > 0,
+            "expected estimated completion tokens, got {}",
+            p.usage.completion_tokens
+        );
     }
 }
 
