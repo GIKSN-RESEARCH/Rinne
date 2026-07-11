@@ -11,9 +11,11 @@ pub mod claude_code;
 pub mod codex;
 pub mod common;
 pub mod cursor;
+pub mod discover;
 pub mod grok;
 pub mod opencode;
 pub mod openai_api;
 
 pub use common::HarnessAdapter;
+pub use discover::{discover_cli_models, parse_models_listing, DiscoveredModels};
 pub use openai_api::OpenAiWorker;
