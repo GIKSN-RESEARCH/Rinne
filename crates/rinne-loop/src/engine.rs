@@ -377,10 +377,10 @@ impl<'a> Engine<'a> {
         // prefers a worker that can actually serve them.
         let needs_tools = !node.tools.is_empty();
         let prefer = self.effective_prefer(node);
-        let Some((worker, tools_servable)) =
-            self.registry
-                .resolve_for(&node.needs, prefer.as_deref(), needs_tools)
-        else {
+        let candidates = self
+            .registry
+            .resolve_candidates(&node.needs, prefer.as_deref(), needs_tools);
+        let Some(_) = candidates.first() else {
             // Unsatisfiable node: never silently assign an incapable worker —
             // park for the human instead (`CONTEXT.md` §7).
             let question = format!(
@@ -395,6 +395,10 @@ impl<'a> Engine<'a> {
                 gate: None,
             }));
         };
+        let critique = tracker.critiques.remove(&node.id);
+        let mut last_error = None;
+
+        for (attempt, (worker, tools_servable)) in candidates.into_iter().enumerate() {
         let worker_name = worker.descriptor().name.clone();
         let family = worker.descriptor().family;
 
@@ -405,17 +409,24 @@ impl<'a> Engine<'a> {
             narrate(
                 sink,
                 format!(
-                    "{} attaches tools but {} can't run them — proceeding without tools \
+                    "{} attaches tools but fallback {} can't run them — proceeding without tools \
                      (add an API worker or claude-code to serve them)",
                     node.id, worker_name
                 ),
             );
         }
 
-        narrate(sink, format!(
-            "routed {} ({:?}) to {} [{}]",
-            node.id, node.role, worker_name, family_label(family)
-        ));
+        if attempt == 0 {
+            narrate(sink, format!(
+                "routed {} ({:?}) to {} [{}]",
+                node.id, node.role, worker_name, family_label(family)
+            ));
+        } else if let Some(error) = &last_error {
+            narrate(sink, format!(
+                "{} failed on {error}; switching to {} [{}]",
+                node.id, worker_name, family_label(family)
+            ));
+        }
         emit_engine(sink, EngineEvent::NodeStarted {
             id: node.id.clone(),
             worker: worker_name.clone(),
@@ -425,8 +436,7 @@ impl<'a> Engine<'a> {
         state.set_worker(&node.id, &worker_name)?;
         let iteration = state.incr_iteration(&node.id)?;
 
-        // Inject any pending critique from a loop-back into this node's context.
-        let critique = tracker.critiques.remove(&node.id);
+        // Reuse the same critique for every transport retry.
         self.blackboard.append_progress(&format!(
             "node {} → {} (iteration {iteration}){}",
             node.id,
@@ -454,7 +464,7 @@ impl<'a> Engine<'a> {
 
         let graph = self.blackboard.code_graph();
         let assembler = ContextAssembler::new(self.blackboard, &self.plan, graph);
-        let mut packet = assembler.build(node, family, critique)?;
+        let mut packet = assembler.build(node, family, critique.clone())?;
         packet.skill_text = self.skill_text(node);
         if let Ok(json) = serde_json::to_string_pretty(&packet) {
             let _ = self.blackboard.write_context(&node.id, &json);
@@ -487,7 +497,19 @@ impl<'a> Engine<'a> {
             mcp_servers: self.mcp_servers_for(node),
         };
 
-        let result = self.dispatch(worker.as_ref(), &node.id, request, sink, cancel).await?;
+        let result = match self.dispatch(worker.as_ref(), &node.id, request, sink, cancel).await {
+            Ok(result) => result,
+            Err(error) => {
+                last_error = Some(format!("{worker_name}: {error}"));
+                self.blackboard.append_progress(&format!(
+                    "node {} transport failed on {} ({error})", node.id, worker_name
+                ))?;
+                narrate(sink, format!(
+                    "{} transport failed on {} ({error})", node.id, worker_name
+                ));
+                continue;
+            }
+        };
         self.blackboard.write_transcript(&node.id, &result.transcript)?;
         self.persist_outputs(node, &result)?;
         state.record_usage(&node.id, &worker_name, &result.usage)?;
@@ -532,7 +554,21 @@ impl<'a> Engine<'a> {
             return self.park_named_gate(node, state, sink, gate).await;
         }
 
-        Ok(None)
+        return Ok(None);
+        }
+
+        state.set_status(&node.id, NodeStatus::Failed)?;
+        self.blackboard.append_progress(&format!(
+            "node {} failed after worker fallback exhaustion: {}",
+            node.id,
+            last_error.unwrap_or_else(|| "no worker could be dispatched".into())
+        ))?;
+        emit_engine(sink, EngineEvent::NodeFinished {
+            id: node.id.clone(),
+            status: NodeStatus::Failed,
+            tokens: 0,
+        });
+        Ok(Some(StopReason::NoCapableWorker(node.id.clone())))
     }
 
     /// Grade an evaluator node by dispatching to the matching `Evaluator` impl

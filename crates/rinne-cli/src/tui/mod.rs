@@ -1099,6 +1099,27 @@ impl App {
                     }
                 }
             }
+            "index" => {
+                // Reindexing the whole repo can be slow; run it off-thread and
+                // report the resulting stats to the feed, like `/mcp`.
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let tx = self.tx.clone();
+                self.push(FeedKind::System, "indexing repository…");
+                tokio::spawn(async move {
+                    let lines = tokio::task::spawn_blocking(move || {
+                        crate::commands::graph::run_lines(&[], &cwd)
+                    })
+                    .await
+                    .unwrap_or_else(|e| vec![format!("index failed: {e}")]);
+                    let _ = tx.send(AppMsg::Note(lines.join("\n")));
+                });
+            }
+            "graph" => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let args = split_args(&rest);
+                let lines = crate::commands::graph::run_lines(&args, &cwd);
+                self.push(FeedKind::System, lines.join("\n"));
+            }
             "steer" if !rest.is_empty() => self.resume_with(HumanDecision::Steer(rest)),
             "approve" => self.resume_with(HumanDecision::Approve),
             "reject" => self.resume_with(HumanDecision::Reject),
@@ -1512,8 +1533,14 @@ fn help_text() -> String {
         (2, "/config set <key> <value> · unset <key>               set / clear any field"),
         (2, "/config init · edit · path                            scaffold / open / locate the file"),
         (0, ""),
+        (0, "CODE GRAPH"),
+        (2, "/index                      reindex the repo's code graph now (.rinne/state.db)"),
+        (2, "/graph stats                symbol / edge / file counts"),
+        (2, "/graph symbols <file>       symbols defined in a file"),
+        (2, "/graph neighborhood <sym>   a symbol's callers and callees"),
+        (0, ""),
         (0, "SESSION"),
-        (2, "/learn <topic>              explain a subsystem as an HTML doc (.rinne/learn/)"),
+        (2, "/learn <topic>              explain a subsystem — a symbol, path, or plain description"),
         (2, "/logs                       where logs are written (.rinne/logs/)"),
         (2, "/clear                      wipe the screen and reset the session  (alias: /new, ctrl-l wipes only)"),
         (2, "/help                       this reference"),

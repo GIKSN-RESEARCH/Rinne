@@ -6,6 +6,7 @@
 //! so a node does not die because its preferred worker is unavailable
 //! (`CONTEXT.md` §7 key design decision).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::worker::{Capability, Worker, WorkerFamily};
@@ -103,8 +104,38 @@ impl WorkerRegistry {
         prefer: Option<&str>,
         needs_tools: bool,
     ) -> Option<(Arc<dyn Worker>, bool)> {
+        self.resolve_candidates(needs, prefer, needs_tools).into_iter().next()
+    }
+
+    /// All compatible workers in dispatch order, used when a worker's
+    /// transport fails and the engine needs a fallback.
+    pub fn resolve_candidates(
+        &self,
+        needs: &[Capability],
+        prefer: Option<&str>,
+        needs_tools: bool,
+    ) -> Vec<(Arc<dyn Worker>, bool)> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        let mut push = |worker: &Arc<dyn Worker>, tools_servable| {
+            if seen.insert(worker.descriptor().name.clone()) {
+                candidates.push((Arc::clone(worker), tools_servable));
+            }
+        };
+
         if !needs_tools {
-            return self.resolve(needs, prefer).map(|w| (w, true));
+            if let Some(pref) = prefer {
+                let want = parse_prefer(pref);
+                if let Some(worker) = self.workers.iter().find(|worker| {
+                    worker.descriptor().name == want && worker.descriptor().satisfies(needs)
+                }) {
+                    push(worker, true);
+                }
+            }
+            for worker in self.workers.iter().filter(|worker| worker.descriptor().satisfies(needs)) {
+                push(worker, true);
+            }
+            return candidates;
         }
         // The preferred worker, if it both satisfies needs and serves tools.
         if let Some(pref) = prefer {
@@ -114,21 +145,26 @@ impl WorkerRegistry {
                     && w.descriptor().satisfies(needs)
                     && w.serves_mcp_tools()
             }) {
-                return Some((Arc::clone(w), true));
+                push(w, true);
             }
         }
         // Any needs-satisfier that can serve the tools.
-        if let Some(w) = self
+        for worker in self
             .workers
             .iter()
-            .find(|w| w.descriptor().satisfies(needs) && w.serves_mcp_tools())
+            .filter(|worker| worker.descriptor().satisfies(needs) && worker.serves_mcp_tools())
         {
-            return Some((Arc::clone(w), true));
+            push(worker, true);
         }
-        // Degraded: a capable worker for the needs exists, but none can run the
-        // tools. Run it anyway (the tools just won't be available) and let the
-        // caller surface that.
-        self.resolve(needs, prefer).map(|w| (w, false))
+        // Workers that cannot serve tools are a last resort.
+        for worker in self
+            .workers
+            .iter()
+            .filter(|worker| worker.descriptor().satisfies(needs) && !worker.serves_mcp_tools())
+        {
+            push(worker, false);
+        }
+        candidates
     }
 }
 
@@ -237,5 +273,20 @@ mod tests {
             .resolve_for(&needs, Some("harness:claude"), true)
             .unwrap();
         assert_eq!(w.descriptor().name, "claude");
+    }
+
+    #[test]
+    fn candidates_keep_all_compatible_workers_in_failover_order() {
+        let mut reg = WorkerRegistry::new();
+        reg.register(fake("harness", WorkerFamily::Harness, false));
+        reg.register(fake("api", WorkerFamily::Api, true));
+
+        let names: Vec<_> = reg
+            .resolve_candidates(&[Capability::CodeEdit], None, true)
+            .into_iter()
+            .map(|(worker, tools_servable)| (worker.descriptor().name.clone(), tools_servable))
+            .collect();
+
+        assert_eq!(names, vec![("api".into(), true), ("harness".into(), false)]);
     }
 }

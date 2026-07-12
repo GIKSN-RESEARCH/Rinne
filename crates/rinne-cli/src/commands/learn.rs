@@ -137,18 +137,52 @@ async fn explain_with_progress(
         bb.index_repo();
     }
 
+    let workspace = bb.workspace().to_path_buf();
+
+    // Build the worker registry up front: it drives both the AI fallback for
+    // resolving a free-form query and the later narration. Degrades to an empty
+    // registry (template-only, deterministic-only) when there's no config or no
+    // available worker — neither path errors out.
+    let (registry, _) = match rinne_config::load_cwd() {
+        Ok(cfg) => crate::runner::build_registry(&cfg)
+            .await
+            .unwrap_or_else(|_| (WorkerRegistry::new(), vec![])),
+        Err(_) => (WorkerRegistry::new(), vec![]),
+    };
+
     // Resolve the cluster — clone the Arc so we don't hold a borrow of bb.
+    // Literal/per-word matching first; on a miss, fall back to letting a worker
+    // pick relevant symbols from the graph so a plain description still resolves.
     let cluster: Cluster = {
         let Some(arc_g) = bb.concrete_graph() else {
             anyhow::bail!("code graph unavailable");
         };
-        crate::learn::resolve::resolve_cluster(arc_g.as_ref(), &topic, 40)
+        let g = arc_g.as_ref();
+        let mut c = crate::learn::resolve::resolve_cluster(g, &topic, 40);
+
+        if c.symbols.is_empty() && !no_ai && !registry.is_empty() {
+            on_progress("no literal match — asking AI to find relevant code…".to_string());
+            let known = g.symbol_names();
+            let picked = crate::learn::translate::ai_pick_symbols(
+                no_ai, &registry, &workspace, &topic, &known,
+            )
+            .await;
+            if !picked.is_empty() {
+                c = crate::learn::resolve::cluster_from_seeds(g, &topic, &picked, 40);
+            }
+        }
+        c
     };
 
     if cluster.symbols.is_empty() {
-        return Ok(vec![format!(
-            "no code found for topic `{topic}`. try a symbol or path fragment."
-        )]);
+        let hint = if registry.is_empty() {
+            "no code found for topic `{topic}`. try a symbol or path fragment, \
+             or connect a worker so `learn` can resolve plain descriptions."
+        } else {
+            "no code found for topic `{topic}`. try a symbol, path fragment, or \
+             a more specific description."
+        };
+        return Ok(vec![hint.replace("{topic}", &topic)]);
     }
 
     on_progress(format!(
@@ -163,7 +197,6 @@ async fn explain_with_progress(
         bb.reindex_file(&cwd.join(f));
     }
 
-    let workspace = bb.workspace().to_path_buf();
     let (snippets, doc_sections) = crate::learn::source::assemble(&workspace, &cluster);
 
     // Build flow pairs — get Arc, coerce to trait object, compute, drop.
@@ -177,16 +210,6 @@ async fn explain_with_progress(
         snippets,
         flow,
         doc_sections,
-    };
-
-    // Build the translator, degrading gracefully when there is no config or
-    // no available workers. Both --no-ai and the no-worker path produce
-    // template-only HTML and never error out.
-    let (registry, _) = match rinne_config::load_cwd() {
-        Ok(cfg) => crate::runner::build_registry(&cfg)
-            .await
-            .unwrap_or_else(|_| (WorkerRegistry::new(), vec![])),
-        Err(_) => (WorkerRegistry::new(), vec![]),
     };
 
     // The AI phase is the slow one; narrate its start before awaiting so the
