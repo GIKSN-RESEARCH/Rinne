@@ -62,10 +62,12 @@ fn infer_node_tier(node: &Node, floor: ComplexityTier) -> ComplexityTier {
 }
 
 fn apply_tier_defaults(node: &mut Node, tier: ComplexityTier, workers: &[WorkerDescriptor]) {
-    if tier >= ComplexityTier::T4 && node.checkpoint.is_none() && node.evaluator != Some(EvaluatorKind::Human) {
-        if matches!(node.role, Role::Generator | Role::Synthesizer) {
-            node.checkpoint = Some(rinne_core::dag::Checkpoint::After);
-        }
+    if tier >= ComplexityTier::T4
+        && node.checkpoint.is_none()
+        && node.evaluator != Some(EvaluatorKind::Human)
+        && matches!(node.role, Role::Generator | Role::Synthesizer)
+    {
+        node.checkpoint = Some(rinne_core::dag::Checkpoint::After);
     }
 
     if node.model.is_some() {
@@ -83,11 +85,12 @@ fn apply_tier_defaults(node: &mut Node, tier: ComplexityTier, workers: &[WorkerD
         return;
     }
 
+    // Ladder is cheap → strong. T2 sits one below the frontier when possible;
+    // T3+ takes the frontier (T4 also gets a checkpoint gate).
     let idx = match tier {
         ComplexityTier::T0 | ComplexityTier::T1 => 0,
-        ComplexityTier::T2 => ladder.len().saturating_sub(2).max(0),
-        ComplexityTier::T3 => ladder.len().saturating_sub(2).max(0),
-        ComplexityTier::T4 => ladder.len().saturating_sub(1),
+        ComplexityTier::T2 => ladder.len().saturating_sub(2),
+        ComplexityTier::T3 | ComplexityTier::T4 => ladder.len().saturating_sub(1),
     };
     node.model = ladder.get(idx).or_else(|| ladder.last()).cloned();
 }
@@ -273,5 +276,39 @@ mod tests {
         let errs = apply_routing(&mut plan, &input, &class);
         assert!(errs.is_empty() || !errs.is_empty()); // routing may warn
         assert_eq!(plan.nodes[0].checkpoint, Some(rinne_core::dag::Checkpoint::After));
+    }
+
+    #[test]
+    fn t2_model_is_below_t3_on_a_three_rung_ladder() {
+        use rinne_core::worker::{
+            AuthMode, LatencyProfile, QuotaModel, Transport, WorkerFamily,
+        };
+
+        let desc = vec![WorkerDescriptor {
+            name: "w".into(),
+            family: WorkerFamily::Api,
+            capabilities: vec![],
+            auth_mode: AuthMode::ApiKey,
+            quota: QuotaModel::unlimited(),
+            latency: LatencyProfile::Fast,
+            transport: Transport::Http,
+            models: vec!["cheap".into(), "mid".into(), "strong".into()],
+        }];
+        let mut n2 = Node {
+            id: "a".into(),
+            role: Role::Generator,
+            instruction: "x".into(),
+            ..default_node()
+        };
+        let mut n3 = Node {
+            id: "b".into(),
+            role: Role::Generator,
+            instruction: "x".into(),
+            ..default_node()
+        };
+        apply_tier_defaults(&mut n2, ComplexityTier::T2, &desc);
+        apply_tier_defaults(&mut n3, ComplexityTier::T3, &desc);
+        assert_eq!(n2.model.as_deref(), Some("mid"));
+        assert_eq!(n3.model.as_deref(), Some("strong"));
     }
 }
