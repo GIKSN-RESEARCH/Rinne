@@ -64,6 +64,9 @@ pub struct EngineOptions {
     pub mcp_servers: HashMap<String, McpServerSpec>,
     /// Named review gates from `/human checkpoint` (active session overlay).
     pub gates: Vec<NamedCheckpoint>,
+    /// When set (e.g. via `/human evaluator tool|ai|human`), overrides each
+    /// evaluator node's kind at grade time.
+    pub evaluator_kind_override: Option<EvaluatorKind>,
 }
 
 impl Default for EngineOptions {
@@ -83,6 +86,7 @@ impl Default for EngineOptions {
             tool_specs: HashMap::new(),
             mcp_servers: HashMap::new(),
             gates: Vec::new(),
+            evaluator_kind_override: None,
         }
     }
 }
@@ -140,7 +144,12 @@ pub struct RunReport {
 pub enum EngineEvent {
     NodeStarted { id: String, worker: String },
     NodeStream { id: String, event: WorkerEvent },
-    NodeFinished { id: String, status: NodeStatus },
+    NodeFinished {
+        id: String,
+        status: NodeStatus,
+        /// Tokens recorded for this node (prompt + completion).
+        tokens: u64,
+    },
     Narration(String),
     /// A node parked awaiting the user, with the sharp question to answer.
     Parked { id: String, question: String },
@@ -474,7 +483,14 @@ impl<'a> Engine<'a> {
             "node {} {} ({} tok, {} ms)",
             node.id, status.label(), result.usage.total_tokens(), result.usage.wall_ms
         ))?;
-        emit_engine(sink, EngineEvent::NodeFinished { id: node.id.clone(), status });
+        emit_engine(
+            sink,
+            EngineEvent::NodeFinished {
+                id: node.id.clone(),
+                status,
+                tokens: result.usage.total_tokens(),
+            },
+        );
 
         if result.status == ExecStatus::Cancelled {
             return Ok(Some(StopReason::Cancelled));
@@ -513,11 +529,15 @@ impl<'a> Engine<'a> {
     ) -> Result<Gate> {
         state.set_status(&node.id, NodeStatus::Running)?;
         state.incr_iteration(&node.id)?;
-        let kind = node.evaluator.unwrap_or(EvaluatorKind::Tool);
+        let kind = self
+            .options
+            .evaluator_kind_override
+            .or(node.evaluator)
+            .unwrap_or(EvaluatorKind::Tool);
 
         // The test ratchet runs first: a diff that deletes tests fails the gate
         // regardless of what the tests say (`CONTEXT.md` §12).
-        if node.test_ratchet || (self.options.test_ratchet && node.evaluator == Some(EvaluatorKind::Tool)) {
+        if node.test_ratchet || (self.options.test_ratchet && kind == EvaluatorKind::Tool) {
             if let Some(verdict) = self.ratchet_block(node) {
                 self.blackboard
                     .append_progress(&format!("eval {} BLOCKED by test ratchet", node.id))?;
@@ -637,7 +657,8 @@ impl<'a> Engine<'a> {
         let Some(node) = self.plan.node(target_id) else {
             return;
         };
-        let Some(worker) = self.registry.resolve(&node.needs, node.prefer.as_deref()) else {
+        let prefer = self.effective_prefer(node);
+        let Some(worker) = self.registry.resolve(&node.needs, prefer.as_deref()) else {
             return;
         };
         let name = worker.descriptor().name.clone();
@@ -884,26 +905,33 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    /// Soft worker preference for dispatch: the node's own `prefer`, then a
-    /// per-role pin from config or `/human` (`CONDUCTOR_LOOP_PLAN.md` §4).
+    /// Worker preference for dispatch: a per-role pin from config or `/human`
+    /// is a hard pin and wins over the node's own `prefer` (`CONDUCTOR_LOOP_PLAN.md`
+    /// §3.8 / §4.4). Without a pin, fall back to the conductor's node-level prefer.
     fn effective_prefer(&self, node: &Node) -> Option<String> {
-        if let Some(p) = &node.prefer {
+        let role = format!("{:?}", node.role).to_lowercase();
+        if let Some(p) = self.options.role_prefers.get(&role) {
             return Some(p.clone());
         }
-        let role = format!("{:?}", node.role).to_lowercase();
-        self.options.role_prefers.get(&role).cloned()
+        node.prefer.clone()
     }
 
-    /// Resolve the model to run for a node, in precedence order: the node's own
-    /// model (conductor's choice), then the per-role config default, then the
-    /// per-worker config default. `None` means the harness default
-    /// (`CONTEXT.md` §7 cost/latency optimization).
+    /// Resolve the model to run for a node, in precedence order:
+    /// 1. per-role pin (`/human generator … model`, `preferences.models`)
+    /// 2. per-worker config (`[models].by_worker`)
+    /// 3. the node's own model (conductor / routing ladder)
+    ///
+    /// Hard pins **override** the conductor so a user-set model is never replaced
+    /// by a stale catalog id like a retired `grok-build` rung.
+    /// `None` means the harness default (`CONTEXT.md` §7).
     fn resolve_model(&self, node: &Node, worker_name: &str) -> Option<String> {
         let role = format!("{:?}", node.role).to_lowercase();
-        node.model
-            .clone()
-            .or_else(|| self.options.role_models.get(&role).cloned())
+        self.options
+            .role_models
+            .get(&role)
+            .cloned()
             .or_else(|| self.options.worker_models.get(worker_name).cloned())
+            .or_else(|| node.model.clone())
     }
 
     /// The combined instruction text of a node's attached skills (`MCP_SKILLS.md`
@@ -953,10 +981,13 @@ impl<'a> Engine<'a> {
     }
 
     /// Validate a candidate model against the worker that will run the node.
-    /// A model belongs to a specific worker (Claude's are opus/sonnet/haiku;
-    /// an NVIDIA worker's is `deepseek-ai/…`), so a model the worker doesn't
-    /// advertise is dropped — the worker uses its default — rather than passed
-    /// through and rejected. A worker with no advertised models accepts any.
+    ///
+    /// Catalogs go stale when harnesses rename models, and users pin ids via
+    /// `/human` / `[models]` that may not yet be in the static ladder. So:
+    /// - empty catalog → accept any id (worker default / CLI validates)
+    /// - id in catalog → accept
+    /// - id not in catalog → **still pass through** with a soft warning (do not
+    ///   silently drop user pins; the CLI is the source of truth)
     fn valid_model_for(
         &self,
         candidate: Option<String>,
@@ -965,15 +996,18 @@ impl<'a> Engine<'a> {
         sink: &Option<EngineSink>,
     ) -> Option<String> {
         match candidate {
-            Some(m) if descriptor.models.is_empty() || descriptor.models.iter().any(|wm| *wm == m) => {
+            Some(m) if descriptor.models.is_empty() || descriptor.models.contains(&m) => {
                 Some(m)
             }
             Some(m) => {
                 narrate(
                     sink,
-                    format!("model `{m}` isn't available on {worker_name} — using its default model"),
+                    format!(
+                        "model `{m}` isn't in {worker_name}'s catalog yet — trying it anyway \
+                         (harness CLIs rename models; use `/limit-usage`/`grok models` to refresh)"
+                    ),
                 );
-                None
+                Some(m)
             }
             None => None,
         }
@@ -1038,9 +1072,14 @@ impl<'a> Engine<'a> {
     fn is_parallel_evaluator(&self, node: &Node) -> bool {
         let is_eval =
             node.evaluator.is_some() || matches!(node.role, crate::worker::Role::Evaluator);
+        let kind = self
+            .options
+            .evaluator_kind_override
+            .or(node.evaluator)
+            .unwrap_or(EvaluatorKind::Tool);
         is_eval
             && node.checkpoint != Some(Checkpoint::Before)
-            && node.evaluator != Some(EvaluatorKind::Human)
+            && kind != EvaluatorKind::Human
             && !node.needs.contains(&crate::worker::Capability::CodeEdit)
     }
 
@@ -1108,10 +1147,14 @@ impl<'a> Engine<'a> {
                 state.set_status(&node.id, NodeStatus::Succeeded)?;
                 self.blackboard
                     .append_progress(&format!("eval {} PASS", node.id))?;
-                emit_engine(sink, EngineEvent::NodeFinished {
-                    id: node.id.clone(),
-                    status: NodeStatus::Succeeded,
-                });
+                emit_engine(
+                    sink,
+                    EngineEvent::NodeFinished {
+                        id: node.id.clone(),
+                        status: NodeStatus::Succeeded,
+                        tokens: 0,
+                    },
+                );
                 Ok(None)
             }
             Gate::Park { question } => {
@@ -1226,7 +1269,10 @@ impl EvalContext for GradeCtx<'_, '_> {
     async fn run_ai(&self, node: &Node, extra_instruction: &str) -> Result<Option<String>> {
         let e = self.engine;
         let sink = self.sink;
-        let Some(worker) = e.registry.resolve(&node.needs, node.prefer.as_deref()) else {
+        // Honor `preferences.roles.evaluator` / `/human evaluator` hard pins —
+        // same resolution path as generator dispatch.
+        let prefer = e.effective_prefer(node);
+        let Some(worker) = e.registry.resolve(&node.needs, prefer.as_deref()) else {
             return Ok(None);
         };
         let worker_name = worker.descriptor().name.clone();
