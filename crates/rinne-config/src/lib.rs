@@ -7,6 +7,7 @@
 
 pub mod cache;
 pub mod known;
+pub mod limits;
 pub mod load;
 pub mod model;
 pub mod paths;
@@ -16,8 +17,12 @@ pub mod skills;
 pub mod update;
 pub mod write;
 
+pub use limits::{
+    probe_limits, AlertState, ChipSeverity, LimitKnowledge, LimitReport, LimitWindow, WorkerLimit,
+    DEFAULT_ALERT_THRESHOLDS,
+};
 pub use load::{load, load_cwd};
-pub use model::Config;
+pub use model::{Config, LimitsConfig};
 pub use probe::{AuthMode, DoctorReport, WorkerFamily, WorkerProbe, WorkerStatus};
 
 use rinne_core::Result;
