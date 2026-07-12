@@ -2,7 +2,7 @@
 
 **Local, open-source, terminal-first AI orchestration.**
 
-### Crates Version - 0.1.7
+### Crates Version - 0.1.8
 
 Rinne is a CLI harness you talk to directly. You tell it what you want done; it plans the work into a graph, distributes that work across the AI coding tools and model APIs already on your machine, and drives it to completion through a verifying generator–evaluator loop. You never open Claude Code, Codex, Grok, or OpenCode yourself — you live in Rinne, and it reaches down to those tools as workers.
 
@@ -722,7 +722,7 @@ The architecture has a deliberate constraint worth knowing: SQLite connections a
 Releases are **tag-triggered**: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the `rinne` binary for macOS (arm64 + x86_64), Linux (x86_64), and Windows (x86_64), then publishes a GitHub Release with the archives, `.sha256` checksums, and **auto-generated, categorized notes** (see `.github/release.yml`).
 
 ```bash
-# 1. Bump the version in the workspace Cargo.toml first (e.g. 0.1.6 → 0.1.7),
+# 1. Bump the version in the workspace Cargo.toml first (e.g. 0.1.7 → 0.1.8),
 #    in BOTH [workspace.package].version and the internal rinne-* dep versions.
 #    Commit that bump and merge it to main.
 
@@ -730,22 +730,22 @@ Releases are **tag-triggered**: pushing a `v*` tag runs `.github/workflows/relea
 git checkout main && git pull
 
 # 3. Tag with `v` + the Cargo.toml version, then push the tag:
-git tag -a v0.1.7 -m "Rinne v0.1.7"
-git push origin v0.1.7        # this fires the release workflow
+git tag -a v0.1.8 -m "Rinne v0.1.8"
+git push origin v0.1.8        # this fires the release workflow
 ```
 
 The tag name **must** match the convention `v<version>` — the workflow only triggers on `v*`, and the tag should equal the `Cargo.toml` version. Pushing the tag requires push access to this repository.
 
 Alternatives:
 
-- **GitHub web UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.1.7` → *Create new tag on publish* → *Publish*.
+- **GitHub web UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.1.8` → *Create new tag on publish* → *Publish*.
 - **Manual run (no tag from your machine):** Actions → *release* → *Run workflow* → enter the tag. The workflow's `workflow_dispatch` input handles this.
 
 To redo a botched release, delete the tag and the GitHub Release, then re-tag:
 
 ```bash
-git push origin :refs/tags/v0.1.7   # delete the remote tag
-git tag -d v0.1.7                    # delete the local tag
+git push origin :refs/tags/v0.1.8   # delete the remote tag
+git tag -d v0.1.8                    # delete the local tag
 # fix, re-tag, push again
 ```
 
