@@ -38,11 +38,44 @@ pub async fn run() -> Result<()> {
 
     let usage = state.total_usage()?;
     println!(
-        "\n{} iterations · {} tokens · {} ms",
+        "\n{} iterations · {} tok (in {} · out {}) · {} ms",
         state.total_iterations()?,
-        usage.total_tokens(),
+        rinne_core::format_token_count(usage.total_tokens()),
+        rinne_core::format_token_count(usage.prompt_tokens),
+        rinne_core::format_token_count(usage.completion_tokens),
         usage.wall_ms
     );
+
+    // Per-worker breakdown from the ledger (so Grok/API spend is visible).
+    if let Ok(rows) = state.usage_rows() {
+        if !rows.is_empty() {
+            use std::collections::BTreeMap;
+            let mut by_worker: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+            for r in &rows {
+                let w = if r.worker.is_empty() {
+                    "(unknown)".into()
+                } else {
+                    r.worker.clone()
+                };
+                let e = by_worker.entry(w).or_default();
+                e.0 += r.prompt_tokens;
+                e.1 += r.completion_tokens;
+                e.2 += r.wall_ms;
+            }
+            println!("\nTOKENS BY WORKER");
+            for (w, (inp, out, ms)) in by_worker {
+                let total = inp + out;
+                println!(
+                    "  {:<14} {:>8} tok  (in {} · out {})  · {} ms",
+                    w,
+                    rinne_core::format_token_count(total),
+                    rinne_core::format_token_count(inp),
+                    rinne_core::format_token_count(out),
+                    ms
+                );
+            }
+        }
+    }
 
     // Surface a parked run so the user knows it's waiting on them.
     let parked: Vec<&str> = plan
