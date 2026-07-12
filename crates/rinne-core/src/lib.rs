@@ -11,11 +11,11 @@ pub use rinne_types::error::{Result, RinneError};
 pub use rinne_types::replanner::Replanner;
 pub use rinne_types::{dag, error, replanner, worker};
 pub use rinne_types::{
-    AuthMode, Capability, CheckpointTrigger, Constraints, ContextPacket, EventSink, ExecStatus,
-    ExecuteRequest, ExecuteResult, HumanSession, InlinedFile, LatencyProfile, McpServerSpec,
-    McpTransportKind, NamedCheckpoint, NodeStatus, QuotaModel, Role, RolePins, Skill, ToolExecutor,
-    ToolSpec, Transport, Usage, Worker, WorkerDescriptor, WorkerEvent, WorkerFamily,
-    BLACKBOARD_DIR, GATE_ACTIVE_KEY, HUMAN_SESSION_FILE,
+    format_token_count, AuthMode, Capability, CheckpointTrigger, Constraints, ContextPacket,
+    EventSink, ExecStatus, ExecuteRequest, ExecuteResult, HumanSession, InlinedFile,
+    LatencyProfile, McpServerSpec, McpTransportKind, NamedCheckpoint, NodeStatus, QuotaModel, Role,
+    RolePins, Skill, ToolExecutor, ToolSpec, Transport, Usage, Worker, WorkerDescriptor,
+    WorkerEvent, WorkerFamily, BLACKBOARD_DIR, GATE_ACTIVE_KEY, HUMAN_SESSION_FILE,
 };
 
 // The loop engine. Re-export so existing `rinne_core::Engine`, `rinne_core::pool`,
