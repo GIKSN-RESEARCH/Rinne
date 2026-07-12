@@ -11,6 +11,9 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rinne_graph::{indexer::Indexer, Graph};
 
 use crate::dag::Plan;
 use crate::state::{NodeStatus, State, UsageRow};
@@ -30,21 +33,79 @@ pub struct Blackboard {
     workspace: PathBuf,
     /// Machine state (node statuses, iteration counts, budget ledger).
     state: State,
+    /// Code graph backed by the same `state.db`. `None` when `--no-graph`.
+    graph: Option<Arc<Graph>>,
+    /// Walks the workspace and keeps the graph fresh on-demand.
+    indexer: Option<Indexer>,
 }
 
 impl Blackboard {
-    /// Open (creating the directory tree if needed) the blackboard for a repo.
+    /// Open (creating the directory tree if needed) the blackboard for a repo,
+    /// with the code graph enabled (default).
     pub fn open(workspace: &Path) -> Result<Self> {
+        Self::open_with(workspace, true)
+    }
+
+    /// Open the blackboard, optionally enabling the code graph.
+    /// Pass `enable_graph = false` when `--no-graph` is requested.
+    pub fn open_with(workspace: &Path, enable_graph: bool) -> Result<Self> {
         let root = workspace.join(BLACKBOARD_DIR);
         for sub in ["", "context", "artifacts", "transcripts"] {
             std::fs::create_dir_all(root.join(sub))?;
         }
-        let state = State::open(&root.join("state.db"))?;
+        let db_path = root.join("state.db");
+        let state = State::open(&db_path)?;
+
+        let (graph, indexer) = if enable_graph {
+            match Graph::open(&db_path, workspace) {
+                Ok(g) => {
+                    let g = Arc::new(g);
+                    let idx = Indexer::spawn(Arc::clone(&g), workspace.to_path_buf());
+                    (Some(g), Some(idx))
+                }
+                Err(e) => {
+                    tracing::warn!("blackboard: failed to open code graph: {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             root,
             workspace: workspace.to_path_buf(),
             state,
+            graph,
+            indexer,
         })
+    }
+
+    /// Returns `true` when the code graph is active.
+    pub fn graph_enabled(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// Returns the concrete `Graph` handle for CLI inspection commands
+    /// (`rinne graph stats/symbols/neighborhood`). Returns `None` when the
+    /// graph is disabled (`--no-graph`) or failed to open.
+    pub fn concrete_graph(&self) -> Option<Arc<Graph>> {
+        self.graph.clone()
+    }
+
+    /// Synchronously re-index a single file against the code graph.
+    /// A no-op when the graph is not enabled.
+    pub fn reindex_file(&self, abs: &Path) {
+        if let Some(idx) = &self.indexer {
+            idx.ensure_now(abs);
+        }
+    }
+
+    /// Synchronously index the whole repo into the code graph, returning the
+    /// number of files indexed. Powers `rinne graph index`. Returns `0` when the
+    /// graph is disabled (`--no-graph`).
+    pub fn index_repo(&self) -> usize {
+        self.indexer.as_ref().map(|idx| idx.index_all()).unwrap_or(0)
     }
 
     /// Whether a blackboard already exists for a repo (i.e. there is a plan to
@@ -254,6 +315,12 @@ impl rinne_types::Blackboard for Blackboard {
     fn meta(&self, key: &str) -> Result<Option<String>> {
         Blackboard::meta(self, key)
     }
+    fn code_graph(&self) -> Option<&dyn rinne_types::graph::CodeGraph> {
+        self.graph.as_deref().map(|g| g as &dyn rinne_types::graph::CodeGraph)
+    }
+    fn reindex_file(&self, abs: &Path) {
+        Blackboard::reindex_file(self, abs)
+    }
 }
 
 /// Convenience for the binary boundary: a not-found plan maps to a clear error.
@@ -274,4 +341,27 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod graph_wiring {
+    use super::*;
+
+    #[test]
+    fn blackboard_exposes_code_graph() {
+        let dir = std::env::temp_dir().join(format!("rinne-bb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // graph enabled: graph_enabled() and trait code_graph() must agree.
+        let bb = Blackboard::open(&dir).unwrap();
+        let via_trait = (&bb as &dyn rinne_types::Blackboard).code_graph();
+        assert_eq!(bb.graph_enabled(), via_trait.is_some());
+
+        // graph disabled: must return None, never panic.
+        let bb_no_graph = Blackboard::open_with(&dir, false).unwrap();
+        assert!(!bb_no_graph.graph_enabled());
+        assert!((&bb_no_graph as &dyn rinne_types::Blackboard).code_graph().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+rinne-types.workspace = true
 rinne-core.workspace = true
 rinne-workers.workspace = true
 rinne-config.workspace = true

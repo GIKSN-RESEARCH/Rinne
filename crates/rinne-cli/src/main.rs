@@ -6,6 +6,7 @@
 mod catalog;
 mod cli;
 mod commands;
+mod learn;
 mod mcp_pool;
 mod runner;
 mod telemetry;
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, GraphCmd as CliGraphCmd, LearnCmd as CliLearnCmd};
 use rinne_core::BLACKBOARD_DIR;
 
 #[tokio::main]
@@ -32,6 +33,10 @@ async fn main() -> Result<()> {
 
     let blackboard = PathBuf::from(BLACKBOARD_DIR);
     let _log_guard = telemetry::init(&blackboard, args.verbose);
+
+    let no_graph = args.no_graph;
+    let no_ai = args.no_ai;
+    let open = args.open;
 
     // `--continue` resumes the prior orchestration session from disk. It is
     // mutually exclusive with a fresh `-p` plan (use one or the other).
@@ -53,7 +58,7 @@ async fn main() -> Result<()> {
 
     // A `-p` prompt means one-shot headless mode regardless of subcommand.
     if let Some(task) = args.prompt.as_deref() {
-        return run_oneshot(task, args.json).await;
+        return run_oneshot(task, args.json, no_graph).await;
     }
 
     // Best-effort new-release banner; never blocks or fails a command. Skipped
@@ -65,9 +70,9 @@ async fn main() -> Result<()> {
     }
 
     match args.command {
-        None => run_interactive().await,
+        None => run_interactive(no_graph).await,
         Some(Command::Doctor { routing }) => commands::doctor::run(false, routing).await,
-        Some(Command::Run { plan }) => commands::run::run(&plan).await,
+        Some(Command::Run { plan }) => commands::run::run(&plan, no_graph).await,
         Some(Command::Connect { backend, key, models, base_url, add }) => {
             commands::connect::run(&backend, key, models, base_url, add).await
         }
@@ -82,11 +87,30 @@ async fn main() -> Result<()> {
             steer,
             approve,
             reject,
-        }) => commands::run::resume(steer, approve, reject).await,
+        }) => commands::run::resume(steer, approve, reject, no_graph).await,
         Some(Command::Config { args }) => commands::config::run(&args).await,
         Some(Command::Mcp { args }) => commands::mcp::run(&args).await,
         Some(Command::Skill { args }) => commands::skill::run(&args).await,
         Some(Command::Logs) => run_logs().await,
+        Some(Command::Graph { cmd }) => {
+            let cwd = std::env::current_dir()?;
+            let graph_cmd = match cmd {
+                CliGraphCmd::Index => commands::graph::GraphCmd::Index,
+                CliGraphCmd::Stats => commands::graph::GraphCmd::Stats,
+                CliGraphCmd::Symbols { file } => commands::graph::GraphCmd::Symbols { file },
+                CliGraphCmd::Neighborhood { symbol } => commands::graph::GraphCmd::Neighborhood { symbol },
+            };
+            commands::graph::run(graph_cmd, cwd).await
+        }
+        Some(Command::Learn { cmd }) => {
+            let cwd = std::env::current_dir()?;
+            let learn_cmd = match cmd {
+                CliLearnCmd::Explain { topic } => {
+                    commands::learn::LearnCmd::Explain { topic }
+                }
+            };
+            commands::learn::run(learn_cmd, cwd, no_ai, open).await
+        }
         Some(Command::Human { args }) => run_human(&args).await,
         Some(Command::LimitUsage) => commands::limits::run().await,
         Some(Command::Open { path }) => commands::open_gui::run(Some(path.as_str())).await,
@@ -107,12 +131,12 @@ fn intercept_folder_open(args: impl Iterator<Item = String>) -> Option<String> {
     }
 }
 
-async fn run_interactive() -> Result<()> {
-    tui::run().await
+async fn run_interactive(no_graph: bool) -> Result<()> {
+    tui::run(no_graph).await
 }
 
-async fn run_oneshot(task: &str, json: bool) -> Result<()> {
-    commands::run::oneshot(task, json).await
+async fn run_oneshot(task: &str, json: bool, no_graph: bool) -> Result<()> {
+    commands::run::oneshot(task, json, no_graph).await
 }
 
 

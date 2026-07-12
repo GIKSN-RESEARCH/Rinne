@@ -8,20 +8,6 @@ use std::path::{Path, PathBuf};
 
 use notify::{RecursiveMode, Watcher};
 
-/// Directory names never worth indexing.
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".rinne",
-    "target",
-    "node_modules",
-    ".next",
-    "dist",
-    "build",
-    ".venv",
-    "venv",
-    "__pycache__",
-];
-
 /// A flat list of repo-relative file paths for fuzzy matching.
 pub struct FileIndex {
     root: PathBuf,
@@ -66,7 +52,7 @@ fn scan(root: &Path) -> Vec<String> {
             let name = name.to_string_lossy();
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
-                if SKIP_DIRS.contains(&name.as_ref()) || name.starts_with('.') {
+                if rinne_types::skip::is_skipped_dir(&name) {
                     continue;
                 }
                 stack.push(path);

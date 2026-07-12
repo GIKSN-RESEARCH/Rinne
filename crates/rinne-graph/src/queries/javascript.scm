@@ -1,0 +1,6 @@
+(function_declaration name: (identifier) @def.function)
+(method_definition name: (property_identifier) @def.method)
+(class_declaration name: (identifier) @def.class)
+(import_statement source: (string) @import.path)
+(call_expression function: (identifier) @call.callee)
+(call_expression function: (member_expression property: (property_identifier) @call.callee))

@@ -39,6 +39,19 @@ pub struct Cli {
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
+    /// Disable the code graph for this run (faster startup; skips indexing).
+    /// Also useful as a benchmark toggle to measure graph overhead.
+    #[arg(long, global = true)]
+    pub no_graph: bool,
+
+    /// Skip AI narration for `learn explain` (template-only HTML, no worker needed).
+    #[arg(long, global = true)]
+    pub no_ai: bool,
+
+    /// Print an 'open in browser' hint with the output path (learn explain).
+    #[arg(long, global = true)]
+    pub open: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -180,6 +193,24 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// Inspect the local code graph (symbols, call edges, file coverage).
+    ///
+    /// Subcommands: `stats`, `symbols <file>`, `neighborhood <symbol>`.
+    /// Reads from `.rinne/state.db`; does not require a running plan.
+    Graph {
+        #[command(subcommand)]
+        cmd: GraphCmd,
+    },
+
+    /// Synthesise a code-literacy document for a topic or symbol.
+    ///
+    /// Subcommands: `explain <topic>` — resolves symbols, assembles snippets,
+    /// optionally narrates with an AI worker, and writes `.rinne/learn/<topic>.html`.
+    Learn {
+        #[command(subcommand)]
+        cmd: LearnCmd,
+    },
+
     /// Open the Rinne macOS app on a folder (like `code .` for VS Code).
     ///
     /// Examples:
@@ -234,3 +265,39 @@ mod tests {
         );
     }
 }
+
+/// Subcommands for `rinne learn`.
+#[derive(Debug, Subcommand)]
+pub enum LearnCmd {
+    /// Explain a topic: resolve related symbols, assemble code snippets,
+    /// optionally narrate with an AI worker, and write an HTML document.
+    Explain {
+        /// The topic, symbol name, or path fragment to explain.
+        topic: String,
+    },
+}
+
+/// Subcommands for `rinne graph`.
+#[derive(Debug, Subcommand)]
+pub enum GraphCmd {
+    /// Index (or re-index) the whole repo into the code graph now, then report
+    /// how many files were indexed. Runs synchronously; useful for populating
+    /// and inspecting the graph without starting a full run.
+    Index,
+
+    /// Show indexed file, symbol, and edge counts.
+    Stats,
+
+    /// List all symbols indexed from a given file.
+    Symbols {
+        /// Path to the file (relative to workspace root or absolute).
+        file: String,
+    },
+
+    /// Show the neighborhood (callers, callees, imports) of a symbol.
+    Neighborhood {
+        /// Exact symbol name to look up.
+        symbol: String,
+    },
+}
+

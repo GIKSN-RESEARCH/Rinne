@@ -377,10 +377,10 @@ impl<'a> Engine<'a> {
         // prefers a worker that can actually serve them.
         let needs_tools = !node.tools.is_empty();
         let prefer = self.effective_prefer(node);
-        let Some((worker, tools_servable)) =
-            self.registry
-                .resolve_for(&node.needs, prefer.as_deref(), needs_tools)
-        else {
+        let candidates = self
+            .registry
+            .resolve_candidates(&node.needs, prefer.as_deref(), needs_tools);
+        let Some(_) = candidates.first() else {
             // Unsatisfiable node: never silently assign an incapable worker —
             // park for the human instead (`CONTEXT.md` §7).
             let question = format!(
@@ -395,6 +395,10 @@ impl<'a> Engine<'a> {
                 gate: None,
             }));
         };
+        let critique = tracker.critiques.remove(&node.id);
+        let mut last_error = None;
+
+        for (attempt, (worker, tools_servable)) in candidates.into_iter().enumerate() {
         let worker_name = worker.descriptor().name.clone();
         let family = worker.descriptor().family;
 
@@ -405,17 +409,24 @@ impl<'a> Engine<'a> {
             narrate(
                 sink,
                 format!(
-                    "{} attaches tools but {} can't run them — proceeding without tools \
+                    "{} attaches tools but fallback {} can't run them — proceeding without tools \
                      (add an API worker or claude-code to serve them)",
                     node.id, worker_name
                 ),
             );
         }
 
-        narrate(sink, format!(
-            "routed {} ({:?}) to {} [{}]",
-            node.id, node.role, worker_name, family_label(family)
-        ));
+        if attempt == 0 {
+            narrate(sink, format!(
+                "routed {} ({:?}) to {} [{}]",
+                node.id, node.role, worker_name, family_label(family)
+            ));
+        } else if let Some(error) = &last_error {
+            narrate(sink, format!(
+                "{} failed on {error}; switching to {} [{}]",
+                node.id, worker_name, family_label(family)
+            ));
+        }
         emit_engine(sink, EngineEvent::NodeStarted {
             id: node.id.clone(),
             worker: worker_name.clone(),
@@ -425,8 +436,7 @@ impl<'a> Engine<'a> {
         state.set_worker(&node.id, &worker_name)?;
         let iteration = state.incr_iteration(&node.id)?;
 
-        // Inject any pending critique from a loop-back into this node's context.
-        let critique = tracker.critiques.remove(&node.id);
+        // Reuse the same critique for every transport retry.
         self.blackboard.append_progress(&format!(
             "node {} → {} (iteration {iteration}){}",
             node.id,
@@ -434,8 +444,27 @@ impl<'a> Engine<'a> {
             if critique.is_some() { " [with critique]" } else { "" }
         ))?;
 
-        let assembler = ContextAssembler::new(self.blackboard, &self.plan);
-        let mut packet = assembler.build(node, family, critique)?;
+        // Reindex-on-read: bring the graph up-to-date for every pinned mention
+        // before building the packet so the assembler sees fresh symbol data.
+        let workspace = self.blackboard.workspace();
+        for m in &self.plan.mentioned {
+            let abs = if m.is_absolute() { m.clone() } else { workspace.join(m) };
+            self.blackboard.reindex_file(&abs);
+        }
+
+        // Also reindex files backing symbols the assembler resolves from the
+        // node instruction, so mid-run edits to instruction-referenced files are
+        // visible before the packet is built.
+        if let Some(g) = self.blackboard.code_graph() {
+            let sym_files = resolved_symbol_files(g, &node.instruction, workspace);
+            for abs in sym_files {
+                self.blackboard.reindex_file(&abs);
+            }
+        }
+
+        let graph = self.blackboard.code_graph();
+        let assembler = ContextAssembler::new(self.blackboard, &self.plan, graph);
+        let mut packet = assembler.build(node, family, critique.clone())?;
         packet.skill_text = self.skill_text(node);
         if let Ok(json) = serde_json::to_string_pretty(&packet) {
             let _ = self.blackboard.write_context(&node.id, &json);
@@ -468,7 +497,19 @@ impl<'a> Engine<'a> {
             mcp_servers: self.mcp_servers_for(node),
         };
 
-        let result = self.dispatch(worker.as_ref(), &node.id, request, sink, cancel).await?;
+        let result = match self.dispatch(worker.as_ref(), &node.id, request, sink, cancel).await {
+            Ok(result) => result,
+            Err(error) => {
+                last_error = Some(format!("{worker_name}: {error}"));
+                self.blackboard.append_progress(&format!(
+                    "node {} transport failed on {} ({error})", node.id, worker_name
+                ))?;
+                narrate(sink, format!(
+                    "{} transport failed on {} ({error})", node.id, worker_name
+                ));
+                continue;
+            }
+        };
         self.blackboard.write_transcript(&node.id, &result.transcript)?;
         self.persist_outputs(node, &result)?;
         state.record_usage(&node.id, &worker_name, &result.usage)?;
@@ -513,7 +554,21 @@ impl<'a> Engine<'a> {
             return self.park_named_gate(node, state, sink, gate).await;
         }
 
-        Ok(None)
+        return Ok(None);
+        }
+
+        state.set_status(&node.id, NodeStatus::Failed)?;
+        self.blackboard.append_progress(&format!(
+            "node {} failed after worker fallback exhaustion: {}",
+            node.id,
+            last_error.unwrap_or_else(|| "no worker could be dispatched".into())
+        ))?;
+        emit_engine(sink, EngineEvent::NodeFinished {
+            id: node.id.clone(),
+            status: NodeStatus::Failed,
+            tokens: 0,
+        });
+        Ok(Some(StopReason::NoCapableWorker(node.id.clone())))
     }
 
     /// Grade an evaluator node by dispatching to the matching `Evaluator` impl
@@ -1294,7 +1349,7 @@ impl EvalContext for GradeCtx<'_, '_> {
             worker: worker_name.clone(),
         });
 
-        let assembler = ContextAssembler::new(e.blackboard, &e.plan);
+        let assembler = ContextAssembler::new(e.blackboard, &e.plan, None);
         let mut packet = assembler.build(node, family, None)?;
         packet.skill_text = e.skill_text(node);
         let candidate = e.resolve_model(node, &worker_name);
@@ -1360,4 +1415,63 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Returns the absolute definition-file paths for every symbol the assembler
+/// resolves from `instruction`, deduped. Used to broaden reindex-on-read beyond
+/// `plan.mentioned` to instruction-referenced symbols.
+pub(crate) fn resolved_symbol_files(
+    graph: &dyn rinne_types::graph::CodeGraph,
+    instruction: &str,
+    workspace: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let known = graph.symbol_names();
+    let picked = crate::assembler::resolve_symbols(graph, instruction, &[], &known);
+    let mut out = Vec::new();
+    for name in picked {
+        if let Some(nb) = graph.neighborhood(&name) {
+            let p = workspace.join(&nb.definition.file);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rinne_types::graph::{CodeGraph, Neighborhood, SymbolRef};
+
+    struct FakeGraph;
+
+    impl CodeGraph for FakeGraph {
+        fn neighborhood(&self, s: &str) -> Option<Neighborhood> {
+            (s == "HttpTransport").then(|| Neighborhood {
+                definition: SymbolRef {
+                    name: "HttpTransport".into(),
+                    file: "src/t.rs".into(),
+                    line: 1,
+                },
+                callers: vec![],
+                callees: vec![],
+                imports: vec![],
+                stale: false,
+            })
+        }
+        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> {
+            None
+        }
+        fn symbol_names(&self) -> Vec<String> {
+            vec!["HttpTransport".into()]
+        }
+    }
+
+    #[test]
+    fn resolved_symbol_files_returns_definition_paths() {
+        let ws = std::path::Path::new("/repo");
+        let files = resolved_symbol_files(&FakeGraph, "patch HttpTransport now", ws);
+        assert!(files.contains(&ws.join("src/t.rs")));
+    }
 }

@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 rinne-types.workspace = true
 rinne-loop.workspace = true
+rinne-graph.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

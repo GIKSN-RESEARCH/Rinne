@@ -250,6 +250,7 @@ pub struct App {
     should_quit: bool,
     cancel: Option<CancellationToken>,
     tx: tokio::sync::mpsc::UnboundedSender<AppMsg>,
+    no_graph: bool,
     /// Latest live limit probe for the status-line chip (`None` until first poll).
     limit_report: Option<rinne_config::LimitReport>,
     /// Whether to paint the limits chip (from `[limits].show_status`).
@@ -263,7 +264,7 @@ pub struct App {
 }
 
 impl App {
-    fn new(index: FileIndex, tx: tokio::sync::mpsc::UnboundedSender<AppMsg>) -> Self {
+    fn new(index: FileIndex, tx: tokio::sync::mpsc::UnboundedSender<AppMsg>, no_graph: bool) -> Self {
         Self {
             goal: None,
             nodes: Vec::new(),
@@ -291,6 +292,7 @@ impl App {
             should_quit: false,
             cancel: None,
             tx,
+            no_graph,
             limit_report: None,
             limits_show_status: true,
             run_participants: Vec::new(),
@@ -1050,6 +1052,35 @@ impl App {
                 let lines = crate::commands::skill::run_lines(&args, &cwd);
                 self.push(FeedKind::System, lines.join("\n"));
             }
+            "learn" => {
+                // `/learn <topic>` — `explain` is implied (the only verb). Runs
+                // the same graph-grounded pipeline as the CLI, async like `/mcp`,
+                // narrating when a worker is available. The result path is pushed
+                // to the feed; the HTML is not auto-opened.
+                let topic = rest
+                    .strip_prefix("explain ")
+                    .unwrap_or(&rest)
+                    .trim()
+                    .to_string();
+                if topic.is_empty() {
+                    self.push(FeedKind::System, "usage: /learn <topic>  (writes .rinne/learn/<topic>.html)");
+                } else {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    let tx = self.tx.clone();
+                    self.push(FeedKind::System, format!("learning `{topic}`…"));
+                    tokio::spawn(async move {
+                        let progress_tx = tx.clone();
+                        let on_progress = move |m: String| {
+                            let _ = progress_tx.send(AppMsg::Note(m));
+                        };
+                        let lines = crate::commands::learn::run_lines_with_progress(
+                            &topic, cwd, &on_progress,
+                        )
+                        .await;
+                        let _ = tx.send(AppMsg::Note(lines.join("\n")));
+                    });
+                }
+            }
             "human" => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let args = split_args(&rest);
@@ -1067,6 +1098,27 @@ impl App {
                         self.push(FeedKind::System, lines.join("\n"));
                     }
                 }
+            }
+            "index" => {
+                // Reindexing the whole repo can be slow; run it off-thread and
+                // report the resulting stats to the feed, like `/mcp`.
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let tx = self.tx.clone();
+                self.push(FeedKind::System, "indexing repository…");
+                tokio::spawn(async move {
+                    let lines = tokio::task::spawn_blocking(move || {
+                        crate::commands::graph::run_lines(&[], &cwd)
+                    })
+                    .await
+                    .unwrap_or_else(|e| vec![format!("index failed: {e}")]);
+                    let _ = tx.send(AppMsg::Note(lines.join("\n")));
+                });
+            }
+            "graph" => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let args = split_args(&rest);
+                let lines = crate::commands::graph::run_lines(&args, &cwd);
+                self.push(FeedKind::System, lines.join("\n"));
             }
             "steer" if !rest.is_empty() => self.resume_with(HumanDecision::Steer(rest)),
             "approve" => self.resume_with(HumanDecision::Approve),
@@ -1212,7 +1264,7 @@ impl App {
         self.run_participants.clear();
         self.run_tokens = 0;
         self.push(FeedKind::Conductor, format!("planning: {goal}"));
-        spawn_run(self.tx.clone(), goal, mentioned, None, cancel);
+        spawn_run(self.tx.clone(), goal, mentioned, None, cancel, self.no_graph);
     }
 
     fn resume_with(&mut self, decision: HumanDecision) {
@@ -1226,7 +1278,7 @@ impl App {
         self.cancel = Some(cancel.clone());
         let resume = ResumeInput { node: None, decision };
         self.push(FeedKind::Conductor, "resuming with your decision");
-        spawn_run(self.tx.clone(), String::new(), Vec::new(), Some(resume), cancel);
+        spawn_run(self.tx.clone(), String::new(), Vec::new(), Some(resume), cancel, self.no_graph);
     }
 
     fn resume_plain(&mut self) {
@@ -1234,7 +1286,7 @@ impl App {
         self.cancel = Some(cancel.clone());
         self.running = true;
         self.push(FeedKind::Conductor, "resuming");
-        spawn_run(self.tx.clone(), String::new(), Vec::new(), None, cancel);
+        spawn_run(self.tx.clone(), String::new(), Vec::new(), None, cancel, self.no_graph);
     }
 
     fn resolve_mentions(&self, input: &str) -> std::result::Result<(String, Vec<PathBuf>), String> {
@@ -1481,7 +1533,14 @@ fn help_text() -> String {
         (2, "/config set <key> <value> · unset <key>               set / clear any field"),
         (2, "/config init · edit · path                            scaffold / open / locate the file"),
         (0, ""),
+        (0, "CODE GRAPH"),
+        (2, "/index                      reindex the repo's code graph now (.rinne/state.db)"),
+        (2, "/graph stats                symbol / edge / file counts"),
+        (2, "/graph symbols <file>       symbols defined in a file"),
+        (2, "/graph neighborhood <sym>   a symbol's callers and callees"),
+        (0, ""),
         (0, "SESSION"),
+        (2, "/learn <topic>              explain a subsystem — a symbol, path, or plain description"),
         (2, "/logs                       where logs are written (.rinne/logs/)"),
         (2, "/clear                      wipe the screen and reset the session  (alias: /new, ctrl-l wipes only)"),
         (2, "/help                       this reference"),
@@ -1506,6 +1565,7 @@ fn spawn_run(
     mentioned: Vec<PathBuf>,
     resume: Option<ResumeInput>,
     cancel: CancellationToken,
+    no_graph: bool,
 ) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -1516,7 +1576,7 @@ fn spawn_run(
             }
         };
         rt.block_on(async move {
-            match do_run(tx.clone(), goal, mentioned, resume, cancel).await {
+            match do_run(tx.clone(), goal, mentioned, resume, cancel, no_graph).await {
                 Ok(report) => {
                     let _ = tx.send(AppMsg::Finished(report));
                 }
@@ -1534,10 +1594,11 @@ async fn do_run(
     mentioned: Vec<PathBuf>,
     resume: Option<ResumeInput>,
     cancel: CancellationToken,
+    no_graph: bool,
 ) -> Result<RunReport> {
     let config = rinne_config::load_cwd()?;
     let cwd = std::env::current_dir()?;
-    let bb = Blackboard::open(&cwd)?;
+    let bb = Blackboard::open_with(&cwd, !no_graph)?;
     let (executor, tool_specs, mcp_servers) = runner::host_setup(&config).await;
     let (registry, _) = runner::build_registry_with_tools(&config, executor).await?;
     if registry.is_empty() {
@@ -1615,7 +1676,7 @@ async fn do_run(
 }
 
 /// Entry point: set up an inline viewport and run the event loop.
-pub async fn run() -> Result<()> {
+pub async fn run(no_graph: bool) -> Result<()> {
     if !io::stdout().is_terminal() {
         println!("rinne: the interactive TUI needs a terminal. Use `rinne -p \"<task>\"` for headless runs.");
         return Ok(());
@@ -1639,7 +1700,7 @@ pub async fn run() -> Result<()> {
     // Clone the sender for the background availability probe before `App` takes
     // ownership of the original.
     let tx_for_probe = tx.clone();
-    let mut app = App::new(index, tx);
+    let mut app = App::new(index, tx, no_graph);
     // Persist prompt history across sessions under the project blackboard.
     app.attach_history(cwd.join(rinne_core::BLACKBOARD_DIR).join("history"));
 
@@ -1785,7 +1846,7 @@ mod tests {
 
     fn app_for(dir: &std::path::Path) -> App {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        App::new(FileIndex::build(dir), tx)
+        App::new(FileIndex::build(dir), tx, false)
     }
 
     #[test]

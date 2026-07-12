@@ -15,6 +15,9 @@ const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
     ("connect", "<backend> [key] [--model <id>]", "connect a harness or API provider"),
     ("mcp",     "[sub …]",                       "connect and manage MCP servers"),
     ("skill",   "[sub …]",                       "install and manage Agent Skills"),
+    ("learn",   "<topic>",                       "explain a subsystem as an HTML doc"),
+    ("index",   "",                              "reindex the repo's code graph now"),
+    ("graph",   "[sub …]",                       "inspect the local code graph"),
     ("workers", "",                              "list workers + connected APIs"),
     ("models",  "<provider>",                   "list an API provider's models"),
     ("limit-usage", "",                          "subscription limits per harness (alias: /usage)"),
@@ -67,6 +70,14 @@ const SKILL_SUBCOMMANDS: &[(&str, &str, &str)] = &[
     ("list",   "", "list installed skills"),
     ("show",   "<name>", "print a skill's instructions"),
     ("remove", "<name>", "uninstall a skill"),
+];
+
+/// `/graph` subcommands.
+const GRAPH_SUBCOMMANDS: &[(&str, &str, &str)] = &[
+    ("stats",        "",         "symbol / edge / file counts"),
+    ("symbols",      "<file>",   "symbols defined in a file"),
+    ("neighborhood", "<symbol>", "a symbol's callers and callees"),
+    ("index",        "",         "reindex the repo now"),
 ];
 
 /// Backends accepted by `/config conductor <backend>`.
@@ -176,6 +187,9 @@ pub fn suggest(input: &str) -> Option<Completion> {
         "skill" if complete.len() == 1 => {
             filter(SKILL_SUBCOMMANDS, partial, "/skill subcommand", token_start)
         }
+        "graph" if complete.len() == 1 => {
+            filter(GRAPH_SUBCOMMANDS, partial, "/graph subcommand", token_start)
+        }
         _ => None,
     }
 }
@@ -250,6 +264,19 @@ mod tests {
         // Partial narrows it.
         let v2 = values("/config co");
         assert_eq!(v2, vec!["conductor".to_string()]);
+    }
+
+    #[test]
+    fn completes_graph_subcommands() {
+        let v = values("/graph ");
+        assert!(v.contains(&"stats".to_string()) && v.contains(&"neighborhood".to_string()), "{v:?}");
+        assert_eq!(values("/graph sym"), vec!["symbols".to_string()]);
+    }
+
+    #[test]
+    fn completes_index_and_graph_command_names() {
+        assert!(values("/ind").contains(&"index".to_string()));
+        assert!(values("/gra").contains(&"graph".to_string()));
     }
 
     #[test]

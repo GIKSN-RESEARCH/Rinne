@@ -1,0 +1,22 @@
+[package]
+name = "rinne-graph"
+description = "Local, incremental, tree-sitter code graph (symbols, imports, call edges) persisted in the Rinne blackboard for structural retrieval."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rinne-types.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+streaming-iterator = "0.1"
+tracing.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+
+[dev-dependencies]

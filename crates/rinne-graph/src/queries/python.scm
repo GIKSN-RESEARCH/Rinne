@@ -1,0 +1,6 @@
+(function_definition name: (identifier) @def.function)
+(class_definition name: (identifier) @def.class)
+(import_statement name: (_) @import.path)
+(import_from_statement name: (_) @import.path)
+(call function: (identifier) @call.callee)
+(call function: (attribute attribute: (identifier) @call.callee))

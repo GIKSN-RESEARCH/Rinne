@@ -222,10 +222,10 @@ pub fn build_conductor(
 /// One-shot headless run that returns a structured JSON result instead of
 /// streaming human-readable progress (`CONTEXT.md` §6). Quiet: no narration to
 /// stdout, so the only output is the JSON the caller prints.
-pub async fn oneshot_json(goal: &str) -> Result<serde_json::Value> {
+pub async fn oneshot_json(goal: &str, no_graph: bool) -> Result<serde_json::Value> {
     let config = rinne_config::load_cwd()?;
     let cwd = std::env::current_dir()?;
-    let bb = Blackboard::open(&cwd)?;
+    let bb = Blackboard::open_with(&cwd, !no_graph)?;
     let (executor, tool_specs, mcp_servers) = host_setup(&config).await;
     let (registry, _) = build_registry_with_tools(&config, executor).await?;
     if registry.is_empty() {
@@ -351,8 +351,17 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
         blackboard.workspace().to_path_buf(),
     )?
     .with_context(template.clone());
+    let structure: Vec<rinne_types::graph::Neighborhood> =
+        if let Some(g) = rinne_types::Blackboard::code_graph(blackboard) {
+            let known = g.symbol_names();
+            let picked = rinne_loop::assembler::resolve_symbols(g, goal, &[], &known);
+            picked.iter().filter_map(|name| g.neighborhood(name)).collect()
+        } else {
+            Vec::new()
+        };
     let input = ConductorInput {
         goal: goal.to_string(),
+        structure,
         ..template
     };
 

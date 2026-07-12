@@ -42,7 +42,7 @@ fn harness_pins_paths_inlines_nothing() {
     bb.write_artifact("design.md", "the design").unwrap();
     let plan = plan_with_mention();
 
-    let asm = ContextAssembler::new(&bb, &plan);
+    let asm = ContextAssembler::new(&bb, &plan, None);
     let packet = asm.build(&plan.nodes[0], WorkerFamily::Harness, None).unwrap();
 
     assert!(packet.inlined_files.is_empty());
@@ -64,7 +64,7 @@ fn api_inlines_contents_pins_nothing() {
     bb.write_artifact("design.md", "the design").unwrap();
     let plan = plan_with_mention();
 
-    let asm = ContextAssembler::new(&bb, &plan);
+    let asm = ContextAssembler::new(&bb, &plan, None);
     let packet = asm.build(&plan.nodes[0], WorkerFamily::Api, None).unwrap();
 
     assert!(packet.pinned_paths.is_empty());

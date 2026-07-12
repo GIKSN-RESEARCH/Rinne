@@ -49,6 +49,10 @@ pub struct ConductorInput {
     pub role_prefers: HashMap<String, String>,
     pub budget_minutes: Option<u64>,
     pub max_iterations_per_node: u32,
+    /// Task-bounded code structure: the neighborhoods of symbols relevant to
+    /// this goal, resolved by the CLI runner from the code graph. Empty when
+    /// the graph is disabled or no relevant symbols were found.
+    pub structure: Vec<rinne_types::graph::Neighborhood>,
     /// Project root for workspace-aware routing (test command detection, etc.).
     pub workspace: Option<PathBuf>,
     /// `[routing]` overrides from config.
@@ -208,6 +212,22 @@ pub fn user_prompt(input: &ConductorInput) -> String {
         }
     }
 
+    if !input.structure.is_empty() {
+        s.push_str("\n## Relevant code structure\n");
+        for nb in &input.structure {
+            let def = &nb.definition;
+            s.push_str(&format!("{} ({}:{})\n", def.name, def.file, def.line));
+            if !nb.callers.is_empty() {
+                let names: Vec<&str> = nb.callers.iter().map(|r| r.name.as_str()).collect();
+                s.push_str(&format!("  called by: {}\n", names.join(", ")));
+            }
+            if !nb.callees.is_empty() {
+                let names: Vec<&str> = nb.callees.iter().map(|r| r.name.as_str()).collect();
+                s.push_str(&format!("  calls: {}\n", names.join(", ")));
+            }
+        }
+    }
+
     // Profile the present pool and tier it, so routing is relative to what
     // actually exists (`CONTEXT.md` §7).
     let profile = rinne_core::pool::profile(&input.workers);
@@ -319,6 +339,23 @@ pub fn exemplar_section(classification: &crate::classifier::Classification) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_prompt_includes_structure_when_present() {
+        use rinne_types::graph::{Neighborhood, SymbolRef};
+        let input = ConductorInput {
+            goal: "add retry".into(),
+            structure: vec![Neighborhood {
+                definition: SymbolRef { name: "HttpTransport".into(), file: "t.rs".into(), line: 10 },
+                callers: vec![SymbolRef { name: "send".into(), file: "s.rs".into(), line: 3 }],
+                callees: vec![], imports: vec![], stale: false,
+            }],
+            ..Default::default()
+        };
+        let p = user_prompt(&input);
+        assert!(p.contains("HttpTransport"));
+        assert!(p.contains("t.rs:10"));
+    }
 
     #[test]
     fn catalogs_render_only_when_present() {
