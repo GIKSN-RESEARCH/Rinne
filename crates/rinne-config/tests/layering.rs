@@ -84,3 +84,20 @@ fn missing_files_are_skipped_not_errors() {
     let cfg = load_layered(Some(&absent_global), Some(&absent_project), false).unwrap();
     assert_eq!(cfg.conductor.backend, ConductorBackend::Cloudflare);
 }
+
+/// Protocol flags use the RINNE_ prefix but must not enter the Config schema.
+/// Regression: macOS app always sets RINNE_STREAM_JSON=1; without an ignore
+/// list, figment maps it to unknown field `stream` and every command fails.
+#[test]
+fn non_config_env_flags_do_not_break_load() {
+    // SAFETY: test-only, sequential with other env mutations in this process.
+    std::env::set_var("RINNE_STREAM_JSON", "1");
+    std::env::set_var("RINNE_NO_UPDATE_CHECK", "1");
+    std::env::set_var("RINNE_BIN", "/tmp/fake-rinne");
+    let result = std::panic::catch_unwind(|| load_layered(None, None, true));
+    std::env::remove_var("RINNE_STREAM_JSON");
+    std::env::remove_var("RINNE_NO_UPDATE_CHECK");
+    std::env::remove_var("RINNE_BIN");
+    let cfg = result.expect("load must not panic").expect("load must succeed with protocol flags set");
+    assert_eq!(cfg.conductor.backend, ConductorBackend::Cloudflare);
+}
