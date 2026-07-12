@@ -22,10 +22,34 @@ use rinne_core::BLACKBOARD_DIR;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `rinne .` / `rinne ./path` — open the macOS GUI (like `code .`), before clap
+    // treats `.` as an unknown subcommand.
+    if let Some(path) = intercept_folder_open(std::env::args().skip(1)) {
+        return commands::open_gui::run(Some(path.as_str())).await;
+    }
+
     let args = Cli::parse();
 
     let blackboard = PathBuf::from(BLACKBOARD_DIR);
     let _log_guard = telemetry::init(&blackboard, args.verbose);
+
+    // `--continue` resumes the prior orchestration session from disk. It is
+    // mutually exclusive with a fresh `-p` plan (use one or the other).
+    if args.continue_session {
+        if args.prompt.is_some() {
+            anyhow::bail!(
+                "--continue resumes the last session; omit -p/--prompt \
+                 (or start a fresh run without --continue)"
+            );
+        }
+        if args.command.is_some() {
+            anyhow::bail!(
+                "--continue cannot be combined with a subcommand; \
+                 use `rinne resume` with --steer/--approve/--reject for parked decisions"
+            );
+        }
+        return commands::run::continue_session().await;
+    }
 
     // A `-p` prompt means one-shot headless mode regardless of subcommand.
     if let Some(task) = args.prompt.as_deref() {
@@ -48,7 +72,11 @@ async fn main() -> Result<()> {
             commands::connect::run(&backend, key, models, base_url, add).await
         }
         Some(Command::Forget { provider }) => commands::forget::run(&provider).await,
-        Some(Command::Models { provider }) => commands::models::run(provider.as_deref()).await,
+        Some(Command::Models {
+            provider,
+            json,
+            catalog,
+        }) => commands::models::run(provider.as_deref(), json, catalog).await,
         Some(Command::Status) => run_status().await,
         Some(Command::Resume {
             steer,
@@ -60,6 +88,22 @@ async fn main() -> Result<()> {
         Some(Command::Skill { args }) => commands::skill::run(&args).await,
         Some(Command::Logs) => run_logs().await,
         Some(Command::Human { args }) => run_human(&args).await,
+        Some(Command::LimitUsage) => commands::limits::run().await,
+        Some(Command::Open { path }) => commands::open_gui::run(Some(path.as_str())).await,
+    }
+}
+
+/// If argv is a single folder path (e.g. `.`), open the GUI instead of the TUI.
+fn intercept_folder_open(args: impl Iterator<Item = String>) -> Option<String> {
+    let collected: Vec<String> = args.collect();
+    if collected.len() != 1 {
+        return None;
+    }
+    let a = &collected[0];
+    if commands::open_gui::looks_like_folder_open(a) {
+        Some(a.clone())
+    } else {
+        None
     }
 }
 
