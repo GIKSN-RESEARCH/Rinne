@@ -17,6 +17,8 @@ const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
     ("skill",   "[sub …]",                       "install and manage Agent Skills"),
     ("workers", "",                              "list workers + connected APIs"),
     ("models",  "<provider>",                   "list an API provider's models"),
+    ("limit-usage", "",                          "subscription limits per harness (alias: /usage)"),
+    ("usage",   "",                              "alias for /limit-usage"),
     ("forget",  "<provider>",                   "delete a stored API key"),
     ("plan",    "",                              "show the current plan"),
     ("human",   "[sub …]",                       "pin roles for this run"),
