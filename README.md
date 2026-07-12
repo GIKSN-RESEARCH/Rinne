@@ -752,13 +752,30 @@ This is a deliberate, documented exception to the "Rinne holds no credentials" p
 
 Runtime state lives under `.rinne/` in the working directory: the plan, run progress, and logs (`.rinne/logs/`).
 
-### Local code graph
+### Code graph and `/learn`
 
-Rinne builds and maintains a **local, incremental structural index** of the repo — stored in the blackboard SQLite alongside the plan — using tree-sitter for language parsing. The graph records symbols (functions, classes, types), imports, and call edges for Rust, TypeScript/JavaScript, and Python files. When the context assembler resolves `@`-mentions for a task, it can retrieve a **symbol's neighborhood** (the symbol itself, its direct callers, and its direct callees) instead of inlining entire files, giving harnesses and API workers focused, accurate context.
+```mermaid
+flowchart LR
+    WT["Working tree"] --> IDX["CodeGraph indexer<br/>(tree-sitter + SQLite)"]
+    IDX --> DB[".rinne/state.db<br/>symbols, imports, call edges"]
+    DB --> SHARED["Shared graph snapshot<br/>for the whole run"]
+    SHARED --> ASM["Context assembler"]
+    ASM --> PROMPTS["Task prompts<br/>and worker context"]
 
-The graph is shared across all harnesses active in a run, so every worker reads the same fresh snapshot rather than each indexing the repo independently. It is re-indexed on demand (before context assembly) so it stays consistent with the working tree even mid-run. The `rinne graph` subcommand lets you inspect the index — list files, look up a symbol, and view its neighborhood — without starting a full run. Pass `--no-graph` to any `rinne` invocation to skip graph indexing if you want to isolate that behavior or profile without it.
+    TOPIC["/learn <topic>"] --> REFRESH["Refresh matching files<br/>and nearby cluster"]
+    SHARED --> RESOLVE["Resolve topic to symbols"]
+    REFRESH --> RESOLVE
+    RESOLVE --> SOURCES["Doc-comments + snippets<br/>+ referenced CONTEXT.md sections"]
+    SOURCES --> AI{AI worker available?}
+    AI -->|yes| HTML["Narrated HTML explainer"]
+    AI -->|no| TEMPLATE["Template-only HTML"]
+    HTML --> OUT[".rinne/learn/<topic>.html"]
+    TEMPLATE --> OUT
+```
 
-### Learn a subsystem
+Rinne builds and maintains a local, incremental structural index of the repo, stored in the blackboard SQLite alongside the plan, using tree-sitter for language parsing. The graph records symbols, imports, and call edges for Rust, TypeScript/JavaScript, and Python files. When the context assembler resolves `@`-mentions for a task, it can retrieve a symbol's neighborhood, the symbol itself plus its direct callers and callees, instead of inlining entire files.
+
+The graph is shared across all harnesses active in a run, so every worker reads the same fresh snapshot rather than each indexing the repo independently. It is refreshed on demand before context assembly so it stays consistent with the working tree even mid-run. The `rinne graph` subcommand lets you inspect the index, list files, look up a symbol, and view its neighborhood, without starting a full run. Pass `--no-graph` to any `rinne` invocation to skip graph indexing if you want to isolate that behavior or profile without it.
 
 ```bash
 rinne learn explain <topic>          # graph-grounded explainer for a topic
@@ -766,7 +783,7 @@ rinne learn explain <topic> --no-ai  # template-only; works without a configured
 rinne learn explain <topic> --open   # open the output in the default browser when done
 ```
 
-`rinne learn explain <topic>` walks the code graph, assembles the symbols and call edges most relevant to `<topic>`, pulls their doc-comments and any `CONTEXT.md §N` sections they reference, then asks the conductor to narrate the design decisions in plain prose. The result is written to `.rinne/learn/<topic>.html` — a self-contained file (no network, no external assets) you can open in any browser.
+`rinne learn explain <topic>` walks the code graph, assembles the symbols and call edges most relevant to `<topic>`, pulls their doc-comments and any `CONTEXT.md` sections they reference, then asks the conductor to narrate the design decisions in plain prose. The result is written to `.rinne/learn/<topic>.html` as a self-contained file you can open in any browser.
 
 Without a configured conductor (`--no-ai`), the command skips the narration step and produces a template-only page: real symbols, call flow, and code snippets, but no prose overview. The output path and structure are identical either way.
 
