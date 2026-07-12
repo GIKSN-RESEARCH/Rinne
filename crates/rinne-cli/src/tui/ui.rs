@@ -127,8 +127,9 @@ fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'stati
         let detail = match w.avail {
             WorkerAvail::NotInstalled => "not installed".to_string(),
             WorkerAvail::Checking => "checking…".to_string(),
-            WorkerAvail::Available if w.ladder.len() > 1 => w.ladder.join(" · "),
-            WorkerAvail::Available => "default model".to_string(),
+            // Always show real model ids when known — never the opaque "default model".
+            WorkerAvail::Available if !w.ladder.is_empty() => w.ladder.join(" · "),
+            WorkerAvail::Available => "(no model id)".to_string(),
         };
         let detail_color = if w.avail == WorkerAvail::Available { Color::Gray } else { Color::DarkGray };
         out.push(Line::from(vec![
@@ -219,11 +220,111 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         };
         spans.push(Span::styled(summary, Style::default().fg(Color::DarkGray)));
     }
+    if app.run_tokens > 0 {
+        spans.push(Span::styled(
+            format!(
+                "  · {} tok",
+                rinne_core::format_token_count(app.run_tokens)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    // Bottom-right limits chip (when `[limits].show_status` is on):
+    //   during a run  → average limit % across harness workers used so far
+    //   after the run → per-worker breakdown for participants
+    //   idle/cleared  → pool-wide max overview
+    let used_refs: Vec<&str> = app
+        .run_participants
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let chip = limits_status_chip(
+        app.limits_show_status,
+        app.limit_report.as_ref(),
+        app.running,
+        &used_refs,
+    );
+    let chip_w = if chip.is_empty() {
+        0usize
+    } else {
+        chip.chars().count() + 2 // leading spaces when right-aligned
+    };
     if let Some(goal) = app.goal.as_deref() {
         spans.push(Span::styled("  · ", Style::default().fg(Color::DarkGray)));
-        spans.push(Span::styled(truncate(goal, area.width.saturating_sub(28) as usize), Style::default().fg(Color::White)));
+        let budget = area
+            .width
+            .saturating_sub(28)
+            .saturating_sub(chip_w as u16) as usize;
+        spans.push(Span::styled(
+            truncate(goal, budget.max(8)),
+            Style::default().fg(Color::White),
+        ));
     }
+
+    // Right-align the limits chip only when it fits without overflowing the row.
+    // Never force `"  " + chip` past `area.width` (narrow terminals / long agent summary).
+    if let Some(pad) = status_chip_pad(
+        spans.iter().map(|s| s.content.chars().count()).sum(),
+        chip.chars().count(),
+        area.width as usize,
+    ) {
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+        let chip_color = match app
+            .limit_report
+            .as_ref()
+            .map(|r| r.chip_severity_for(&used_refs))
+        {
+            Some(rinne_config::ChipSeverity::Critical) => Color::Red,
+            Some(rinne_config::ChipSeverity::High) => Color::LightRed,
+            Some(rinne_config::ChipSeverity::Warn) => Color::Yellow,
+            Some(rinne_config::ChipSeverity::Ok) => Color::Green,
+            Some(rinne_config::ChipSeverity::Unknown) | None => Color::DarkGray,
+        };
+        spans.push(Span::styled(chip, Style::default().fg(chip_color)));
+    }
+    // else: omit chip — left status (ready/agents/goal) stays intact
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Right-align padding for the limits chip, or `None` when it would overflow.
+///
+/// Returns `Some(pad)` when `left_w + chip_len <= width` (pad may be 0 for an
+/// exact fit). Returns `None` when the chip must be omitted to protect the
+/// left-hand status content.
+pub(super) fn status_chip_pad(left_w: usize, chip_len: usize, width: usize) -> Option<usize> {
+    if chip_len == 0 || width == 0 {
+        return None;
+    }
+    if left_w + chip_len > width {
+        return None;
+    }
+    Some(width - left_w - chip_len)
+}
+
+/// Status-line chip text for subscription limits.
+///
+/// * `running` + participants → average of known participants (`limits N%`)
+/// * idle + participants → per-harness breakdown (`claude-code 62% · codex n/a`)
+/// * idle/running with no participants → pool-wide max overview
+/// * no report yet → `limits …` (first poll in flight)
+/// * `show` false → empty (chip hidden)
+pub(super) fn limits_status_chip(
+    show: bool,
+    report: Option<&rinne_config::LimitReport>,
+    running: bool,
+    participants: &[&str],
+) -> String {
+    if !show {
+        return String::new();
+    }
+    match report {
+        None => "limits …".into(),
+        Some(r) if running => r.run_status_chip(participants),
+        Some(r) if !participants.is_empty() => r.breakdown_chip(participants),
+        Some(r) => r.status_chip(),
+    }
 }
 
 fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
@@ -762,8 +863,8 @@ mod tests {
         assert!(text.contains("workers"), "workers header missing");
         // Available harness with a ladder shows its full ladder.
         assert!(text.contains("claude-code") && text.contains("haiku") && text.contains("opus"), "ladder missing: {text}");
-        // Available harness without a ladder shows the default-model note.
-        assert!(text.contains("codex") && text.contains("default model"), "codex row missing: {text}");
+        // Available harness without a ladder shows a clear missing-id note (not "default model").
+        assert!(text.contains("codex") && text.contains("no model id"), "codex row missing: {text}");
         // Not-installed harness is shown as such, not hidden.
         assert!(text.contains("grok") && text.contains("not installed"), "grok row missing: {text}");
         assert!(text.contains("conductor"), "conductor line missing");
@@ -963,5 +1064,105 @@ mod tests {
         let lines = render_agents_flow(&nodes, &HashMap::new(), Some("n1"), "⠹", &tail, 20);
         let text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref().to_string()).collect();
         assert!(text.contains("┊") && text.contains("scanning the workspace"), "{text}");
+    }
+
+    fn known_report() -> rinne_config::LimitReport {
+        use rinne_config::{
+            AuthMode, LimitKnowledge, LimitReport, LimitWindow, WorkerFamily, WorkerLimit,
+        };
+        LimitReport {
+            workers: vec![
+                WorkerLimit {
+                    name: "claude-code".into(),
+                    family: WorkerFamily::Harness,
+                    auth_mode: AuthMode::Subscription,
+                    knowledge: LimitKnowledge::Known,
+                    windows: vec![
+                        LimitWindow {
+                            label: "5h".into(),
+                            used_pct: 40.0,
+                            resets_at: None,
+                        },
+                        LimitWindow {
+                            label: "week".into(),
+                            used_pct: 60.0,
+                            resets_at: None,
+                        },
+                    ],
+                    note: None,
+                },
+                WorkerLimit {
+                    name: "codex".into(),
+                    family: WorkerFamily::Harness,
+                    auth_mode: AuthMode::Subscription,
+                    knowledge: LimitKnowledge::Known,
+                    windows: vec![LimitWindow {
+                        label: "5h".into(),
+                        used_pct: 20.0,
+                        resets_at: None,
+                    }],
+                    note: None,
+                },
+            ],
+            probed_at: 0,
+        }
+    }
+
+    #[test]
+    fn limits_chip_hidden_when_disabled() {
+        let r = known_report();
+        assert_eq!(
+            limits_status_chip(false, Some(&r), true, &["claude-code"]),
+            ""
+        );
+    }
+
+    #[test]
+    fn limits_chip_probing_placeholder() {
+        assert_eq!(
+            limits_status_chip(true, None, false, &[]),
+            "limits …"
+        );
+    }
+
+    #[test]
+    fn limits_chip_avg_while_running() {
+        let r = known_report();
+        // Max windows 60 + 20 → avg 40.
+        assert_eq!(
+            limits_status_chip(true, Some(&r), true, &["claude-code", "codex"]),
+            "limits 40%"
+        );
+    }
+
+    #[test]
+    fn limits_chip_breakdown_after_run() {
+        let r = known_report();
+        assert_eq!(
+            limits_status_chip(true, Some(&r), false, &["claude-code", "codex"]),
+            "claude-code 60% · codex 20%"
+        );
+    }
+
+    #[test]
+    fn limits_chip_pool_when_idle_no_participants() {
+        let r = known_report();
+        // Pool max across workers: 60.
+        assert_eq!(
+            limits_status_chip(true, Some(&r), false, &[]),
+            "limits 60%"
+        );
+    }
+
+    #[test]
+    fn status_chip_pad_omits_when_overflow() {
+        // Wide enough: pad fills the gap.
+        assert_eq!(status_chip_pad(20, 10, 40), Some(10));
+        // Exact fit: pad 0, still show chip.
+        assert_eq!(status_chip_pad(30, 10, 40), Some(0));
+        // Overflow: omit chip entirely (never force past width).
+        assert_eq!(status_chip_pad(35, 10, 40), None);
+        assert_eq!(status_chip_pad(10, 0, 40), None);
+        assert_eq!(status_chip_pad(10, 5, 0), None);
     }
 }
