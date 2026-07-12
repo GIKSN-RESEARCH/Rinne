@@ -16,12 +16,13 @@ use rinne_conductor::{
 use rinne_config::model::{ConductorBackend, ConductorConfig, PreferFamily};
 use rinne_config::probe::WorkerFamily;
 use rinne_config::Config;
-use rinne_core::worker::{Capability, Worker};
+use rinne_core::worker::Capability;
 use rinne_core::{
     Blackboard, Engine, EngineEvent, EngineOptions, HumanSession, RunReport, WorkerRegistry,
 };
 use rinne_workers::adapters::{
-    aider, antigravity, claude_code, codex, cursor, grok, opencode, OpenAiWorker,
+    aider, antigravity, claude_code, codex, cursor, discover_cli_models, grok, opencode,
+    HarnessAdapter, OpenAiWorker,
 };
 
 /// Build a worker registry from configured + available harness adapters.
@@ -54,18 +55,21 @@ async fn build_registry_inner(
     for w in report.workers.iter().filter(|w| {
         w.family == WorkerFamily::Harness && w.enabled && w.status.is_available()
     }) {
-        let adapter: Option<Arc<dyn Worker>> = match w.name.as_str() {
-            "claude-code" => Some(Arc::new(claude_code::worker())),
-            "codex" => Some(Arc::new(codex::worker())),
-            "opencode" => Some(Arc::new(opencode::worker())),
-            "grok" => Some(Arc::new(grok::worker())),
-            "cursor-agent" => Some(Arc::new(cursor::worker())),
-            "aider" => Some(Arc::new(aider::worker())),
-            "antigravity" => Some(Arc::new(antigravity::worker())),
+        let adapter = match w.name.as_str() {
+            "claude-code" => Some(claude_code::worker()),
+            "codex" => Some(codex::worker()),
+            "opencode" => Some(opencode::worker()),
+            "grok" => Some(grok::worker()),
+            "cursor-agent" => Some(cursor::worker()),
+            "aider" => Some(aider::worker()),
+            "antigravity" => Some(antigravity::worker()),
             _ => None,
         };
         if let Some(a) = adapter {
-            reg.register(a);
+            // Live-refresh the model ladder from the CLI (`grok models`, etc.)
+            // so retired ids never get scheduled; merge config pins.
+            let a = refresh_harness_models(a, config).await;
+            reg.register(Arc::new(a));
         }
     }
 
@@ -122,15 +126,48 @@ fn api_capabilities() -> Vec<Capability> {
     ]
 }
 
-fn parse_conductor_backend(s: &str) -> Option<ConductorBackend> {
-    match s.trim().to_lowercase().as_str() {
-        "cloudflare" | "cf" => Some(ConductorBackend::Cloudflare),
-        "groq" => Some(ConductorBackend::Groq),
-        "nvidia" => Some(ConductorBackend::Nvidia),
-        "local" | "ollama" => Some(ConductorBackend::Local),
-        "harness" => Some(ConductorBackend::Harness),
-        _ => None,
+/// Replace a harness adapter's static model ladder with whatever the live CLI
+/// reports (`<cli> models`), then ensure any `[models].by_worker` pin is on the
+/// ladder. On probe failure the static fallback stays — never invent ids.
+async fn refresh_harness_models(adapter: HarnessAdapter, config: &Config) -> HarnessAdapter {
+    let name = adapter.descriptor.name.clone();
+    let program = adapter.program.clone();
+    let mut adapter = adapter;
+
+    match discover_cli_models(&program).await {
+        Some(disc) if !disc.ladder.is_empty() => {
+            tracing::info!(
+                worker = %name,
+                models = ?disc.ladder,
+                default = ?disc.default,
+                "live harness model ladder from `{program} models`"
+            );
+            adapter = adapter.with_models(disc.ladder);
+        }
+        _ => {
+            tracing::debug!(
+                worker = %name,
+                "no live model listing from `{program} models` — keeping static ladder {:?}",
+                adapter.descriptor.models
+            );
+        }
     }
+
+    // User config wins: ensure every configured pin for this worker is schedulable.
+    if let Some(m) = config.models.by_worker.get(&name) {
+        adapter = adapter.ensure_model(m);
+    }
+    // Preferences.models is role→model (not worker→model); still merge worker-shaped
+    // keys if someone wrote `preferences.models.grok = "…"`.
+    if let Some(m) = config.preferences.models.get(&name) {
+        adapter = adapter.ensure_model(m);
+    }
+
+    adapter
+}
+
+fn parse_conductor_backend(s: &str) -> Option<ConductorBackend> {
+    ConductorBackend::parse(s)
 }
 
 /// Default OpenAI-compatible base URL for known providers.
@@ -396,9 +433,60 @@ pub fn apply_human_session(session: &HumanSession, opts: &mut EngineOptions) {
         opts.role_models.insert("generator".into(), m.clone());
     }
     if let Some(ev) = &session.pins.evaluator {
-        opts.role_prefers.insert("evaluator".into(), ev.clone());
+        apply_evaluator_pin(ev, opts);
     }
     opts.gates = session.active_gates().to_vec();
+}
+
+/// Parse a `/human evaluator` pin into engine overrides.
+///
+/// Formats written by [`commands::human`]:
+/// - `tool` / `human` — force that evaluator kind
+/// - `ai` — force AI evaluator (worker from pool default)
+/// - `ai:<worker>` — AI evaluator on that worker
+/// - `ai:<worker>:<model>` — AI evaluator with model pin
+/// - bare worker name — soft-compat with `preferences.roles.evaluator`
+fn apply_evaluator_pin(pin: &str, opts: &mut EngineOptions) {
+    use rinne_core::dag::EvaluatorKind;
+
+    let pin = pin.trim();
+    if pin.eq_ignore_ascii_case("tool") {
+        opts.evaluator_kind_override = Some(EvaluatorKind::Tool);
+        return;
+    }
+    if pin.eq_ignore_ascii_case("human") {
+        opts.evaluator_kind_override = Some(EvaluatorKind::Human);
+        return;
+    }
+    if pin.eq_ignore_ascii_case("ai") {
+        opts.evaluator_kind_override = Some(EvaluatorKind::Ai);
+        return;
+    }
+    if let Some(rest) = pin
+        .strip_prefix("ai:")
+        .or_else(|| pin.strip_prefix("AI:"))
+    {
+        opts.evaluator_kind_override = Some(EvaluatorKind::Ai);
+        // `worker` or `worker:model` (model ids rarely contain `:`; first segment
+        // is the worker name, remainder is the model if present).
+        if rest.is_empty() {
+            return;
+        }
+        match rest.split_once(':') {
+            Some((worker, model)) if !worker.is_empty() => {
+                opts.role_prefers.insert("evaluator".into(), worker.to_string());
+                if !model.is_empty() {
+                    opts.role_models.insert("evaluator".into(), model.to_string());
+                }
+            }
+            _ => {
+                opts.role_prefers.insert("evaluator".into(), rest.to_string());
+            }
+        }
+        return;
+    }
+    // Bare worker name (config-style role pin).
+    opts.role_prefers.insert("evaluator".into(), pin.to_string());
 }
 
 /// Apply conductor pins from a human session onto a config clone.
@@ -598,7 +686,24 @@ pub async fn run_plan_with(
     Ok(report)
 }
 
+/// When `RINNE_STREAM_JSON=1` (or `true`/`yes`), emit machine-readable JSONL
+/// engine events so native UIs (macOS app, etc.) can render live Token/Thinking
+/// streams with correct kinds. Default remains human-readable terminal output.
+fn stream_json_enabled() -> bool {
+    match std::env::var("RINNE_STREAM_JSON") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 fn print_event(ev: EngineEvent) {
+    if stream_json_enabled() {
+        print_event_json(ev);
+        return;
+    }
     match ev {
         EngineEvent::Narration(line) => println!("conductor: {line}"),
         EngineEvent::NodeStarted { id, worker } => println!("▶ {id} → {worker}"),
@@ -616,19 +721,101 @@ fn print_event(ev: EngineEvent) {
                 Raw(_) | Done => {}
             }
         }
-        EngineEvent::NodeFinished { id, status } => {
+        EngineEvent::NodeFinished { id, status, tokens } => {
             let mark = if status == rinne_core::NodeStatus::Succeeded {
                 "✔"
             } else {
                 "✗"
             };
-            println!("{mark} {id} {}", status.label());
+            if tokens > 0 {
+                println!(
+                    "{mark} {id} {} · {} tok",
+                    status.label(),
+                    rinne_core::worker::format_token_count(tokens)
+                );
+            } else {
+                println!("{mark} {id} {}", status.label());
+            }
         }
         EngineEvent::Parked { id, question } => {
             println!("\n⏸ parked at {id}");
             println!("   {question}");
         }
     }
+}
+
+/// One JSON object per line, flushed immediately. Token/Thinking deltas keep
+/// their kind so harness UIs do not need to scrape untagged `print!` bytes.
+fn print_event_json(ev: EngineEvent) {
+    use std::io::Write;
+    let line = match ev {
+        EngineEvent::Narration(text) => serde_json::json!({
+            "type": "narration",
+            "text": text,
+        }),
+        EngineEvent::NodeStarted { id, worker } => serde_json::json!({
+            "type": "node_start",
+            "node": id,
+            "worker": worker,
+        }),
+        EngineEvent::NodeStream { id, event } => {
+            use rinne_core::worker::WorkerEvent::*;
+            match event {
+                Token(t) => serde_json::json!({
+                    "type": "token",
+                    "node": id,
+                    "text": t,
+                }),
+                Thinking(t) => serde_json::json!({
+                    "type": "thinking",
+                    "node": id,
+                    "text": t,
+                }),
+                Message(m) => serde_json::json!({
+                    "type": "message",
+                    "node": id,
+                    "text": m,
+                }),
+                Reading(m) => serde_json::json!({
+                    "type": "reading",
+                    "node": id,
+                    "text": m,
+                }),
+                Editing(m) => serde_json::json!({
+                    "type": "editing",
+                    "node": id,
+                    "text": m,
+                }),
+                ToolUse(m) => serde_json::json!({
+                    "type": "tool_use",
+                    "node": id,
+                    "text": m,
+                }),
+                Raw(m) => serde_json::json!({
+                    "type": "raw",
+                    "node": id,
+                    "text": m,
+                }),
+                Done => serde_json::json!({
+                    "type": "done",
+                    "node": id,
+                }),
+            }
+        }
+        EngineEvent::NodeFinished { id, status, tokens } => serde_json::json!({
+            "type": "node_finish",
+            "node": id,
+            "status": status.label(),
+            "tokens": tokens,
+        }),
+        EngineEvent::Parked { id, question } => serde_json::json!({
+            "type": "parked",
+            "node": id,
+            "question": question,
+        }),
+    };
+    println!("{line}");
+    let _ = std::io::stdout().flush();
 }
 
 fn print_report(report: &RunReport) {
@@ -646,6 +833,67 @@ fn print_report(report: &RunReport) {
     if report.completed {
         println!("✔ completed");
     } else {
-        println!("✗ not complete — `rinne resume` to continue");
+        println!("✗ not complete — `rinne --continue` or `rinne resume` to continue");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rinne_core::dag::EvaluatorKind;
+    use rinne_core::HumanSession;
+
+    #[test]
+    fn evaluator_pin_tool_and_human_set_kind_override() {
+        let mut opts = EngineOptions::default();
+        let mut session = HumanSession {
+            active: true,
+            ..Default::default()
+        };
+        session.pins.evaluator = Some("tool".into());
+        apply_human_session(&session, &mut opts);
+        assert_eq!(opts.evaluator_kind_override, Some(EvaluatorKind::Tool));
+
+        opts = EngineOptions::default();
+        session.pins.evaluator = Some("human".into());
+        apply_human_session(&session, &mut opts);
+        assert_eq!(opts.evaluator_kind_override, Some(EvaluatorKind::Human));
+    }
+
+    #[test]
+    fn evaluator_pin_ai_worker_model_splits_correctly() {
+        let mut opts = EngineOptions::default();
+        let mut session = HumanSession {
+            active: true,
+            ..Default::default()
+        };
+        session.pins.evaluator = Some("ai:openrouter:gpt-4o".into());
+        apply_human_session(&session, &mut opts);
+        assert_eq!(opts.evaluator_kind_override, Some(EvaluatorKind::Ai));
+        assert_eq!(
+            opts.role_prefers.get("evaluator").map(String::as_str),
+            Some("openrouter")
+        );
+        assert_eq!(
+            opts.role_models.get("evaluator").map(String::as_str),
+            Some("gpt-4o")
+        );
+    }
+
+    #[test]
+    fn inactive_session_is_a_no_op() {
+        let mut opts = EngineOptions::default();
+        let session = HumanSession {
+            active: false,
+            pins: rinne_core::RolePins {
+                generator_worker: Some("claude-code".into()),
+                evaluator: Some("human".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_human_session(&session, &mut opts);
+        assert!(opts.role_prefers.is_empty());
+        assert!(opts.evaluator_kind_override.is_none());
     }
 }
