@@ -73,6 +73,8 @@ pub const KNOWN_API_PROVIDERS: &[KnownApiProvider] = &[
         base_url: "https://api.x.ai/v1",
         models: &["grok-3-mini", "grok-3"],
     },
+    // Note: cloudflare needs account-specific base_url
+    // (`…/accounts/{ACCOUNT_ID}/ai/v1`); connect via --base-url or the app UI.
 ];
 
 /// Look up a known API provider by name.
