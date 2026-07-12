@@ -20,6 +20,17 @@ use rinne_core::{Result, RinneError};
 use crate::model::Config;
 use crate::paths;
 
+/// Suffixes of `RINNE_*` env vars that are process flags, not Config fields.
+/// Figment's `Env::prefixed("RINNE_")` matches the part after the prefix.
+const NON_CONFIG_ENV_SUFFIXES: &[&str] = &[
+    // macOS app / harness UI: machine-readable engine JSONL stream
+    "STREAM_JSON",
+    // opt-out of crates.io/GitHub update probe
+    "NO_UPDATE_CHECK",
+    // optional path override for locating the `rinne` binary (used by wrappers)
+    "BIN",
+];
+
 /// Load configuration for the given project root, applying the full layering.
 ///
 /// Missing config files are skipped, not errors — a zero-config install loads
@@ -56,7 +67,17 @@ pub fn load_layered(
 
     if merge_env {
         // `RINNE_LOOP_TEST_RATCHET=false`, `RINNE_CONDUCTOR_BACKEND=groq`, etc.
-        figment = figment.merge(Env::prefixed("RINNE_").split("_"));
+        //
+        // Process/protocol flags also use the RINNE_ prefix for discoverability
+        // but are NOT Config fields (Config uses deny_unknown_fields). Without
+        // ignoring them, `RINNE_STREAM_JSON=1` (set by the macOS app for live
+        // JSONL streaming) fails as unknown field `stream` and blocks doctor,
+        // connect, and every other command that loads config.
+        figment = figment.merge(
+            Env::prefixed("RINNE_")
+                .ignore(NON_CONFIG_ENV_SUFFIXES)
+                .split("_"),
+        );
     }
 
     figment
