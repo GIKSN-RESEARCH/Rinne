@@ -128,7 +128,12 @@ pub fn edit_lines(args: &str, cwd: &Path) -> Vec<String> {
             out
         }
         "conductor" => match rest {
-            [] => vec!["usage: /config conductor <cloudflare|groq|nvidia|local|harness> [model] [--key <token>]".to_string()],
+            [] => vec![
+                "usage: /config conductor <backend> [model] [--key <token>]".to_string(),
+                "  backends: cloudflare|groq|nvidia|openrouter|openai|deepseek|gemini|mistral|together|xai|local|harness".to_string(),
+                "  pick a model from that provider (e.g. `rinne models openrouter`), then:".to_string(),
+                "  rinne config conductor openrouter openai/gpt-oss-120b:free".to_string(),
+            ],
             [backend, model_parts @ ..] => {
                 let mut sets = vec![("conductor.backend".to_string(), backend.to_string())];
                 if !model_parts.is_empty() {
@@ -191,12 +196,19 @@ pub fn edit_lines(args: &str, cwd: &Path) -> Vec<String> {
 /// The keychain provider + env var for a keyed conductor backend named `backend`
 /// (`None` for keyless `local`/`harness`).
 fn keyed_backend(backend: &str) -> Option<(&'static str, &'static str)> {
-    match backend {
-        "cloudflare" => Some(("cloudflare", "CLOUDFLARE_API_TOKEN")),
-        "groq" => Some(("groq", "GROQ_API_KEY")),
-        "nvidia" => Some(("nvidia", "NVIDIA_API_KEY")),
-        _ => None,
+    use rinne_config::model::ConductorBackend;
+    let b = ConductorBackend::parse(backend)?;
+    if !b.needs_api_key() {
+        return None;
     }
+    let name = b.as_str();
+    let env = match b {
+        ConductorBackend::Cloudflare => "CLOUDFLARE_API_KEY",
+        _ => rinne_config::known::known_api_provider(name)
+            .map(|p| p.key_env)
+            .unwrap_or("API_KEY"),
+    };
+    Some((name, env))
 }
 
 /// Store a token for a named backend in the OS keychain.
@@ -331,7 +343,7 @@ fn path_lines(cwd: &Path) -> Vec<String> {
 }
 
 fn backend_label(config: &rinne_config::Config) -> String {
-    format!("{:?}", config.conductor.backend).to_lowercase()
+    config.conductor.backend.as_str().to_string()
 }
 
 fn existence(p: &Path) -> &'static str {
@@ -385,6 +397,12 @@ const TEMPLATE: &str = r#"# Rinne configuration. Uncomment and edit what you nee
 # key_env = "OPENROUTER_API_KEY"
 # base_url = "https://openrouter.ai/api/v1"
 # models = ["openai/gpt-4o-mini"]
+
+# Live subscription limit probes (status chip + /limit-usage + threshold alerts):
+# [limits]
+# show_status = true          # bottom-right: avg during run, per-model after
+# poll_secs = 180             # how often to re-probe while the TUI is open
+# alert_at = [50, 75, 90, 100]  # one-shot narration when a window crosses these
 "#;
 
 #[cfg(test)]

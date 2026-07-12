@@ -11,6 +11,7 @@ pub mod dag;
 pub mod error;
 pub mod evaluator;
 pub mod graph;
+pub mod human;
 pub mod replanner;
 pub mod skip;
 pub mod skill;
@@ -18,13 +19,18 @@ pub mod worker;
 
 pub use blackboard::{Blackboard, NodeStatus};
 pub use error::{Result, RinneError};
+pub use human::{
+    gate_iter_key, gate_ok_key, CheckpointTrigger, HumanSession, NamedCheckpoint, RolePins,
+    GATE_ACTIVE_KEY, HUMAN_SESSION_FILE,
+};
 pub use evaluator::{EvalContext, Evaluator, Gate};
 pub use replanner::Replanner;
 pub use skill::Skill;
 pub use worker::{
-    AuthMode, Capability, Constraints, ContextPacket, EventSink, ExecStatus, ExecuteRequest,
-    ExecuteResult, InlinedFile, LatencyProfile, McpServerSpec, McpTransportKind, QuotaModel, Role,
-    ToolExecutor, ToolSpec, Transport, Usage, Worker, WorkerDescriptor, WorkerEvent, WorkerFamily,
+    format_token_count, AuthMode, Capability, Constraints, ContextPacket, EventSink, ExecStatus,
+    ExecuteRequest, ExecuteResult, InlinedFile, LatencyProfile, McpServerSpec, McpTransportKind,
+    QuotaModel, Role, ToolExecutor, ToolSpec, Transport, Usage, Worker, WorkerDescriptor,
+    WorkerEvent, WorkerFamily,
 };
 
 /// The on-disk blackboard directory name, relative to the working repo.

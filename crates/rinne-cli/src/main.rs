@@ -23,6 +23,12 @@ use rinne_core::BLACKBOARD_DIR;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `rinne .` / `rinne ./path` — open the macOS GUI (like `code .`), before clap
+    // treats `.` as an unknown subcommand.
+    if let Some(path) = intercept_folder_open(std::env::args().skip(1)) {
+        return commands::open_gui::run(Some(path.as_str())).await;
+    }
+
     let args = Cli::parse();
 
     let blackboard = PathBuf::from(BLACKBOARD_DIR);
@@ -31,6 +37,24 @@ async fn main() -> Result<()> {
     let no_graph = args.no_graph;
     let no_ai = args.no_ai;
     let open = args.open;
+
+    // `--continue` resumes the prior orchestration session from disk. It is
+    // mutually exclusive with a fresh `-p` plan (use one or the other).
+    if args.continue_session {
+        if args.prompt.is_some() {
+            anyhow::bail!(
+                "--continue resumes the last session; omit -p/--prompt \
+                 (or start a fresh run without --continue)"
+            );
+        }
+        if args.command.is_some() {
+            anyhow::bail!(
+                "--continue cannot be combined with a subcommand; \
+                 use `rinne resume` with --steer/--approve/--reject for parked decisions"
+            );
+        }
+        return commands::run::continue_session().await;
+    }
 
     // A `-p` prompt means one-shot headless mode regardless of subcommand.
     if let Some(task) = args.prompt.as_deref() {
@@ -47,13 +71,17 @@ async fn main() -> Result<()> {
 
     match args.command {
         None => run_interactive(no_graph).await,
-        Some(Command::Doctor) => run_doctor().await,
+        Some(Command::Doctor { routing }) => commands::doctor::run(false, routing).await,
         Some(Command::Run { plan }) => commands::run::run(&plan, no_graph).await,
         Some(Command::Connect { backend, key, models, base_url, add }) => {
             commands::connect::run(&backend, key, models, base_url, add).await
         }
         Some(Command::Forget { provider }) => commands::forget::run(&provider).await,
-        Some(Command::Models { provider }) => commands::models::run(provider.as_deref()).await,
+        Some(Command::Models {
+            provider,
+            json,
+            catalog,
+        }) => commands::models::run(provider.as_deref(), json, catalog).await,
         Some(Command::Status) => run_status().await,
         Some(Command::Resume {
             steer,
@@ -83,6 +111,23 @@ async fn main() -> Result<()> {
             };
             commands::learn::run(learn_cmd, cwd, no_ai, open).await
         }
+        Some(Command::Human { args }) => run_human(&args).await,
+        Some(Command::LimitUsage) => commands::limits::run().await,
+        Some(Command::Open { path }) => commands::open_gui::run(Some(path.as_str())).await,
+    }
+}
+
+/// If argv is a single folder path (e.g. `.`), open the GUI instead of the TUI.
+fn intercept_folder_open(args: impl Iterator<Item = String>) -> Option<String> {
+    let collected: Vec<String> = args.collect();
+    if collected.len() != 1 {
+        return None;
+    }
+    let a = &collected[0];
+    if commands::open_gui::looks_like_folder_open(a) {
+        Some(a.clone())
+    } else {
+        None
     }
 }
 
@@ -94,9 +139,7 @@ async fn run_oneshot(task: &str, json: bool, no_graph: bool) -> Result<()> {
     commands::run::oneshot(task, json, no_graph).await
 }
 
-async fn run_doctor() -> Result<()> {
-    commands::doctor::run(false).await
-}
+
 
 
 async fn run_status() -> Result<()> {
@@ -105,4 +148,12 @@ async fn run_status() -> Result<()> {
 
 async fn run_logs() -> Result<()> {
     commands::logs::run().await
+}
+
+async fn run_human(args: &[String]) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    for line in commands::human::run_lines(args, &cwd) {
+        println!("{line}");
+    }
+    Ok(())
 }

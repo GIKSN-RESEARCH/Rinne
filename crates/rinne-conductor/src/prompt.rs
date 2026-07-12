@@ -4,9 +4,13 @@
 //! `@`-mentions, the worker registry (capabilities, auth mode, quota), and
 //! constraints. Output: a JSON DAG.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use rinne_config::model::RoutingConfig;
 use rinne_core::worker::WorkerDescriptor;
+
+use crate::tier_exemplars::LoadedExemplar;
 
 /// An MCP tool surfaced to the planner as a cheap name+description (the full
 /// schema loads only when a node that attaches it runs — `MCP_SKILLS.md` §11).
@@ -41,12 +45,20 @@ pub struct ConductorInput {
     pub digest: Option<String>,
     /// Family preference (`harness | api | balanced`).
     pub prefer: Option<String>,
+    /// Per-role worker pins from config or `/human` (role → worker name).
+    pub role_prefers: HashMap<String, String>,
     pub budget_minutes: Option<u64>,
     pub max_iterations_per_node: u32,
     /// Task-bounded code structure: the neighborhoods of symbols relevant to
     /// this goal, resolved by the CLI runner from the code graph. Empty when
     /// the graph is disabled or no relevant symbols were found.
     pub structure: Vec<rinne_types::graph::Neighborhood>,
+    /// Project root for workspace-aware routing (test command detection, etc.).
+    pub workspace: Option<PathBuf>,
+    /// `[routing]` overrides from config.
+    pub routing: RoutingConfig,
+    /// User-provided tier exemplars merged into classification.
+    pub user_exemplars: Vec<LoadedExemplar>,
 }
 
 /// The system prompt: who the conductor is and the exact schema it must emit.
@@ -161,10 +173,16 @@ JSON schema:
       "evaluator": "ai" | "tool" | "human" (only on evaluator nodes),
       "acceptance": { "command": string, "must_exit": number } (tool evaluators),
       "on_fail": string (optional, e.g. "loop_back(n2, critique=artifacts/review.md)"),
-      "checkpoint": "before" | "after" (optional, a human gate)
+      "checkpoint": "before" | "after" (optional, a human gate),
+      "complexity_tier": "T0" | "T1" | "T2" | "T3" | "T4" (required per node),
+      "matched_exemplar": string (optional, e.g. "T2-05"),
+      "phase": string (optional, e.g. "build", "tests")
     }
   ]
 }
+
+Assign complexity_tier honestly per node using the TIER EXEMPLAR HINTS in the user prompt.
+The routing matrix assigns concrete models — pick tier and structure; do not over-provision models.
 
 Capabilities: code-edit, repo-aware, web-search, vision, long-context, tool-run,
 code-review, reasoning, writing.
@@ -264,6 +282,14 @@ pub fn user_prompt(input: &ConductorInput) -> String {
     } else {
         s.push_str("- no strong preference; spread across capable workers where it helps\n");
     }
+    if !input.role_prefers.is_empty() {
+        s.push_str("- pinned roles (honor on matching nodes):\n");
+        let mut roles: Vec<_> = input.role_prefers.iter().collect();
+        roles.sort_by(|a, b| a.0.cmp(b.0));
+        for (role, worker) in roles {
+            s.push_str(&format!("  - {role} → {worker}\n"));
+        }
+    }
 
     if let Some(digest) = &input.digest {
         s.push_str("\nCURRENT STATE (for re-planning):\n");
@@ -279,6 +305,35 @@ pub fn user_prompt(input: &ConductorInput) -> String {
 /// catalog stays one entry per line.
 fn one_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
+}
+
+/// Tier classification context appended to the user prompt.
+pub fn exemplar_section(classification: &crate::classifier::Classification) -> String {
+    use crate::tier_exemplars::all;
+    let mut s = format!(
+        "\nTIER CLASSIFICATION: goal floor = {} (confidence {:.0}%)\n",
+        classification.goal_tier_floor.label(),
+        classification.confidence * 100.0
+    );
+    if !classification.matched_ids.is_empty() {
+        s.push_str("Matched exemplars: ");
+        s.push_str(&classification.matched_ids.join(", "));
+        s.push('\n');
+    }
+    s.push_str("TIER EXEMPLAR HINTS (match each node to the closest tier):\n");
+    for tier in [
+        rinne_core::dag::ComplexityTier::T0,
+        rinne_core::dag::ComplexityTier::T1,
+        rinne_core::dag::ComplexityTier::T2,
+        rinne_core::dag::ComplexityTier::T3,
+        rinne_core::dag::ComplexityTier::T4,
+    ] {
+        s.push_str(&format!("\n{} examples:\n", tier.label()));
+        for ex in all().iter().filter(|e| e.tier == tier).take(3) {
+            s.push_str(&format!("- [{}] {}\n", ex.id, ex.prompt));
+        }
+    }
+    s
 }
 
 #[cfg(test)]

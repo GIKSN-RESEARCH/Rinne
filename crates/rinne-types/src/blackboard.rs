@@ -40,8 +40,9 @@ impl NodeStatus {
     }
 
     /// Parse a stored string form back into a status (defaults to `Pending`).
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> NodeStatus {
+    /// Prefer [`std::str::FromStr`] when an error on unknown values is needed;
+    /// this keeps the historical lenient mapping used by persistence.
+    pub fn parse_label(s: &str) -> NodeStatus {
         match s {
             "running" => NodeStatus::Running,
             "succeeded" => NodeStatus::Succeeded,
@@ -49,6 +50,12 @@ impl NodeStatus {
             "parked" => NodeStatus::Parked,
             _ => NodeStatus::Pending,
         }
+    }
+
+    /// Backward-compatible alias for [`Self::parse_label`].
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> NodeStatus {
+        Self::parse_label(s)
     }
 
     pub fn label(self) -> &'static str {

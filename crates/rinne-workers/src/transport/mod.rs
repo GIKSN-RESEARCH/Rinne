@@ -8,7 +8,8 @@ pub mod http;
 pub mod subprocess;
 
 pub use http::{
-    normalize_base_url, ChatBackend, ChatMessage, ChatRequest, ChatResponse, DiscoveredModel,
-    OpenAiClient,
+    cloudflare_account_id_from_base_url, cloudflare_text_model_fallback,
+    list_cloudflare_workers_ai_models, normalize_base_url, ChatBackend, ChatMessage, ChatRequest,
+    ChatResponse, DiscoveredModel, OpenAiClient,
 };
 pub use subprocess::{raw_lines, run, SubprocessOutput, SubprocessSpec};

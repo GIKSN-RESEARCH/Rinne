@@ -14,8 +14,8 @@ pub use descriptor::{
 };
 pub use event::{emit, EventSink, WorkerEvent};
 pub use exec::{
-    Constraints, ContextPacket, ExecStatus, ExecuteRequest, ExecuteResult, InlinedFile,
-    McpServerSpec, McpTransportKind, Role, ToolSpec, Usage,
+    format_token_count, Constraints, ContextPacket, ExecStatus, ExecuteRequest, ExecuteResult,
+    InlinedFile, McpServerSpec, McpTransportKind, Role, ToolSpec, Usage,
 };
 
 use async_trait::async_trait;

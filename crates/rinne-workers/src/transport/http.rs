@@ -124,6 +124,227 @@ pub struct DiscoveredModel {
     pub context: Option<u64>,
 }
 
+/// Cloudflare Workers AI rejects OpenAI-compatible `GET …/ai/v1/models` (HTTP 405).
+/// Use the native REST catalog instead:
+/// `GET /accounts/{account_id}/ai/models/search`.
+///
+/// Model ids are returned as Workers AI names (`@cf/meta/llama-3.1-8b-instruct`, …)
+/// so they work with the OpenAI-compatible chat base URL.
+pub async fn list_cloudflare_workers_ai_models(
+    account_id: &str,
+    api_token: &str,
+) -> Result<Vec<DiscoveredModel>> {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        return Err(RinneError::Worker(
+            "cloudflare catalog needs account_id (set conductor.account_id or use an accounts/…/ai/v1 base_url)"
+                .into(),
+        ));
+    }
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let mut all: Vec<DiscoveredModel> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // Paginate; CF catalog is ~80–100 models.
+    for page in 1u32..=20 {
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/models/search?per_page=100&page={page}"
+        );
+        let resp = http
+            .get(&url)
+            .bearer_auth(api_token)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| RinneError::Worker(format!("cloudflare models/search failed: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RinneError::Worker(format!(
+                "cloudflare models/search HTTP {status}: {text}"
+            )));
+        }
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RinneError::Worker(format!("cloudflare models/search json: {e}")))?;
+
+        if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
+            let err = v
+                .get("errors")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "success=false".into());
+            return Err(RinneError::Worker(format!(
+                "cloudflare models/search error: {err}"
+            )));
+        }
+
+        // Default shape: { "result": [ { "name": "@cf/…", "task": {…}, … } ] }
+        // Also accept openrouter marketplace shape: { "data": [ { "id": … } ] }
+        let items = v
+            .get("result")
+            .and_then(|r| r.as_array())
+            .or_else(|| v.get("data").and_then(|d| d.as_array()))
+            .cloned()
+            .unwrap_or_default();
+
+        if items.is_empty() {
+            break;
+        }
+
+        let mut page_count = 0usize;
+        for m in &items {
+            page_count += 1;
+            // Prefer chat / text-generation models for the ladder UI.
+            if let Some(task) = m.get("task") {
+                let task_name = task
+                    .get("name")
+                    .or_else(|| task.as_str().map(|_| task))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let lower = task_name.to_lowercase();
+                // Skip pure embeddings / image / audio when task is known.
+                if !lower.is_empty()
+                    && !lower.contains("text generation")
+                    && !lower.contains("text-generation")
+                    && !lower.contains("conversational")
+                    && lower != "llm"
+                {
+                    // Keep models with no useful task filter applied when name looks like @cf text.
+                    let name_hint = m
+                        .get("name")
+                        .or_else(|| m.get("id"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    if !(name_hint.contains("instruct")
+                        || name_hint.contains("chat")
+                        || name_hint.contains("llama")
+                        || name_hint.contains("gpt")
+                        || name_hint.contains("kimi")
+                        || name_hint.contains("glm")
+                        || name_hint.contains("qwen")
+                        || name_hint.contains("mistral")
+                        || name_hint.contains("gemma")
+                        || name_hint.contains("deepseek")
+                        || name_hint.contains("nemotron")
+                        || name_hint.contains("granite")
+                        || name_hint.contains("coder"))
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            let id = m
+                .get("name")
+                .or_else(|| m.get("id"))
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let Some(mut id) = id else { continue };
+            // Workers AI chat expects @cf/… ids; some rows use short names.
+            if !id.contains('/') {
+                id = format!("@cf/{id}");
+            } else if !id.starts_with('@') && !id.starts_with("cf/") {
+                // already org/model — leave; CF often returns full @cf/…
+            }
+
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let context = m
+                .get("context_window")
+                .or_else(|| m.get("context_length"))
+                .or_else(|| m.pointer("/properties/context_window"))
+                .and_then(|c| c.as_u64());
+            all.push(DiscoveredModel {
+                id,
+                prompt_price: None,
+                context,
+            });
+        }
+
+        if page_count < 100 {
+            break;
+        }
+    }
+
+    all.sort_by(|a, b| a.id.cmp(&b.id));
+    if all.is_empty() {
+        // Never leave the UI empty — surface a curated text-generation shortlist.
+        return Ok(cloudflare_text_model_fallback());
+    }
+    Ok(all)
+}
+
+/// Curated Workers AI **text** model ids (OpenAI-compat chat). Used when the
+/// native models/search API is empty/unavailable so the Models tab still offers
+/// real `@cf/…` ids to add. Keep in sync with
+/// https://developers.cloudflare.com/workers-ai/models/
+pub fn cloudflare_text_model_fallback() -> Vec<DiscoveredModel> {
+    const IDS: &[&str] = &[
+        "@cf/zai-org/glm-5.2",
+        "@cf/zai-org/glm-4.7-flash",
+        "@cf/moonshotai/kimi-k2.7-code",
+        "@cf/moonshotai/kimi-k2.6",
+        "@cf/openai/gpt-oss-120b",
+        "@cf/openai/gpt-oss-20b",
+        "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "@cf/meta/llama-3.1-8b-instruct-fast",
+        "@cf/meta/llama-3.1-8b-instruct-fp8",
+        "@cf/meta/llama-3.2-3b-instruct",
+        "@cf/meta/llama-3.2-1b-instruct",
+        "@cf/google/gemma-4-26b-a4b-it",
+        "@cf/google/gemma-3-12b-it",
+        "@cf/qwen/qwen3-30b-a3b-fp8",
+        "@cf/qwen/qwen2.5-coder-32b-instruct",
+        "@cf/qwen/qwq-32b",
+        "@cf/mistralai/mistral-small-3.1-24b-instruct",
+        "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+        "@cf/ibm/granite-4.0-h-micro",
+        "@cf/nvidia/nemotron-3-120b-a12b",
+    ];
+    IDS.iter()
+        .map(|id| DiscoveredModel {
+            id: (*id).to_string(),
+            prompt_price: None,
+            context: None,
+        })
+        .collect()
+}
+
+/// Extract Cloudflare account id from an OpenAI-compat base URL such as
+/// `https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1`.
+pub fn cloudflare_account_id_from_base_url(base_url: &str) -> Option<String> {
+    let marker = "/accounts/";
+    let idx = base_url.find(marker)?;
+    let rest = &base_url[idx + marker.len()..];
+    let id = rest.split('/').next()?.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+#[cfg(test)]
+mod cf_catalog_tests {
+    use super::cloudflare_account_id_from_base_url;
+
+    #[test]
+    fn parses_account_id_from_openai_compat_base() {
+        let id = cloudflare_account_id_from_base_url(
+            "https://api.cloudflare.com/client/v4/accounts/34d54c2157d6c13f34c4d5a171484700/ai/v1",
+        );
+        assert_eq!(id.as_deref(), Some("34d54c2157d6c13f34c4d5a171484700"));
+    }
+}
+
 /// An OpenAI-compatible chat client over a configurable base URL.
 #[derive(Clone)]
 pub struct OpenAiClient {

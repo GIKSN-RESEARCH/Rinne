@@ -4,9 +4,20 @@
 
 ![Rinne driving a cross-harness refactor: the conductor plans a generator→evaluator DAG, claude-code refactors, codex verifies and loops back with a critique until every test is green.](assets/rinne-demo.gif)
 
-## Crates Version - 0.1.6
+## Crates Version - 0.1.7
 
 ## Install
+
+### macOS app (GUI)
+
+**[Download Rinne for Mac (DMG)](https://github.com/GIKSN-RESEARCH/rinne_macOS/releases/download/v0.1.0/Rinne-0.1.0-macos-arm64.dmg)** — Apple Silicon · [releases](https://github.com/GIKSN-RESEARCH/rinne_macOS/releases)
+
+1. Open the DMG and drag **Rinne** into **Applications**
+2. First launch: right-click → **Open** if Gatekeeper warns (ad-hoc signed build until notarized)
+3. Optional: run **Install CLI.command** in the DMG to put `rinne` on your PATH
+4. From any project folder: `rinne .` (opens the app on that folder, like `code .`)
+
+### CLI only
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/GIKSN-RESEARCH/Rinne/main/install.sh | sh
@@ -302,7 +313,7 @@ release, verifies its `.sha256`, and installs `rinne` to `~/.local/bin`. Re-run
 to upgrade. Overrides via env var:
 
 - `RINNE_INSTALL_DIR` — install location (default `~/.local/bin`)
-- `RINNE_VERSION` — pin a specific tag, e.g. `v0.1.6` (default: latest)
+- `RINNE_VERSION` — pin a specific tag, e.g. `v0.1.7` (default: latest)
 
 Windows is not covered by the script — use the prebuilt `.zip` below or build
 from source. Linux arm64 has no prebuilt binary yet; build from source or
@@ -775,7 +786,7 @@ The architecture has a deliberate constraint worth knowing: SQLite connections a
 Releases are **tag-triggered**: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the `rinne` binary for macOS (arm64 + x86_64), Linux (x86_64), and Windows (x86_64), then publishes a GitHub Release with the archives, `.sha256` checksums, and **auto-generated, categorized notes** (see `.github/release.yml`).
 
 ```bash
-# 1. Bump the version in the workspace Cargo.toml first (e.g. 0.1.5 → 0.1.6),
+# 1. Bump the version in the workspace Cargo.toml first (e.g. 0.1.6 → 0.1.7),
 #    in BOTH [workspace.package].version and the internal rinne-* dep versions.
 #    Commit that bump and merge it to main.
 
@@ -783,22 +794,22 @@ Releases are **tag-triggered**: pushing a `v*` tag runs `.github/workflows/relea
 git checkout main && git pull
 
 # 3. Tag with `v` + the Cargo.toml version, then push the tag:
-git tag -a v0.1.6 -m "Rinne v0.1.6"
-git push origin v0.1.6        # this fires the release workflow
+git tag -a v0.1.7 -m "Rinne v0.1.7"
+git push origin v0.1.7        # this fires the release workflow
 ```
 
 The tag name **must** match the convention `v<version>` — the workflow only triggers on `v*`, and the tag should equal the `Cargo.toml` version. Pushing the tag requires push access to this repository.
 
 Alternatives:
 
-- **GitHub web UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.1.6` → *Create new tag on publish* → *Publish*.
+- **GitHub web UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.1.7` → *Create new tag on publish* → *Publish*.
 - **Manual run (no tag from your machine):** Actions → *release* → *Run workflow* → enter the tag. The workflow's `workflow_dispatch` input handles this.
 
 To redo a botched release, delete the tag and the GitHub Release, then re-tag:
 
 ```bash
-git push origin :refs/tags/v0.1.6   # delete the remote tag
-git tag -d v0.1.6                    # delete the local tag
+git push origin :refs/tags/v0.1.7   # delete the remote tag
+git tag -d v0.1.7                    # delete the local tag
 # fix, re-tag, push again
 ```
 

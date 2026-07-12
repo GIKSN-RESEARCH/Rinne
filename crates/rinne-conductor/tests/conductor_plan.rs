@@ -110,6 +110,8 @@ async fn errors_when_all_backends_fail() {
 }
 
 #[tokio::test]
-async fn rejects_empty_backend_list() {
-    assert!(Conductor::new(vec![]).is_err());
+async fn api_only_conductor_allows_empty_harness_backends() {
+    let conductor = Conductor::new(vec![]).unwrap();
+    // No harness fallbacks and no API key in test env → planning fails at runtime.
+    assert!(conductor.plan(&input()).await.is_err());
 }

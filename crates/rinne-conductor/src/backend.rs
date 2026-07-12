@@ -44,6 +44,15 @@ impl OpenAiBackend {
             model: model.to_string(),
         }
     }
+
+    /// Switch the model for the next `complete()` call (conductor self-escalation).
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 #[async_trait]
@@ -143,14 +152,26 @@ fn tail(s: &str, max: usize) -> &str {
 /// `key_env` overrides the default env var. The provider name is the backend's
 /// own name, so a key stored via `/connect groq` is reused by the conductor.
 pub fn conductor_credential(config: &ConductorConfig) -> Option<(String, String)> {
+    if !config.backend.needs_api_key() {
+        return None;
+    }
+    let provider = config.backend.as_str().to_string();
     let default_env = match config.backend {
+        ConductorBackend::Cloudflare => "CLOUDFLARE_API_KEY",
         ConductorBackend::Groq => "GROQ_API_KEY",
         ConductorBackend::Nvidia => "NVIDIA_API_KEY",
-        ConductorBackend::Cloudflare => "CLOUDFLARE_API_TOKEN",
-        ConductorBackend::Local | ConductorBackend::Harness => return None,
+        other => {
+            // Prefer catalog defaults so connect + conductor share the same env name.
+            rinne_config::known::known_api_provider(other.as_str())
+                .map(|p| p.key_env)
+                .unwrap_or("API_KEY")
+        }
     };
-    let env = config.key_env.clone().unwrap_or_else(|| default_env.to_string());
-    let provider = format!("{:?}", config.backend).to_lowercase();
+    // Cloudflare historically accepted API_TOKEN; keep both via key_env override.
+    let env = config
+        .key_env
+        .clone()
+        .unwrap_or_else(|| default_env.to_string());
     Some((provider, env))
 }
 
@@ -162,14 +183,16 @@ pub fn conductor_base_url(config: &ConductorConfig) -> Option<String> {
         return Some(base);
     }
     match config.backend {
-        ConductorBackend::Groq => Some("https://api.groq.com/openai/v1".into()),
-        ConductorBackend::Nvidia => Some("https://integrate.api.nvidia.com/v1".into()),
         ConductorBackend::Local => Some("http://localhost:11434/v1".into()),
+        ConductorBackend::Harness => None,
         ConductorBackend::Cloudflare => config
             .account_id
             .as_ref()
             .map(|id| format!("https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1")),
-        ConductorBackend::Harness => None,
+        ConductorBackend::Groq => Some("https://api.groq.com/openai/v1".into()),
+        ConductorBackend::Nvidia => Some("https://integrate.api.nvidia.com/v1".into()),
+        other => rinne_config::known::known_api_provider(other.as_str())
+            .map(|p| p.base_url.to_string()),
     }
 }
 
@@ -194,11 +217,21 @@ pub fn resolve_openai(config: &ConductorConfig) -> Result<Option<OpenAiBackend>>
         None => None,
     };
 
-    let name = format!("{:?}", config.backend).to_lowercase();
+    let name = config.backend.as_str().to_string();
     Ok(Some(OpenAiBackend::new(
         name,
         &base_url,
         api_key,
         &config.model,
     )))
+}
+
+/// Like [`resolve_openai`] but pins the model id (planner ladder rung).
+pub fn resolve_openai_model(config: &ConductorConfig, model: &str) -> Result<Option<OpenAiBackend>> {
+    let mut backend = match resolve_openai(config)? {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+    backend.set_model(model);
+    Ok(Some(backend))
 }

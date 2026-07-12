@@ -8,7 +8,7 @@
 # ~/.local/bin (override with RINNE_INSTALL_DIR). Re-run to upgrade.
 #
 # Environment overrides:
-#   RINNE_VERSION       tag to install, e.g. v0.1.6 (default: latest release)
+#   RINNE_VERSION       tag to install, e.g. v0.1.7 (default: latest release)
 #   RINNE_INSTALL_DIR   install directory (default: $HOME/.local/bin)
 #   RINNE_REPO          owner/repo to download from (default: GIKSN-RESEARCH/Rinne)
 

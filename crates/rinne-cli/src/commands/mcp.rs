@@ -62,6 +62,7 @@ fn usage() -> String {
         "  <link>            an http(s) URL (remote server) or a launch command (local stdio)",
         "  auth (remote):    --bearer <token>            Authorization: Bearer <token>",
         "                    --api-key <token> [--auth-header <NAME>]   custom header (default X-API-Key)",
+        "                    --auth bearer|apikey        use token already in keychain (mcp:<name>)",
         "                    --oauth [--client-id <id>]  browser login (OAuth 2.1 + PKCE)",
         "  auth (local):     --secret-env <VAR>=<token>  token as a server env var",
         "  extra:            --header <k=v> (remote)   --env <k=v> (local)   (repeatable, non-secret)",
@@ -110,12 +111,28 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
                 i += 1;
             }
             // Remote auth: a bearer token or an API key in a (custom) header.
+            // GUI clients should prefer `--auth bearer|apikey` after writing the
+            // token to the keychain (never put secrets on argv / process lists).
             "--bearer" | "--key" => {
                 bearer = next;
                 i += 1;
             }
             "--api-key" => {
                 api_key = next;
+                i += 1;
+            }
+            // Auth kind only — token already in keychain as `mcp:<name>`.
+            "--auth" => {
+                // next is "bearer" | "apikey" | "env"
+                // Handled after name is known (see from_keychain_auth below).
+                // Store in next via a local we parse into auth kind with no token.
+                if let Some(ref kind) = next {
+                    match kind.as_str() {
+                        "bearer" => bearer = Some(String::new()), // empty → keychain-only
+                        "apikey" => api_key = Some(String::new()),
+                        _ => {}
+                    }
+                }
                 i += 1;
             }
             "--auth-header" => {
@@ -178,19 +195,57 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     }
     // The token here is a static secret set at add time; for OAuth the token is
     // obtained interactively below and lives in the keychain as a session blob.
+    // Empty bearer/api_key (from `--auth bearer|apikey`) means: use keychain only,
+    // do not re-store, and never require the secret on argv.
     let (token, auth, auth_hdr): (Option<String>, Option<String>, Option<String>) = if oauth {
         (None, Some("oauth".to_string()), None)
     } else if let Some(t) = bearer {
-        (Some(t), Some("bearer".to_string()), None)
+        if t.is_empty() {
+            // Keychain-only: require an existing keychain entry.
+            if rinne_config::secrets::keychain_key(&keychain_provider(&name)).is_none() {
+                return vec![format!(
+                    "no keychain token for mcp:{name} — store it first, or pass --bearer <token> once"
+                )];
+            }
+            (None, Some("bearer".to_string()), None)
+        } else {
+            (Some(t), Some("bearer".to_string()), None)
+        }
     } else if let Some(t) = api_key {
         let hdr = auth_header_name.unwrap_or_else(|| "X-API-Key".to_string());
-        (Some(t), Some("apikey".to_string()), Some(hdr))
+        if t.is_empty() {
+            if rinne_config::secrets::keychain_key(&keychain_provider(&name)).is_none() {
+                return vec![format!(
+                    "no keychain token for mcp:{name} — store it first, or pass --api-key <token> once"
+                )];
+            }
+            (None, Some("apikey".to_string()), Some(hdr))
+        } else {
+            (Some(t), Some("apikey".to_string()), Some(hdr))
+        }
     } else if let Some((var, t)) = secret_env {
-        (Some(t), Some("env".to_string()), Some(var))
+        if t.is_empty() {
+            if rinne_config::secrets::keychain_key(&keychain_provider(&name)).is_none() {
+                return vec![format!(
+                    "no keychain token for mcp:{name} — store it first, or pass --secret-env {var}=<token> once"
+                )];
+            }
+            (None, Some("env".to_string()), Some(var))
+        } else {
+            (Some(t), Some("env".to_string()), Some(var))
+        }
     } else {
         (None, None, None)
     };
-    let key_env = token.as_ref().map(|_| default_key_env(&name));
+    // key_env is required whenever auth uses a static token (including keychain-only).
+    let key_env = if auth.as_deref() == Some("bearer")
+        || auth.as_deref() == Some("apikey")
+        || auth.as_deref() == Some("env")
+    {
+        Some(default_key_env(&name))
+    } else {
+        None
+    };
 
     let server = if is_url {
         McpServer {

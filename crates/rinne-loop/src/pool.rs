@@ -65,10 +65,12 @@ impl PoolProfile {
     }
 
     /// Map of worker name → cascade ladder, for the engine's escalation.
+    /// Includes single-model ladders (API pins like Cloudflare) so overview
+    /// and routing never collapse them to an opaque "default model" label.
     pub fn ladders(&self) -> std::collections::HashMap<String, Vec<String>> {
         self.workers
             .iter()
-            .filter(|w| w.ladder.len() > 1)
+            .filter(|w| !w.ladder.is_empty())
             .map(|w| (w.worker.clone(), w.ladder.clone()))
             .collect()
     }

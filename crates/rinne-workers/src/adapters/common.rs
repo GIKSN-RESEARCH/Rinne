@@ -132,6 +132,27 @@ pub struct HarnessAdapter {
     pub provisioner: Option<McpProvisioner>,
 }
 
+impl HarnessAdapter {
+    /// Replace the static model ladder with a live (or config-merged) list.
+    pub fn with_models(mut self, models: Vec<String>) -> Self {
+        self.descriptor.models = models;
+        self
+    }
+
+    /// Ensure `model` is on the ladder (appended as frontier if missing). Used
+    /// so a user pin / `[models].by_worker` entry is never dropped as "unknown".
+    pub fn ensure_model(mut self, model: &str) -> Self {
+        let model = model.trim();
+        if model.is_empty() {
+            return self;
+        }
+        if !self.descriptor.models.iter().any(|m| m == model) {
+            self.descriptor.models.push(model.to_string());
+        }
+        self
+    }
+}
+
 #[async_trait]
 impl Worker for HarnessAdapter {
     fn descriptor(&self) -> &WorkerDescriptor {
@@ -259,6 +280,10 @@ impl Worker for HarnessAdapter {
         if usage.wall_ms == 0 {
             usage.wall_ms = out.wall_ms;
         }
+        // Many harness CLIs (Grok streaming-json, Aider, …) never report token
+        // counts. Fill zeros from the prompt + result so status / ledger / UI
+        // show consumption instead of a permanent `0 tok`.
+        usage.fill_estimates(&prompt, &parsed.result);
 
         Ok(ExecuteResult {
             result: parsed.result,

@@ -426,21 +426,21 @@ async fn cascade_escalates_model_on_evaluator_failure() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ----- model validation: a foreign model is dropped, not passed to the worker ---
+// ----- model pins: user/config role model beats conductor; unknown catalog ids pass through ---
 
 #[tokio::test]
-async fn model_not_on_resolved_worker_is_dropped() {
-    let ws = temp_ws("model-validate");
+async fn role_model_pin_overrides_node_model() {
+    let ws = temp_ws("model-pin");
     let bb = Blackboard::open(&ws).unwrap();
-    // The conductor assigned an NVIDIA model, but the node resolves to a worker
-    // that only offers `sonnet`. The foreign model must be dropped.
+    // Conductor put a stale id on the node; the user pin must win.
     let plan: Plan = serde_json::from_value(serde_json::json!({
-        "goal": "model validation",
+        "goal": "model pin",
         "nodes": [
             {"id":"n1","role":"generator","instruction":"do","needs":["code-edit"],
-             "prefer":"harness:rec","model":"deepseek-ai/deepseek-v4-pro"}
+             "prefer":"harness:rec","model":"grok-build"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     bb.save_plan(&plan).unwrap();
 
     let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -454,17 +454,74 @@ async fn model_not_on_resolved_worker_is_dropped() {
             quota: QuotaModel::unlimited(),
             latency: LatencyProfile::Fast,
             transport: Transport::SubprocessJson,
-            models: vec!["sonnet".into()], // does NOT include the NVIDIA model
+            models: vec!["grok-composer-2.5-fast".into(), "grok-4.5".into()],
+        },
+        log: log.clone(),
+    }) as Arc<dyn Worker>);
+
+    let mut role_models = std::collections::HashMap::new();
+    role_models.insert("generator".into(), "grok-4.5".into());
+    let options = EngineOptions {
+        role_models,
+        ..opts(3)
+    };
+
+    let mut engine = Engine::new(&bb, plan, &reg, options);
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
+
+    assert!(report.completed, "should complete: {:?}", report.stop_reason);
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["grok-4.5".to_string()],
+        "role pin must beat conductor model"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
+async fn unknown_catalog_model_is_passed_through() {
+    let ws = temp_ws("model-passthrough");
+    let bb = Blackboard::open(&ws).unwrap();
+    // Catalog is stale; user/plan model must still reach the worker (CLI is SoT).
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "goal": "passthrough",
+        "nodes": [
+            {"id":"n1","role":"generator","instruction":"do","needs":["code-edit"],
+             "prefer":"harness:rec","model":"grok-4.5"}
+        ]
+    }))
+    .unwrap();
+    bb.save_plan(&plan).unwrap();
+
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut reg = WorkerRegistry::new();
+    reg.register(Arc::new(RecordingWorker {
+        descriptor: WorkerDescriptor {
+            name: "rec".into(),
+            family: WorkerFamily::Harness,
+            capabilities: full_caps(),
+            auth_mode: AuthMode::Free,
+            quota: QuotaModel::unlimited(),
+            latency: LatencyProfile::Fast,
+            transport: Transport::SubprocessJson,
+            // Stale catalog missing grok-4.5 — previously would drop the model.
+            models: vec!["grok-build".into()],
         },
         log: log.clone(),
     }) as Arc<dyn Worker>);
 
     let mut engine = Engine::new(&bb, plan, &reg, opts(3));
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
-    assert!(report.completed, "should complete, not crash: {:?}", report.stop_reason);
-    // The worker ran with its default (no foreign model forced onto it).
-    assert_eq!(*log.lock().unwrap(), vec!["default"]);
+    assert!(report.completed, "{:?}", report.stop_reason);
+    assert_eq!(*log.lock().unwrap(), vec!["grok-4.5".to_string()]);
 
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -512,6 +569,194 @@ async fn replanner_amends_dag_on_replan_verdict() {
     let amended = bb.load_plan().unwrap();
     assert_eq!(amended.nodes.len(), 1);
     assert_eq!(amended.nodes[0].id, "fixed");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+// ----- named gate parks and resumes on approve --------------------------------
+
+#[tokio::test]
+async fn named_gate_parks_and_resumes() {
+    use rinne_core::{CheckpointTrigger, NamedCheckpoint};
+
+    let ws = temp_ws("named-gate");
+    let bb = Blackboard::open(&ws).unwrap();
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "goal": "gate test",
+        "nodes": [
+            {"id":"n1","role":"generator","instruction":"do","needs":["code-edit"]}
+        ]
+    }))
+    .unwrap();
+    bb.save_plan(&plan).unwrap();
+
+    let mut reg = WorkerRegistry::new();
+    reg.register(Arc::new(MockWorker::success("gen", "done")) as Arc<dyn Worker>);
+
+    let gate = NamedCheckpoint {
+        name: "review".into(),
+        trigger: CheckpointTrigger::AfterNode {
+            node: "n1".into(),
+        },
+    };
+    let options = EngineOptions {
+        gates: vec![gate],
+        ..EngineOptions::default()
+    };
+
+    let mut engine = Engine::new(&bb, plan, &reg, options);
+    let first = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            first.stop_reason,
+            StopReason::NeedsHuman {
+                gate: Some(ref g),
+                ..
+            } if g == "review"
+        ),
+        "expected named gate park: {:?}",
+        first.stop_reason
+    );
+
+    let resume = ResumeInput {
+        node: None,
+        decision: HumanDecision::Approve,
+    };
+    let second = engine
+        .run(CancellationToken::new(), None, Some(resume))
+        .await
+        .unwrap();
+    assert!(second.completed, "should finish after gate approve: {:?}", second.stop_reason);
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+// ----- role pins hard-override node prefer (preferences.roles / /human) --------
+
+/// Records which worker name ran the node.
+struct NamedRecorder {
+    descriptor: WorkerDescriptor,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Worker for NamedRecorder {
+    fn descriptor(&self) -> &WorkerDescriptor {
+        &self.descriptor
+    }
+    async fn execute(
+        &self,
+        _request: ExecuteRequest,
+        _events: EventSink,
+        _cancel: CancellationToken,
+    ) -> rinne_core::Result<ExecuteResult> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(self.descriptor.name.clone());
+        Ok(ExecuteResult {
+            result: "done".into(),
+            file_diff: None,
+            transcript: String::new(),
+            status: ExecStatus::Success,
+            usage: Usage::default(),
+            session_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn role_prefer_pin_overrides_node_prefer() {
+    let ws = temp_ws("role-pin");
+    let bb = Blackboard::open(&ws).unwrap();
+    // Plan prefers "alpha", but a hard role pin for generator → "beta".
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "goal": "role pin",
+        "nodes": [
+            {"id":"n1","role":"generator","instruction":"do","needs":["code-edit"],
+             "prefer":"harness:alpha"}
+        ]
+    }))
+    .unwrap();
+    bb.save_plan(&plan).unwrap();
+
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut reg = WorkerRegistry::new();
+    for name in ["alpha", "beta"] {
+        reg.register(Arc::new(NamedRecorder {
+            descriptor: WorkerDescriptor {
+                name: name.into(),
+                family: WorkerFamily::Harness,
+                capabilities: full_caps(),
+                auth_mode: AuthMode::Free,
+                quota: QuotaModel::unlimited(),
+                latency: LatencyProfile::Fast,
+                transport: Transport::SubprocessJson,
+                models: vec![],
+            },
+            log: log.clone(),
+        }) as Arc<dyn Worker>);
+    }
+
+    let mut role_prefers = std::collections::HashMap::new();
+    role_prefers.insert("generator".into(), "beta".into());
+    let options = EngineOptions {
+        role_prefers,
+        ..EngineOptions::default()
+    };
+
+    let mut engine = Engine::new(&bb, plan, &reg, options);
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
+    assert!(report.completed, "{:?}", report.stop_reason);
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["beta".to_string()],
+        "hard role pin must beat node prefer"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
+async fn evaluator_kind_override_parks_as_human() {
+    let ws = temp_ws("eval-kind");
+    let bb = Blackboard::open(&ws).unwrap();
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "goal": "human eval override",
+        "nodes": [
+            {"id":"n1","role":"generator","instruction":"do","needs":["code-edit"]},
+            {"id":"n2","role":"evaluator","evaluator":"tool","instruction":"would run tests",
+             "depends_on":["n1"],
+             "acceptance":{"command":"true","must_exit":0}}
+        ]
+    }))
+    .unwrap();
+    bb.save_plan(&plan).unwrap();
+
+    let mut reg = WorkerRegistry::new();
+    reg.register(Arc::new(MockWorker::success("gen", "done")) as Arc<dyn Worker>);
+
+    let options = EngineOptions {
+        evaluator_kind_override: Some(rinne_core::dag::EvaluatorKind::Human),
+        ..EngineOptions::default()
+    };
+
+    let mut engine = Engine::new(&bb, plan, &reg, options);
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(report.stop_reason, StopReason::NeedsHuman { ref node, .. } if node == "n2"),
+        "human kind override should park evaluator: {:?}",
+        report.stop_reason
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }

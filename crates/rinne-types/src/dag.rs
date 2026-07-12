@@ -177,6 +177,50 @@ pub struct Node {
     /// A human gate before or after this node.
     #[serde(default)]
     pub checkpoint: Option<Checkpoint>,
+    /// Routing tier assigned by the conductor (T0–T4). The matrix may bump this up.
+    #[serde(default)]
+    pub complexity_tier: Option<ComplexityTier>,
+    /// Closest tier exemplar id from the library (e.g. `T2-05`).
+    #[serde(default)]
+    pub matched_exemplar: Option<String>,
+    /// Optional phase tag for human checkpoints (`build`, `tests`, …).
+    #[serde(default)]
+    pub phase: Option<String>,
+}
+
+/// Task complexity tier for routing (`CONDUCTOR_LOOP_PLAN.md` §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ComplexityTier {
+    T0,
+    T1,
+    T2,
+    T3,
+    T4,
+}
+
+impl ComplexityTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            ComplexityTier::T0 => "T0",
+            ComplexityTier::T1 => "T1",
+            ComplexityTier::T2 => "T2",
+            ComplexityTier::T3 => "T3",
+            ComplexityTier::T4 => "T4",
+        }
+    }
+
+    /// Parse `T0`..`T4` (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_uppercase().as_str() {
+            "T0" => Some(ComplexityTier::T0),
+            "T1" => Some(ComplexityTier::T1),
+            "T2" => Some(ComplexityTier::T2),
+            "T3" => Some(ComplexityTier::T3),
+            "T4" => Some(ComplexityTier::T4),
+            _ => None,
+        }
+    }
 }
 
 /// Per-node loop cap (`CONTEXT.md` §10).

@@ -214,6 +214,47 @@ impl Usage {
     pub fn total_tokens(&self) -> u64 {
         self.prompt_tokens + self.completion_tokens
     }
+
+    /// Rough token estimate for Latin text (~4 chars / token). Used when a
+    /// harness CLI does not report usage (e.g. Grok streaming-json has no
+    /// usage field) so the ledger and UI are not stuck at `0 tok`.
+    pub fn estimate_tokens(text: &str) -> u64 {
+        let n = text.chars().count() as u64;
+        if n == 0 {
+            0
+        } else {
+            (n / 4).max(1)
+        }
+    }
+
+    /// Fill zero token fields from approximate prompt/result sizes. Leaves
+    /// non-zero (CLI-reported) values alone.
+    pub fn fill_estimates(&mut self, prompt: &str, result: &str) {
+        if self.prompt_tokens == 0 {
+            self.prompt_tokens = Self::estimate_tokens(prompt);
+        }
+        if self.completion_tokens == 0 {
+            self.completion_tokens = Self::estimate_tokens(result);
+        }
+    }
+
+    /// Compact human form: `1.2k` / `350` / `0`.
+    pub fn format_total(&self) -> String {
+        format_token_count(self.total_tokens())
+    }
+}
+
+/// Format a token count for status lines (`0`, `350`, `1.2k`, `2.0M`).
+pub fn format_token_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 10_000 {
+        format!("{}k", n / 1000)
+    } else if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// The normalized result every adapter returns (`CONTEXT.md` §8).

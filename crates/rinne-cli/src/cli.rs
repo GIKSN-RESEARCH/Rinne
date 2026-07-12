@@ -8,7 +8,11 @@ use clap::{Parser, Subcommand};
 /// Rinne — local, terminal-first AI orchestration.
 ///
 /// With no subcommand, `rinne` opens the interactive REPL/TUI. With `-p`, it
-/// runs one shot headless with structured output.
+/// runs one shot headless with structured output. With `--continue`, it resumes
+/// the previous orchestration session from saved state.
+///
+/// `rinne .` (or `rinne open .`) opens the **macOS app** on that folder — like
+/// VS Code's `code .`.
 #[derive(Debug, Parser)]
 #[command(name = "rinne", version, about, long_about = None)]
 pub struct Cli {
@@ -16,6 +20,14 @@ pub struct Cli {
     /// instead of opening the interactive TUI (`shoal -p` in the spec).
     #[arg(short = 'p', long = "prompt", value_name = "TASK", global = true)]
     pub prompt: Option<String>,
+
+    /// Resume the previous orchestration session from `.rinne/` (plan + machine
+    /// state) without re-planning. Fails if there is no prior session.
+    ///
+    /// For a parked human gate, prefer `rinne resume --steer` / `--approve` /
+    /// `--reject`. This flag is the short path for "pick up the last run."
+    #[arg(short = 'c', long = "continue")]
+    pub continue_session: bool,
 
     /// With `-p`, emit a single JSON result (scriptable) instead of streaming
     /// human-readable progress.
@@ -48,7 +60,11 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Detect and report backends, auth mode, and quota.
-    Doctor,
+    Doctor {
+        /// Show planner rungs, execution tiers, and exemplar counts.
+        #[arg(long)]
+        routing: bool,
+    },
 
     /// Load a plan file into the blackboard and run it to completion.
     ///
@@ -92,6 +108,14 @@ pub enum Command {
         /// The configured API provider to query (e.g. `openrouter`). Omit to
         /// list all available workers and their model ladders.
         provider: Option<String>,
+        /// Emit machine-readable JSON (`{ "workers": { "name": ["model", …] } }`).
+        /// Used by the macOS app so model lists never depend on text parsing.
+        #[arg(long)]
+        json: bool,
+        /// With a provider: include the live `/v1/models` catalog (all available
+        /// ids, prices, context). Used by the macOS Models tab "Browse catalog".
+        #[arg(long)]
+        catalog: bool,
     },
 
     /// Show the state of the current run (DAG, progress).
@@ -130,6 +154,21 @@ pub enum Command {
 
     /// View trajectory logs (local only).
     Logs,
+
+    /// Session-scoped human control: pin roles, show active overrides.
+    ///
+    /// Subcommands mirror the TUI `/human` slash command (`CONDUCTOR_LOOP_PLAN.md` §4).
+    Human {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Show live subscription / rate-limit usage for available workers.
+    ///
+    /// Claude Code reports 5h + weekly windows when logged in. Other harnesses
+    /// show `n/a` until a probe exists. Alias: `usage`.
+    #[command(visible_alias = "usage")]
+    LimitUsage,
 
     /// Connect and manage MCP servers (tools available to your workers).
     ///
@@ -171,6 +210,60 @@ pub enum Command {
         #[command(subcommand)]
         cmd: LearnCmd,
     },
+
+    /// Open the Rinne macOS app on a folder (like `code .` for VS Code).
+    ///
+    /// Examples:
+    ///   rinne open
+    ///   rinne open .
+    ///   rinne open ~/Desktop/my-project
+    ///
+    /// Shorthand: `rinne .` (no subcommand) does the same.
+    Open {
+        /// Project directory (default: current directory).
+        #[arg(default_value = ".")]
+        path: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn continue_long_flag_parses() {
+        let cli = Cli::try_parse_from(["rinne", "--continue"]).expect("parse --continue");
+        assert!(cli.continue_session);
+        assert!(cli.prompt.is_none());
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn continue_short_flag_parses() {
+        let cli = Cli::try_parse_from(["rinne", "-c"]).expect("parse -c");
+        assert!(cli.continue_session);
+    }
+
+    #[test]
+    fn continue_absent_by_default() {
+        let cli = Cli::try_parse_from(["rinne"]).expect("parse bare rinne");
+        assert!(!cli.continue_session);
+    }
+
+    #[test]
+    fn help_mentions_continue() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert!(
+            help.contains("--continue"),
+            "long help should document --continue:\n{help}"
+        );
+        assert!(
+            help.contains("-c") || help.contains(" -c,"),
+            "long help should document short -c:\n{help}"
+        );
+    }
 }
 
 /// Subcommands for `rinne learn`.

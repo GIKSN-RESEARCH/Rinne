@@ -1,15 +1,21 @@
 //! The Conductor: prompt → JSON DAG, with backend fallback and a JSON-repair
 //! retry (`CONTEXT.md` §7, §21).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
+use rinne_config::model::ConductorConfig;
 use rinne_core::dag::Plan;
 use rinne_core::replanner::Replanner;
 use rinne_core::{Result, RinneError};
 
-use crate::backend::PlanBackend;
+use crate::backend::{resolve_openai_model, PlanBackend};
+use crate::classifier::{classify_goal_with, Classification};
+use crate::ladder::{ConductorLadder, EscalationReason};
 use crate::parse::parse_plan;
-use crate::prompt::{system_prompt, user_prompt, ConductorInput};
+use crate::prompt::{exemplar_section, system_prompt, user_prompt, ConductorInput};
+use crate::routing::apply_routing;
 
 /// The conductor drives one or more backends in preference order. Each backend
 /// gets one repair retry if its first output does not parse, before falling
@@ -20,21 +26,32 @@ pub struct Conductor {
     /// preference, budgets). Reused on replan so an amended plan stays pool- and
     /// catalog-aware — the engine's `Replanner` hook only hands us goal+digest.
     context: ConductorInput,
+    config: ConductorConfig,
+    narration: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl Conductor {
-    /// Build a conductor from backends in preference order (primary first).
-    /// At least one backend is required.
+    /// Build a conductor from harness fallback backends (primary first).
+    /// An empty list is valid when the API planner in `run_once` is configured.
     pub fn new(backends: Vec<Box<dyn PlanBackend>>) -> Result<Self> {
-        if backends.is_empty() {
-            return Err(RinneError::Conductor(
-                "no conductor backend available — configure one or install a harness".into(),
-            ));
-        }
         Ok(Self {
             backends,
             context: ConductorInput::default(),
+            config: ConductorConfig::default(),
+            narration: None,
         })
+    }
+
+    /// Stream planner escalation narration to the UI (`EngineEvent::Narration`).
+    pub fn with_narration(mut self, f: impl Fn(String) + Send + Sync + 'static) -> Self {
+        self.narration = Some(Arc::new(f));
+        self
+    }
+
+    fn narrate(&self, line: String) {
+        if let Some(f) = &self.narration {
+            f(line);
+        }
     }
 
     /// Capture the planning context (workers, tools, skills, preference, budgets)
@@ -45,6 +62,12 @@ impl Conductor {
         self
     }
 
+    /// Conductor config (planner ladder, auto-escalate).
+    pub fn with_conductor_config(mut self, config: ConductorConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Names of the configured backends, primary first (for narration).
     pub fn backend_names(&self) -> Vec<String> {
         self.backends.iter().map(|b| b.name().to_string()).collect()
@@ -52,14 +75,77 @@ impl Conductor {
 
     /// Produce a fresh plan from a goal and context.
     pub async fn plan(&self, input: &ConductorInput) -> Result<Plan> {
+        let classification = self.classify(input);
+        let mut ladder = ConductorLadder::from_config(&self.config);
+        ladder.select_starting_rung(&classification);
+
         let system = system_prompt();
-        let user = user_prompt(input);
-        let mut plan = self.run(&system, &user).await?;
-        // Carry the @-mentioned files onto the plan deterministically. The
-        // assembler inlines their contents for API workers; relying on the LLM
-        // to echo the paths back in its JSON is unreliable, so set them here.
-        plan.mentioned = input.mentioned.clone();
-        Ok(plan)
+        let mut user = user_prompt(input);
+        user.push_str(&exemplar_section(&classification));
+
+        loop {
+            let model = ladder
+                .active_model()
+                .unwrap_or(&self.config.model)
+                .to_string();
+
+            match self.run_once(&system, &user, &model).await {
+                Ok(mut plan) => {
+                    if plan.nodes.len() > 12
+                        && ladder.active_index == 0
+                        && ladder.can_escalate()
+                    {
+                        if let Some((from, to, why)) =
+                            ladder.escalate(EscalationReason::HighNodeCount(plan.nodes.len() as u32))
+                        {
+                            let msg = format!("escalating planner {from} → {to}: {why}");
+                            tracing::info!("conductor: {msg}");
+                            self.narrate(msg);
+                            user.push_str(&format!(
+                                "\n\nESCALATION NOTICE: {why}. Re-plan with fewer, coarser nodes.\n"
+                            ));
+                            continue;
+                        }
+                    }
+
+                    let routing_errs = apply_routing(&mut plan, input, &classification);
+                    if routing_errs.is_empty() {
+                        plan.mentioned = input.mentioned.clone();
+                        return Ok(plan);
+                    }
+
+                    if let Some((from, to, why)) =
+                        ladder.escalate(EscalationReason::ValidationFailure(routing_errs.clone()))
+                    {
+                        let msg = format!("escalating planner {from} → {to}: {why}");
+                        tracing::info!("conductor: {msg}");
+                        self.narrate(msg);
+                        user.push_str(&format!(
+                            "\n\nESCALATION NOTICE: {why}. Re-plan and fix tier/worker assignments.\n"
+                        ));
+                        continue;
+                    }
+
+                    return Err(RinneError::Conductor(format!(
+                        "plan failed routing validation: {}",
+                        routing_errs.join("; ")
+                    )));
+                }
+                Err(e) if is_parse_failure(&e) && ladder.can_escalate() => {
+                    if let Some((from, to, why)) = ladder.escalate(EscalationReason::ParseFailure) {
+                        let msg = format!("escalating planner {from} → {to}: {why}");
+                        tracing::info!("conductor: {msg}");
+                        self.narrate(msg);
+                        user.push_str(&format!(
+                            "\n\nESCALATION NOTICE: {why}. Return ONLY valid JSON.\n"
+                        ));
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Amend an existing plan given new state. For Phase 4 this re-plans from
@@ -69,10 +155,19 @@ impl Conductor {
         self.plan(input).await
     }
 
-    /// Try each backend in order; within a backend, retry once with a repair
-    /// nudge if the first response does not parse.
-    async fn run(&self, system: &str, user: &str) -> Result<Plan> {
+    /// One planning attempt: API backend at `model`, then harness fallbacks.
+    async fn run_once(&self, system: &str, user: &str, model: &str) -> Result<Plan> {
         let mut last_err: Option<RinneError> = None;
+
+        if let Ok(Some(api)) = resolve_openai_model(&self.config, model) {
+            match self.try_backend(&api, system, user).await {
+                Ok(plan) => return Ok(plan),
+                Err(e) => {
+                    tracing::warn!("conductor api `{model}` failed: {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
 
         for backend in &self.backends {
             match self.try_backend(backend.as_ref(), system, user).await {
@@ -114,6 +209,20 @@ impl Conductor {
     }
 }
 
+impl Conductor {
+    fn classify(&self, input: &ConductorInput) -> Classification {
+        classify_goal_with(
+            &input.goal,
+            &input.routing.goal_keywords,
+            &input.user_exemplars,
+        )
+    }
+}
+
+fn is_parse_failure(err: &RinneError) -> bool {
+    matches!(err, RinneError::Plan(_))
+}
+
 /// Normalize a freshly-parsed plan: Rinne owns budgets (via config), so a
 /// model-supplied budget is discarded to avoid a too-tight `max_total_iterations`
 /// killing an otherwise-healthy run.
@@ -127,9 +236,6 @@ fn finalize(mut plan: Plan) -> Plan {
 #[async_trait]
 impl Replanner for Conductor {
     async fn replan(&self, goal: &str, digest: &str, _current: &Plan) -> Result<Plan> {
-        // Start from the captured planning context (workers, tools, skills,
-        // preference, budgets) so the amendment is as pool-aware as the initial
-        // plan; only the goal and the fresh digest change.
         let input = ConductorInput {
             goal: goal.to_string(),
             digest: Some(digest.to_string()),
@@ -145,7 +251,6 @@ mod tests {
     use crate::prompt::{SkillInfo, ToolInfo};
     use std::sync::{Arc, Mutex};
 
-    /// A backend that records the last user prompt it saw and returns a canned plan.
     struct RecordingBackend {
         last_user: Arc<Mutex<String>>,
     }
@@ -181,7 +286,6 @@ mod tests {
         };
         let conductor = Conductor::new(vec![backend]).unwrap().with_context(context);
 
-        // Drive the engine-facing replan hook, which only hands over goal + digest.
         let current = parse_plan(
             r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#,
         )
@@ -189,9 +293,8 @@ mod tests {
         let plan = Replanner::replan(&conductor, "amend it", "node n1 failed", &current)
             .await
             .unwrap();
-        assert_eq!(plan.nodes.len(), 1);
+        assert!(!plan.nodes.is_empty(), "routing may inject evaluators");
 
-        // The captured catalog must have reached the prompt regardless.
         let prompt = recorded.lock().unwrap().clone();
         assert!(prompt.contains("github.search_issues"), "tool catalog flowed into replan");
         assert!(prompt.contains("pdf-forms"), "skill catalog flowed into replan");

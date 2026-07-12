@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use rinne_conductor::{Conductor, ConductorInput, PlanBackend};
+use rinne_core::dag::{Acceptance, EvaluatorKind};
 use rinne_core::worker::Worker;
 use rinne_core::{Blackboard, Engine, EngineOptions, NodeStatus, WorkerRegistry};
 use rinne_workers::mock::MockWorker;
@@ -59,7 +60,17 @@ async fn conductor_plan_runs_through_engine() {
         })
         .await
         .unwrap();
-    assert_eq!(plan.nodes.len(), 3);
+    // Routing may inject a tool evaluator for T1+ goals.
+    assert!(plan.nodes.len() >= 3, "expected at least 3 nodes, got {}", plan.nodes.len());
+    let mut plan = plan;
+    for n in &mut plan.nodes {
+        if n.evaluator == Some(EvaluatorKind::Tool) {
+            n.acceptance = Some(Acceptance {
+                command: "true".into(),
+                must_exit: 0,
+            });
+        }
+    }
 
     // 2. Persist it and run it through the real engine with mock workers.
     let ws = temp_ws("run");
