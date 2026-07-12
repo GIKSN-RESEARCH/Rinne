@@ -23,6 +23,32 @@ pub struct Config {
     pub mcp: McpConfig,
     /// Tier routing rules (`CONDUCTOR_LOOP_PLAN.md` §3.5).
     pub routing: RoutingConfig,
+    /// Live harness limit probes and status-line chip (`/limit-usage`).
+    pub limits: LimitsConfig,
+}
+
+/// `[limits]` — subscription usage probes, status chip, threshold alerts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LimitsConfig {
+    /// Show the compact `limits N%` chip on the TUI status line.
+    pub show_status: bool,
+    /// How often (seconds) the TUI re-probes while idle. Floor 30.
+    /// Default is intentionally high (~3 min) so we stay under Anthropic's
+    /// OAuth usage-endpoint budget when the Claude Code–shaped UA is used.
+    pub poll_secs: u64,
+    /// Fire one-shot narration when a window crosses these % thresholds.
+    pub alert_at: Vec<u8>,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            show_status: true,
+            poll_secs: 180,
+            alert_at: vec![50, 75, 90, 100],
+        }
+    }
 }
 
 /// `[update]` — automatic new-release notification.
@@ -53,7 +79,8 @@ pub struct ModelDefaults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConductorConfig {
-    /// `cloudflare | groq | nvidia | local | harness`.
+    /// OpenAI-compatible planner backend or `harness` / `local`.
+    /// See [`ConductorBackend`].
     pub backend: ConductorBackend,
     /// The model id on that backend.
     pub model: String,
@@ -130,16 +157,70 @@ impl ConductorConfig {
 }
 
 /// The configurable conductor backends (all OpenAI-compatible, §7).
+///
+/// API variants match `KNOWN_API_PROVIDERS` / `rinne connect` names so a key
+/// stored once is reused by the planner. `Harness` uses installed CLI workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConductorBackend {
     Cloudflare,
     Groq,
     Nvidia,
+    OpenRouter,
+    OpenAi,
+    Deepseek,
+    Gemini,
+    Mistral,
+    Together,
+    Xai,
     /// Local via Ollama, fully offline.
     Local,
     /// Fall back to the user's cheapest installed harness as conductor.
     Harness,
+}
+
+impl ConductorBackend {
+    /// Stable config / CLI name (`openrouter`, `cloudflare`, …).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "cloudflare",
+            Self::Groq => "groq",
+            Self::Nvidia => "nvidia",
+            Self::OpenRouter => "openrouter",
+            Self::OpenAi => "openai",
+            Self::Deepseek => "deepseek",
+            Self::Gemini => "gemini",
+            Self::Mistral => "mistral",
+            Self::Together => "together",
+            Self::Xai => "xai",
+            Self::Local => "local",
+            Self::Harness => "harness",
+        }
+    }
+
+    /// Parse a user/CLI backend name (aliases included).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "cloudflare" | "cf" => Some(Self::Cloudflare),
+            "groq" => Some(Self::Groq),
+            "nvidia" => Some(Self::Nvidia),
+            "openrouter" => Some(Self::OpenRouter),
+            "openai" => Some(Self::OpenAi),
+            "deepseek" => Some(Self::Deepseek),
+            "gemini" | "google" => Some(Self::Gemini),
+            "mistral" => Some(Self::Mistral),
+            "together" => Some(Self::Together),
+            "xai" => Some(Self::Xai),
+            "local" | "ollama" => Some(Self::Local),
+            "harness" => Some(Self::Harness),
+            _ => None,
+        }
+    }
+
+    /// Whether this backend needs an API key (vs local/harness).
+    pub fn needs_api_key(self) -> bool {
+        !matches!(self, Self::Local | Self::Harness)
+    }
 }
 
 /// `[loop]` — loop engine limits and safety rails (`CONTEXT.md` §18).
