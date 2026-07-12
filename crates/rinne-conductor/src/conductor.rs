@@ -293,7 +293,7 @@ mod tests {
         let plan = Replanner::replan(&conductor, "amend it", "node n1 failed", &current)
             .await
             .unwrap();
-        assert!(plan.nodes.len() >= 1, "routing may inject evaluators");
+        assert!(!plan.nodes.is_empty(), "routing may inject evaluators");
 
         let prompt = recorded.lock().unwrap().clone();
         assert!(prompt.contains("github.search_issues"), "tool catalog flowed into replan");
