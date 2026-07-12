@@ -55,7 +55,7 @@ fn strip_code_fence(s: &str) -> &str {
         return t;
     };
     // Drop the optional language tag on the opening fence line.
-    let rest = rest.splitn(2, '\n').nth(1).unwrap_or("");
+    let rest = rest.split_once('\n').map(|x| x.1).unwrap_or("");
     rest.trim_end()
         .strip_suffix("```")
         .unwrap_or(rest)
