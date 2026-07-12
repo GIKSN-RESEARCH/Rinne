@@ -197,6 +197,11 @@ pub enum AppMsg {
         available: Vec<String>,
         ladders: std::collections::HashMap<String, Vec<String>>,
     },
+    /// Live subscription limit snapshot for the status chip + threshold alerts.
+    Limits {
+        report: rinne_config::LimitReport,
+        alerts: Vec<String>,
+    },
 }
 
 /// The TUI application state.
@@ -245,6 +250,16 @@ pub struct App {
     should_quit: bool,
     cancel: Option<CancellationToken>,
     tx: tokio::sync::mpsc::UnboundedSender<AppMsg>,
+    /// Latest live limit probe for the status-line chip (`None` until first poll).
+    limit_report: Option<rinne_config::LimitReport>,
+    /// Whether to paint the limits chip (from `[limits].show_status`).
+    limits_show_status: bool,
+    /// Unique harness/API workers that participated in the current/last task
+    /// (first-seen order). Survives resume; cleared on a new goal or `/clear`.
+    /// Drives the run-scoped limits chip (avg while running, per-harness after).
+    run_participants: Vec<String>,
+    /// Cumulative tokens recorded for the current/last run (from node finishes).
+    run_tokens: u64,
 }
 
 impl App {
@@ -276,6 +291,10 @@ impl App {
             should_quit: false,
             cancel: None,
             tx,
+            limit_report: None,
+            limits_show_status: true,
+            run_participants: Vec::new(),
+            run_tokens: 0,
         }
         // `set_intro` is called from `run()` with the loaded config to populate
         // the live intro table; the background probe then resolves availability.
@@ -421,6 +440,58 @@ impl App {
         (done, self.nodes.len())
     }
 
+    /// Normalize an engine worker label into a limit-probe key, or `None` when
+    /// the event is a tool step (not a model/harness) or empty.
+    fn participant_key(worker: &str) -> Option<String> {
+        let w = worker.trim();
+        if w.is_empty() || w.starts_with("tool:") {
+            return None;
+        }
+        // `worker:model` form (rare on NodeStarted; tolerate it) → harness name.
+        let name = w.split(':').next().unwrap_or(w).trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    /// Record a worker as having participated in this task. Returns true when
+    /// it is newly seen (caller may refresh the limits probe).
+    fn note_participant(&mut self, worker: &str) -> bool {
+        let Some(name) = Self::participant_key(worker) else {
+            return false;
+        };
+        if self.run_participants.iter().any(|w| w == &name) {
+            return false;
+        }
+        self.run_participants.push(name);
+        true
+    }
+
+    /// Kick a one-shot limit probe (refresh chip + optional alerts). Failures
+    /// are silent so a flaky network never blocks the TUI. No-ops outside a
+    /// Tokio runtime (unit tests) so apply-path logic stays sync-testable.
+    fn refresh_limits(&self) {
+        if !self.limits_show_status {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        handle.spawn(async move {
+            if let Ok(config) = rinne_config::load_cwd() {
+                if let Ok(report) = crate::commands::limits::collect(&config).await {
+                    let _ = tx.send(AppMsg::Limits {
+                        report,
+                        alerts: Vec::new(),
+                    });
+                }
+            }
+        });
+    }
+
     fn apply(&mut self, msg: AppMsg) {
         match msg {
             AppMsg::Planned { goal, nodes } => {
@@ -428,6 +499,7 @@ impl App {
                 self.goal = Some(goal);
                 self.nodes = nodes;
                 self.live_actions.clear();
+                self.run_tokens = 0;
                 self.running = true;
                 self.parked = None;
                 // Print the plan to scrollback as one block, by role (no ids).
@@ -448,15 +520,20 @@ impl App {
                     }
                 }
                 match report.stop_reason {
-                    StopReason::Completed => self.push(
-                        FeedKind::NodeOk,
-                        format!(
-                            "done · {} iteration{} · {} tokens",
-                            report.total_iterations,
-                            if report.total_iterations == 1 { "" } else { "s" },
-                            report.total_usage.total_tokens()
-                        ),
-                    ),
+                    StopReason::Completed => {
+                        self.run_tokens = report.total_usage.total_tokens().max(self.run_tokens);
+                        self.push(
+                            FeedKind::NodeOk,
+                            format!(
+                                "done · {} iteration{} · {} tok (in {} · out {})",
+                                report.total_iterations,
+                                if report.total_iterations == 1 { "" } else { "s" },
+                                rinne_core::format_token_count(report.total_usage.total_tokens()),
+                                rinne_core::format_token_count(report.total_usage.prompt_tokens),
+                                rinne_core::format_token_count(report.total_usage.completion_tokens),
+                            ),
+                        );
+                    }
                     StopReason::NeedsHuman { node, question, gate } => {
                         self.parked = Some(question.clone());
                         let label = gate
@@ -467,12 +544,18 @@ impl App {
                     }
                     other => self.push(FeedKind::NodeFail, format!("stopped: {other:?}")),
                 }
+                // Fresh probe so the post-task per-harness breakdown reflects
+                // consumption after the run, not a stale pre-run snapshot.
+                self.refresh_limits();
             }
             AppMsg::Failed(e) => {
                 self.commit_tail();
                 self.running = false;
                 self.cancel = None;
                 self.push(FeedKind::NodeFail, e);
+                // Same as Finished: refresh so the post-task breakdown is not
+                // stuck on a pre-run snapshot after a hard fail.
+                self.refresh_limits();
             }
             AppMsg::Reindex => self.index.refresh(),
             AppMsg::Note(text) => {
@@ -481,6 +564,12 @@ impl App {
             }
             AppMsg::Capabilities { available, ladders } => {
                 self.apply_capabilities(&available, &ladders);
+            }
+            AppMsg::Limits { report, alerts } => {
+                self.limit_report = Some(report);
+                for a in alerts {
+                    self.push(FeedKind::System, a);
+                }
             }
         }
     }
@@ -509,6 +598,11 @@ impl App {
                     n.status = NodeStatus::Running;
                 }
                 self.push(FeedKind::NodeStart, format!("{role}  {worker}"));
+                // Each newly seen model/harness: re-probe so the live avg chip
+                // and post-task breakdown stay current for participants.
+                if self.note_participant(&worker) {
+                    self.refresh_limits();
+                }
             }
             EngineEvent::NodeStream { id, event } => {
                 use rinne_core::worker::WorkerEvent::*;
@@ -530,14 +624,28 @@ impl App {
                     Message(m) | Raw(m) => self.stream_line(&id, &m),
                 }
             }
-            EngineEvent::NodeFinished { id, status } => {
+            EngineEvent::NodeFinished { id, status, tokens } => {
                 self.commit_tail();
                 if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
                     n.status = status;
                 }
                 self.live_actions.remove(&id);
-                let kind = if status == NodeStatus::Succeeded { FeedKind::NodeOk } else { FeedKind::NodeFail };
-                self.push(kind, format!("{id} {}", status.label()));
+                self.run_tokens = self.run_tokens.saturating_add(tokens);
+                let kind = if status == NodeStatus::Succeeded {
+                    FeedKind::NodeOk
+                } else {
+                    FeedKind::NodeFail
+                };
+                let line = if tokens > 0 {
+                    format!(
+                        "{id} {} · {} tok",
+                        status.label(),
+                        rinne_core::worker::format_token_count(tokens)
+                    )
+                } else {
+                    format!("{id} {}", status.label())
+                };
+                self.push(kind, line);
             }
             EngineEvent::Parked { id, question } => {
                 self.commit_tail();
@@ -883,6 +991,7 @@ impl App {
                 );
             }
             "workers" | "doctor" => self.list_workers(),
+            "limit-usage" | "usage" | "limits" => self.list_limits(),
             "connect" => {
                 if rest.is_empty() {
                     self.push(FeedKind::System, "usage: /connect <backend> [api-key] [--base-url <url>] [--model <id>]  (key is stored in your OS keychain)");
@@ -980,6 +1089,8 @@ impl App {
                 } else {
                     self.goal = None;
                     self.nodes.clear();
+                    self.run_participants.clear();
+                    self.run_tokens = 0;
                     self.pending.clear();
                     // Drop any intro banner staged by commit_intro this submit, so
                     // the screen wipe isn't immediately undone by re-printing it.
@@ -1007,6 +1118,31 @@ impl App {
                 Err(e) => format!("could not list workers: {e}"),
             };
             let _ = tx.send(AppMsg::Note(text));
+        });
+    }
+
+    fn list_limits(&mut self) {
+        self.push(FeedKind::System, "probing limit usage…");
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match rinne_config::load_cwd() {
+                Ok(config) => match crate::commands::limits::collect(&config).await {
+                    Ok(report) => {
+                        let text = report.format_lines().join("\n");
+                        let _ = tx.send(AppMsg::Note(text));
+                        let _ = tx.send(AppMsg::Limits {
+                            report,
+                            alerts: Vec::new(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMsg::Note(format!("could not probe limits: {e}")));
+                    }
+                },
+                Err(e) => {
+                    let _ = tx.send(AppMsg::Note(format!("could not load config: {e}")));
+                }
+            }
         });
     }
 
@@ -1071,6 +1207,10 @@ impl App {
         self.cancel = Some(cancel.clone());
         self.running = true;
         self.nodes.clear();
+        // New task: reset the run-scoped limits participant list so the live
+        // avg and post-task breakdown only cover this goal's models.
+        self.run_participants.clear();
+        self.run_tokens = 0;
         self.push(FeedKind::Conductor, format!("planning: {goal}"));
         spawn_run(self.tx.clone(), goal, mentioned, None, cancel);
     }
@@ -1304,6 +1444,7 @@ fn help_text() -> String {
         (0, ""),
         (0, "WORKERS & PROVIDERS"),
         (2, "/workers                    list workers, auth mode, and quota  (alias: /doctor)"),
+        (2, "/limit-usage                live subscription limits per harness  (alias: /usage)"),
         (2, "/connect <backend> [key]    connect a harness, or an API provider + key"),
         (6, "--model <id>            model id(s) to use, repeatable (API providers)"),
         (6, "--base-url <url>        custom OpenAI-compatible endpoint"),
@@ -1505,14 +1646,40 @@ pub async fn run() -> Result<()> {
     // Populate the live intro table from config (instant), and kick off the
     // background registry build that resolves availability + model ladders.
     if let Ok(config) = rinne_config::load_cwd() {
+        app.limits_show_status = config.limits.show_status;
         app.set_intro(&config, true);
         let probe_tx = tx_for_probe.clone();
+        let limits_cfg = config.limits.clone();
+        let config_for_registry = config.clone();
         tokio::spawn(async move {
-            if let Ok((registry, names)) = runner::build_registry(&config).await {
+            if let Ok((registry, names)) = runner::build_registry(&config_for_registry).await {
                 let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
                 let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
             }
         });
+        // Live subscription limits: poll on a timer for the status chip +
+        // threshold alerts (50/75/90/100). Failures are silent.
+        if limits_cfg.show_status || !limits_cfg.alert_at.is_empty() {
+            let limits_tx = tx_for_probe.clone();
+            let poll = std::time::Duration::from_secs(limits_cfg.poll_secs.max(30));
+            let alert_at = limits_cfg.alert_at;
+            let alert_path = cwd.join(rinne_core::BLACKBOARD_DIR).join("limit-alerts.json");
+            tokio::spawn(async move {
+                let mut alert_state = rinne_config::AlertState::load(&alert_path);
+                loop {
+                    if let Ok(cfg) = rinne_config::load_cwd() {
+                        if let Ok(report) = crate::commands::limits::collect(&cfg).await {
+                            let alerts = report.take_alerts(&mut alert_state.fired, &alert_at);
+                            if !alerts.is_empty() {
+                                alert_state.save(&alert_path);
+                            }
+                            let _ = limits_tx.send(AppMsg::Limits { report, alerts });
+                        }
+                    }
+                    tokio::time::sleep(poll).await;
+                }
+            });
+        }
     }
 
     // No alternate screen: the transcript stays in normal scrollback. A small
@@ -2110,5 +2277,39 @@ mod tests {
         let start = app.pending.iter().find(|e| e.kind == FeedKind::NodeStart).expect("node start entry");
         assert!(start.text.contains("generator") && start.text.contains("claude-code"), "{}", start.text);
         assert!(!start.text.contains("n1"), "id leaked: {}", start.text);
+    }
+
+    #[test]
+    fn node_started_records_run_participants_once() {
+        let mut app = app_for(&temp_dir("parts"));
+        app.nodes = vec![
+            NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: String::new() },
+            NodeView { id: "n2".into(), role: "evaluator".into(), status: NodeStatus::Pending, worker: String::new() },
+        ];
+        app.apply_engine(EngineEvent::NodeStarted { id: "n1".into(), worker: "claude-code".into() });
+        app.apply_engine(EngineEvent::NodeStarted { id: "n2".into(), worker: "codex".into() });
+        // Re-dispatch same worker: still one entry.
+        app.apply_engine(EngineEvent::NodeStarted { id: "n1".into(), worker: "claude-code".into() });
+        // Tool steps never join the limits participant set.
+        app.apply_engine(EngineEvent::NodeStarted { id: "n2".into(), worker: "tool:npm test".into() });
+        assert_eq!(app.run_participants, vec!["claude-code", "codex"]);
+    }
+
+    #[test]
+    fn participant_key_strips_model_and_skips_tools() {
+        assert_eq!(App::participant_key("claude-code").as_deref(), Some("claude-code"));
+        assert_eq!(App::participant_key("claude-code:sonnet").as_deref(), Some("claude-code"));
+        assert_eq!(App::participant_key("tool:npm test"), None);
+        assert_eq!(App::participant_key(""), None);
+        assert_eq!(App::participant_key("  "), None);
+    }
+
+    #[test]
+    fn clear_resets_run_participants() {
+        let mut app = app_for(&temp_dir("clearparts"));
+        app.run_participants = vec!["claude-code".into()];
+        app.goal = Some("done".into());
+        app.slash("clear");
+        assert!(app.run_participants.is_empty());
     }
 }
