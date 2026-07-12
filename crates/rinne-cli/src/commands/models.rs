@@ -2,12 +2,27 @@
 //! access (live `/v1/models` call, with pricing/context where reported). With no
 //! provider, list every available worker and its model ladder, mirroring the
 //! startup intro (`CONTEXT.md` §7).
+//!
+//! `rinne models --json` emits a stable machine-readable map used by the macOS app.
+
+use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
 
 /// List models. With a provider, the provider's live catalog; otherwise the full
-/// worker/ladder overview (same data as the intro).
-pub async fn run(provider: Option<&str>) -> Result<()> {
+/// worker/ladder overview (same data as the intro). `--json` emits structured data.
+/// `--catalog` (with a provider) attaches the live remote model list for browsing.
+pub async fn run(provider: Option<&str>, json: bool, catalog: bool) -> Result<()> {
+    if json {
+        let payload = match provider {
+            Some(p) => json_for_provider(p, catalog).await,
+            None => json_overview().await,
+        };
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    // Text mode: `--catalog` alone still means "show this provider's list".
     let lines = match provider {
         Some(p) => list_lines(p).await,
         None => overview_lines().await,
@@ -18,6 +33,224 @@ pub async fn run(provider: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Exact model ids currently used by each available worker (descriptor + config).
+pub async fn collect_worker_models() -> BTreeMap<String, Vec<String>> {
+    let config = match rinne_config::load_cwd() {
+        Ok(c) => c,
+        Err(_) => return BTreeMap::new(),
+    };
+    let (registry, names) = match crate::runner::build_registry(&config).await {
+        Ok(r) => r,
+        Err(_) => return BTreeMap::new(),
+    };
+    let descriptors = registry.descriptors();
+    let ladders = rinne_core::pool::profile(&descriptors).ladders();
+    let mut out = BTreeMap::new();
+    for name in &names {
+        let from_desc: Vec<String> = descriptors
+            .iter()
+            .find(|d| d.name == *name)
+            .map(|d| d.models.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| !m.is_empty())
+            .collect();
+        let models = if !from_desc.is_empty() {
+            from_desc
+        } else {
+            model_ids_for(&config, &ladders, name)
+        };
+        out.insert(name.clone(), models);
+    }
+    out
+}
+
+async fn json_overview() -> Value {
+    let config = rinne_config::load_cwd().ok();
+    let workers = collect_worker_models().await;
+    let mut body = json!({ "workers": workers });
+    if let Some(c) = config {
+        body["conductor"] = json!({
+            "backend": c.conductor.backend.as_str(),
+            "model": c.conductor.model,
+        });
+    }
+    body
+}
+
+async fn json_for_provider(provider: &str, include_catalog: bool) -> Value {
+    let config = match rinne_config::load_cwd() {
+        Ok(c) => c,
+        Err(_) => {
+            return json!({
+                "provider": provider,
+                "workers": {},
+                "configured": [],
+            });
+        }
+    };
+
+    // Configured / runtime ladder — what Rinne actually uses.
+    let all = collect_worker_models().await;
+    let configured = if let Some(m) = all.get(provider) {
+        m.clone()
+    } else {
+        let empty = std::collections::HashMap::new();
+        model_ids_for(&config, &empty, provider)
+    };
+    let mut workers = BTreeMap::new();
+    if !configured.is_empty() {
+        workers.insert(provider.to_string(), configured.clone());
+    }
+
+    let mut body = json!({
+        "provider": provider,
+        "workers": workers,
+        "configured": configured,
+        "conductor": {
+            "backend": config.conductor.backend.as_str(),
+            "model": config.conductor.model,
+        },
+    });
+
+    if include_catalog {
+        match live_catalog(&config, provider).await {
+            Ok(models) => {
+                let entries: Vec<Value> = models
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "id": m.id,
+                            "prompt_price": m.prompt_price,
+                            "context": m.context,
+                        })
+                    })
+                    .collect();
+                body["catalog"] = Value::Array(entries);
+                body["catalog_count"] = json!(models.len());
+            }
+            Err(e) => {
+                body["catalog"] = Value::Array(vec![]);
+                body["catalog_count"] = json!(0);
+                body["catalog_error"] = json!(e);
+            }
+        }
+    }
+
+    body
+}
+
+/// Live model catalog for an API provider (or conductor backend). Harnesses have no catalog.
+///
+/// Cloudflare Workers AI does **not** support OpenAI-compatible `GET /models`
+/// (HTTP 405). For `cloudflare` we use the native
+/// `GET /accounts/{id}/ai/models/search` API instead.
+async fn live_catalog(
+    config: &rinne_config::Config,
+    provider: &str,
+) -> Result<Vec<rinne_workers::transport::http::DiscoveredModel>, String> {
+    if config.backends.harness.enabled.iter().any(|h| h == provider) {
+        return Err(format!("`{provider}` is a harness CLI — no remote model catalog."));
+    }
+
+    // Cloudflare: never hit /ai/v1/models — it always 405s.
+    if provider.eq_ignore_ascii_case("cloudflare") || provider.eq_ignore_ascii_case("cf") {
+        return cloudflare_catalog(config).await;
+    }
+
+    let (base, key) = resolve_endpoint(config, provider)?;
+    match fetch(&base, &key).await {
+        Ok(models) => Ok(models),
+        Err(e) => {
+            let msg = e.to_string();
+            // Some CF-shaped base_urls are registered under a custom name.
+            if msg.contains("405")
+                && (base.contains("cloudflare.com") || base.contains("/ai/v1"))
+            {
+                if let Ok(cf) = cloudflare_catalog(config).await {
+                    return Ok(cf);
+                }
+            }
+            Err(msg)
+        }
+    }
+}
+
+/// Cloudflare Workers AI catalog via native REST (not OpenAI /models).
+async fn cloudflare_catalog(
+    config: &rinne_config::Config,
+) -> Result<Vec<rinne_workers::transport::http::DiscoveredModel>, String> {
+    let (base, key) = resolve_endpoint(config, "cloudflare").or_else(|_| {
+        // Allow conductor-only cloudflare setup without [backends.api.cloudflare].
+        resolve_endpoint(config, "cf").or_else(|_| {
+            let cond = &config.conductor;
+            if matches!(
+                cond.backend,
+                rinne_config::model::ConductorBackend::Cloudflare
+            ) {
+                let base = rinne_conductor::conductor_base_url(cond).ok_or_else(|| {
+                    "cloudflare needs account_id — `rinne config set conductor.account_id <id>`"
+                        .to_string()
+                })?;
+                let key = match rinne_conductor::conductor_credential(cond) {
+                    Some((provider, env)) => {
+                        rinne_config::secrets::resolve_api_key(&provider, &env).ok_or_else(|| {
+                            "no key for cloudflare — `rinne connect cloudflare <token>`".to_string()
+                        })?
+                    }
+                    None => {
+                        return Err(
+                            "no key for cloudflare — `rinne connect cloudflare <token>`".to_string(),
+                        )
+                    }
+                };
+                Ok((base, key))
+            } else {
+                Err("cloudflare is not configured — `rinne connect cloudflare <token> --base-url …`".into())
+            }
+        })
+    })?;
+
+    let account_id = config
+        .conductor
+        .account_id
+        .clone()
+        .or_else(|| {
+            rinne_workers::transport::http::cloudflare_account_id_from_base_url(&base)
+        })
+        .ok_or_else(|| {
+            "cloudflare catalog needs account_id — set conductor.account_id or use base_url …/accounts/<id>/ai/v1"
+                .to_string()
+        })?;
+
+    match rinne_workers::transport::http::list_cloudflare_workers_ai_models(&account_id, &key)
+        .await
+    {
+        Ok(models) if !models.is_empty() => Ok(models),
+        Ok(_) => Ok(rinne_workers::transport::http::cloudflare_text_model_fallback()),
+        Err(e) => {
+            // Prefer a usable shortlist over a hard error in the Models tab.
+            // Surface the failure as empty-catalog is worse UX than a curated list.
+            tracing::warn!(error = %e, "cloudflare models/search failed — using curated fallback");
+            let mut models = rinne_workers::transport::http::cloudflare_text_model_fallback();
+            // Ensure the user's configured pin appears at the top.
+            for id in configured_api_model_ids(config, "cloudflare") {
+                if !models.iter().any(|m| m.id == id) {
+                    models.insert(
+                        0,
+                        rinne_workers::transport::http::DiscoveredModel {
+                            id,
+                            prompt_price: None,
+                            context: None,
+                        },
+                    );
+                }
+            }
+            Ok(models)
+        }
+    }
+}
+
 /// A text overview of every available worker and its model ladder — the same
 /// data the startup intro shows, formatted for the `/models` (no-arg) command.
 pub async fn overview_lines() -> Vec<String> {
@@ -25,31 +258,57 @@ pub async fn overview_lines() -> Vec<String> {
         Ok(c) => c,
         Err(e) => return vec![format!("config error: {e}")],
     };
-    let (registry, names) = match crate::runner::build_registry(&config).await {
-        Ok(r) => r,
-        Err(e) => return vec![format!("could not probe workers: {e}")],
-    };
-    if names.is_empty() {
+    let map = collect_worker_models().await;
+    if map.is_empty() {
         return vec![
             "no workers available — `rinne doctor` to see why, or `/connect` to add one.".to_string(),
         ];
     }
-    let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
-    let mut out = vec![format!("{} worker(s) available:", names.len())];
-    for name in &names {
-        let detail = match ladders.get(name) {
-            Some(l) if l.len() > 1 => l.join(" · "),
-            _ => "default model".to_string(),
+    let mut out = vec![format!("{} worker(s) available:", map.len())];
+    for (name, models) in &map {
+        let detail = if models.is_empty() {
+            "(no model configured)".to_string()
+        } else {
+            models.join(" · ")
         };
         out.push(format!("  ✔ {name:<14} {detail}"));
     }
     out.push(format!(
         "conductor: {} · {}",
-        format!("{:?}", config.conductor.backend).to_lowercase(),
+        config.conductor.backend.as_str(),
         config.conductor.model
     ));
     out.push("`/models <provider>` for a provider's full catalog with pricing.".to_string());
     out
+}
+
+/// Resolved model id list for a worker (never "default model").
+fn model_ids_for(
+    config: &rinne_config::Config,
+    ladders: &std::collections::HashMap<String, Vec<String>>,
+    name: &str,
+) -> Vec<String> {
+    if let Some(l) = ladders.get(name) {
+        if !l.is_empty() {
+            return l.clone();
+        }
+    }
+    if let Some(p) = config.backends.api.providers.get(name) {
+        if !p.models.is_empty() {
+            return p.models.clone();
+        }
+        if let Some(m) = &p.model {
+            if !m.is_empty() {
+                return vec![m.clone()];
+            }
+        }
+    }
+    if let Some(m) = config.models.by_worker.get(name) {
+        if !m.is_empty() {
+            return vec![m.clone()];
+        }
+    }
+    Vec::new()
 }
 
 /// Model list for a harness worker — its adapter ladder (cheap→strong) from the
@@ -67,7 +326,7 @@ async fn harness_ladder_lines(config: &rinne_config::Config, harness: &str) -> V
     }
     let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
     match ladders.get(harness) {
-        Some(l) if l.len() > 1 => {
+        Some(l) if !l.is_empty() => {
             let mut out = vec![format!("`{harness}` model ladder (cheap→strong):")];
             for m in l {
                 out.push(format!("  • {m}"));
@@ -75,9 +334,20 @@ async fn harness_ladder_lines(config: &rinne_config::Config, harness: &str) -> V
             out.push(format!("set a default: `rinne config set models.{harness} <model>`"));
             out
         }
-        _ => vec![format!(
-            "`{harness}` uses its own default model (no Rinne-managed ladder)."
-        )],
+        _ => {
+            // Fall back to configured pin if the adapter exposes no ladder.
+            if let Some(m) = config.models.by_worker.get(harness) {
+                if !m.is_empty() {
+                    return vec![
+                        format!("`{harness}` configured model:"),
+                        format!("  • {m}"),
+                    ];
+                }
+            }
+            vec![format!(
+                "`{harness}` has no Rinne-managed model list (adapter default only)."
+            )]
+        }
     }
 }
 
@@ -100,9 +370,36 @@ pub async fn list_lines(provider: &str) -> Vec<String> {
         Err(msg) => return vec![msg],
     };
 
+    // Configured ladder is what Rinne actually runs — always prefer it when set.
+    let configured = configured_api_model_ids(&config, provider);
+
     match fetch(&base, &key).await {
-        Ok(models) if models.is_empty() => vec![format!("`{provider}` returned no models.")],
+        Ok(models) if models.is_empty() => {
+            if !configured.is_empty() {
+                return format_configured_api_models(provider, &configured);
+            }
+            configured_api_model_lines(&config, provider)
+        }
         Ok(models) => {
+            // If the user pinned exact model ids, list those first as the worker's models.
+            if !configured.is_empty() {
+                let mut out = format_configured_api_models(provider, &configured);
+                out.push(String::new());
+                out.push(format!(
+                    "{} more model(s) available on `{provider}` (live catalog, sample):",
+                    models.len()
+                ));
+                for m in models.iter().take(15) {
+                    out.push(format!("  · {}", m.id));
+                }
+                if models.len() > 15 {
+                    out.push(format!("  … +{} more", models.len() - 15));
+                }
+                out.push(format!(
+                    "change with: `rinne connect {provider} --model <id>`"
+                ));
+                return out;
+            }
             let mut out = vec![format!(
                 "{} model(s) on `{provider}` (cheapest first):",
                 models.len()
@@ -126,8 +423,91 @@ pub async fn list_lines(provider: &str) -> Vec<String> {
             ));
             out
         }
-        Err(e) => vec![format!("could not list models for `{provider}`: {e}")],
+        Err(e) => {
+            // Cloudflare and some hosts reject GET /models — use configured ids.
+            if !configured.is_empty() {
+                let mut out = format_configured_api_models(provider, &configured);
+                out.insert(
+                    0,
+                    format!("live catalog unavailable for `{provider}` — using configured model(s):"),
+                );
+                return out;
+            }
+            let mut out = configured_api_model_lines(&config, provider);
+            if out.len() <= 1 {
+                out = vec![format!("could not list models for `{provider}`: {e}")];
+            } else {
+                out.insert(
+                    0,
+                    format!("live catalog unavailable for `{provider}` ({e}) — using configured models:"),
+                );
+            }
+            out
+        }
     }
+}
+
+/// Exact model ids from config for an API provider (used by Rinne at runtime).
+fn configured_api_model_ids(config: &rinne_config::Config, provider: &str) -> Vec<String> {
+    if let Some(p) = config.backends.api.providers.get(provider) {
+        if !p.models.is_empty() {
+            return p.models.clone();
+        }
+        if let Some(m) = &p.model {
+            if !m.is_empty() {
+                return vec![m.clone()];
+            }
+        }
+    }
+    if let Some(m) = config.models.by_worker.get(provider) {
+        if !m.is_empty() {
+            return vec![m.clone()];
+        }
+    }
+    Vec::new()
+}
+
+fn format_configured_api_models(provider: &str, ids: &[String]) -> Vec<String> {
+    let mut out = vec![format!("`{provider}` configured model(s) (used by Rinne):")];
+    for m in ids {
+        out.push(format!("  • {m}"));
+    }
+    out
+}
+
+/// Models from `[backends.api.<provider>].models` / `.model` (never "default model").
+fn configured_api_model_lines(config: &rinne_config::Config, provider: &str) -> Vec<String> {
+    if let Some(p) = config.backends.api.providers.get(provider) {
+        let mut ids: Vec<String> = p.models.clone();
+        if ids.is_empty() {
+            if let Some(m) = &p.model {
+                if !m.is_empty() {
+                    ids.push(m.clone());
+                }
+            }
+        }
+        if !ids.is_empty() {
+            let mut out = vec![format!("`{provider}` configured model(s) (used by Rinne):")];
+            for m in ids {
+                out.push(format!("  • {m}"));
+            }
+            out.push(format!(
+                "change with: `rinne connect {provider} --model <id>` or `rinne config set backends.api.{provider}.models`"
+            ));
+            return out;
+        }
+    }
+    if let Some(m) = config.models.by_worker.get(provider) {
+        if !m.is_empty() {
+            return vec![
+                format!("`{provider}` default model pin:"),
+                format!("  • {m}"),
+            ];
+        }
+    }
+    vec![format!(
+        "`{provider}` has no model ids configured — `rinne connect {provider} --model <id>`"
+    )]
 }
 
 /// Resolve `(base_url, api_key)` for a name that is either a configured API
