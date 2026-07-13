@@ -202,6 +202,15 @@ pub enum AppMsg {
         report: rinne_config::LimitReport,
         alerts: Vec<String>,
     },
+    /// Background `learn serve` started successfully.
+    LearnServeStarted {
+        url: String,
+        port: u16,
+        topics: Vec<String>,
+        cancel: CancellationToken,
+    },
+    /// Background `learn serve` failed to bind/start.
+    LearnServeFailed(String),
 }
 
 /// The TUI application state.
@@ -261,6 +270,10 @@ pub struct App {
     run_participants: Vec<String>,
     /// Cumulative tokens recorded for the current/last run (from node finishes).
     run_tokens: u64,
+    /// Cancel token for an in-session `learn serve` (None when not serving).
+    learn_serve_cancel: Option<CancellationToken>,
+    /// URL of the live learn serve, for status / re-open messages.
+    learn_serve_url: Option<String>,
 }
 
 impl App {
@@ -297,6 +310,8 @@ impl App {
             limits_show_status: true,
             run_participants: Vec::new(),
             run_tokens: 0,
+            learn_serve_cancel: None,
+            learn_serve_url: None,
         }
         // `set_intro` is called from `run()` with the loaded config to populate
         // the live intro table; the background probe then resolves availability.
@@ -572,6 +587,27 @@ impl App {
                 for a in alerts {
                     self.push(FeedKind::System, a);
                 }
+            }
+            AppMsg::LearnServeStarted {
+                url,
+                port,
+                topics,
+                cancel,
+            } => {
+                // Replace any previous serve session.
+                if let Some(old) = self.learn_serve_cancel.take() {
+                    old.cancel();
+                }
+                self.learn_serve_cancel = Some(cancel);
+                self.learn_serve_url = Some(url.clone());
+                self.commit_tail();
+                let mut lines = crate::commands::learn_serve::status_lines(&url, &topics);
+                lines.push(format!("port {port} · /serve stop to shut down · browser opened if allowed"));
+                self.push(FeedKind::System, lines.join("\n"));
+            }
+            AppMsg::LearnServeFailed(e) => {
+                self.commit_tail();
+                self.push(FeedKind::System, format!("serve failed: {e}"));
             }
         }
     }
@@ -1053,34 +1089,51 @@ impl App {
                 self.push(FeedKind::System, lines.join("\n"));
             }
             "learn" => {
-                // `/learn <topic>` — `explain` is implied (the only verb). Runs
-                // the same graph-grounded pipeline as the CLI, async like `/mcp`,
-                // narrating when a worker is available. The result path is pushed
-                // to the feed; the HTML is not auto-opened.
-                let topic = rest
-                    .strip_prefix("explain ")
-                    .unwrap_or(&rest)
-                    .trim()
-                    .to_string();
-                if topic.is_empty() {
-                    self.push(FeedKind::System, "usage: /learn <topic>  (writes .rinne/learn/<topic>.html)");
+                // `/learn serve […]` starts the docs browser; otherwise
+                // `/learn <topic>` (or `/learn explain <topic>`) generates one.
+                let rest_trim = rest.trim();
+                if rest_trim == "serve"
+                    || rest_trim.starts_with("serve ")
+                    || rest_trim.starts_with("serve\t")
+                {
+                    let serve_rest = rest_trim
+                        .strip_prefix("serve")
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    self.slash_serve(&serve_rest);
                 } else {
-                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    let tx = self.tx.clone();
-                    self.push(FeedKind::System, format!("learning `{topic}`…"));
-                    tokio::spawn(async move {
-                        let progress_tx = tx.clone();
-                        let on_progress = move |m: String| {
-                            let _ = progress_tx.send(AppMsg::Note(m));
-                        };
-                        let lines = crate::commands::learn::run_lines_with_progress(
-                            &topic, cwd, &on_progress,
-                        )
-                        .await;
-                        let _ = tx.send(AppMsg::Note(lines.join("\n")));
-                    });
+                    let topic = rest_trim
+                        .strip_prefix("explain ")
+                        .unwrap_or(rest_trim)
+                        .trim()
+                        .to_string();
+                    if topic.is_empty() {
+                        self.push(
+                            FeedKind::System,
+                            "usage: /learn <topic>  ·  /learn serve  ·  /serve\n\
+                             writes .rinne/learn/<slug>.html; serve browses all docs in a browser",
+                        );
+                    } else {
+                        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                        let tx = self.tx.clone();
+                        self.push(FeedKind::System, format!("learning `{topic}`…"));
+                        tokio::spawn(async move {
+                            let progress_tx = tx.clone();
+                            let on_progress: crate::learn::translate::ProgressSink =
+                                std::sync::Arc::new(move |m: String| {
+                                    let _ = progress_tx.send(AppMsg::Note(m));
+                                });
+                            let lines = crate::commands::learn::run_lines_with_progress(
+                                &topic, cwd, on_progress,
+                            )
+                            .await;
+                            let _ = tx.send(AppMsg::Note(lines.join("\n")));
+                        });
+                    }
                 }
             }
+            "serve" => self.slash_serve(&rest),
             "human" => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let args = split_args(&rest);
@@ -1134,7 +1187,10 @@ impl App {
             "budget" => self.push(FeedKind::System, format!("budget noted: {rest} (applied next run)")),
             "route" => self.push(FeedKind::System, format!("route override noted: {rest}")),
             "logs" => self.push(FeedKind::System, "logs: .rinne/logs/"),
-            "quit" | "q" => self.should_quit = true,
+            "quit" | "q" => {
+                self.stop_learn_serve();
+                self.should_quit = true;
+            }
             "clear" | "new" => {
                 if self.running || self.parked.is_some() {
                     self.push(FeedKind::System, "a run is active — /pause or wait for it to finish, then /clear");
@@ -1160,6 +1216,105 @@ impl App {
                 format!("unknown command `{other}` — try /help. (To run something as a task, type it without a leading slash or `rinne`.)"),
             ),
         }
+    }
+
+    /// Stop a background learn-docs server if one is running.
+    fn stop_learn_serve(&mut self) {
+        if let Some(cancel) = self.learn_serve_cancel.take() {
+            cancel.cancel();
+            let url = self.learn_serve_url.take().unwrap_or_default();
+            if url.is_empty() {
+                self.push(FeedKind::System, "serve stopped");
+            } else {
+                self.push(FeedKind::System, format!("serve stopped ({url})"));
+            }
+        }
+    }
+
+    /// `/serve` — start (or stop) the local learn-docs browser server without
+    /// leaving the TUI. Also reached via `/learn serve`.
+    ///
+    /// Args: empty · `stop` · `[port]` · `--port N` · `--no-open`.
+    fn slash_serve(&mut self, rest: &str) {
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.first().is_some_and(|t| *t == "stop" || *t == "off") {
+            if self.learn_serve_cancel.is_some() {
+                self.stop_learn_serve();
+            } else {
+                self.push(FeedKind::System, "serve is not running");
+            }
+            return;
+        }
+        if tokens.first().is_some_and(|t| *t == "status") {
+            match &self.learn_serve_url {
+                Some(url) => self.push(FeedKind::System, format!("serve is up at {url}")),
+                None => self.push(FeedKind::System, "serve is not running — /serve to start"),
+            }
+            return;
+        }
+        if self.learn_serve_cancel.is_some() {
+            let url = self.learn_serve_url.as_deref().unwrap_or("?");
+            self.push(
+                FeedKind::System,
+                format!("already serving at {url} — /serve stop first, or open that URL"),
+            );
+            return;
+        }
+
+        let mut port: u16 = 7420;
+        let mut open = true;
+        let mut i = 0;
+        while i < tokens.len() {
+            match tokens[i] {
+                "--no-open" | "-n" => open = false,
+                "--port" | "-p" => {
+                    if let Some(p) = tokens.get(i + 1).and_then(|s| s.parse().ok()) {
+                        port = p;
+                        i += 1;
+                    } else {
+                        self.push(FeedKind::System, "usage: /serve [--port N] [--no-open]  ·  /serve stop");
+                        return;
+                    }
+                }
+                t if t.parse::<u16>().is_ok() => {
+                    port = t.parse().unwrap_or(port);
+                }
+                other => {
+                    self.push(
+                        FeedKind::System,
+                        format!(
+                            "unknown serve arg `{other}` — usage: /serve [--port N] [--no-open]  ·  /serve stop"
+                        ),
+                    );
+                    return;
+                }
+            }
+            i += 1;
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let tx = self.tx.clone();
+        self.push(
+            FeedKind::System,
+            format!("starting learn serve on :{port}…"),
+        );
+        tokio::spawn(async move {
+            match crate::commands::learn_serve::start_background(cwd, port, open).await {
+                Ok(bg) => {
+                    // Accept loop is already spawned with a clone of the token.
+                    // Dropping `bg` here does not cancel; only App-held cancel does.
+                    let _ = tx.send(AppMsg::LearnServeStarted {
+                        url: bg.url.clone(),
+                        port: bg.port,
+                        topics: bg.topics.clone(),
+                        cancel: bg.cancel_token(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppMsg::LearnServeFailed(e.to_string()));
+                }
+            }
+        });
     }
 
     fn list_workers(&mut self) {
@@ -1541,6 +1696,9 @@ fn help_text() -> String {
         (0, ""),
         (0, "SESSION"),
         (2, "/learn <topic>              explain a subsystem — a symbol, path, or plain description"),
+        (2, "/serve                      browse all learn docs in a browser  (alias: /learn serve)"),
+        (6, "--port N · --no-open    bind port (default 7420) / don't open browser"),
+        (6, "stop · status           shut down / show the live URL"),
         (2, "/logs                       where logs are written (.rinne/logs/)"),
         (2, "/clear                      wipe the screen and reset the session  (alias: /new, ctrl-l wipes only)"),
         (2, "/help                       this reference"),

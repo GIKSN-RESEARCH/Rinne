@@ -781,9 +781,14 @@ The graph is shared across all harnesses active in a run, so every worker reads 
 rinne learn explain <topic>          # graph-grounded explainer for a topic
 rinne learn explain <topic> --no-ai  # template-only; works without a configured worker
 rinne learn explain <topic> --open   # open the output in the default browser when done
+rinne learn serve                    # browse every explainer with a sidebar (default :7420)
+rinne learn serve --port 8080        # bind a different port
+rinne learn serve --no-open          # start without launching a browser
 ```
 
-`rinne learn explain <topic>` walks the code graph, assembles the symbols and call edges most relevant to `<topic>`, pulls their doc-comments and any `CONTEXT.md` sections they reference, then asks the conductor to narrate the design decisions in plain prose. The result is written to `.rinne/learn/<topic>.html` as a self-contained file you can open in any browser.
+`rinne learn explain <topic>` walks the code graph, assembles the symbols and call edges most relevant to `<topic>`, pulls their doc-comments and any `CONTEXT.md` sections they reference, then asks a worker to narrate the **domain decisions** in plain prose — journeys, pipelines, rules, and exceptions that encode how *this* product works. The same shape applies whether the repo is AI/eval harnesses, multi-stage agent pipelines, construction, healthcare, e-commerce, logistics, CRM, or a portal that spans several verticals: recover *why* the system behaves the way it does, not a line-by-line code tour. That is the point for complex industry systems — help someone re-enter a codebase built over years. The result is written to `.rinne/learn/<slug>.html` as a self-contained file (free-form topics are slugged — e.g. `accounts module` → `accounts-module.html`; the page title still shows your original wording). Narration always pins the **cheapest model** on the chosen worker's ladder (e.g. Claude `haiku`, not the harness default frontier) so an optional teaching pass does not burn premium subscription quota.
+
+`rinne learn serve` starts a local server that lists every generated explainer in a left sidebar and loads the selected topic beside it, so you can switch between subsystems without hunting for files. It serves the pages verbatim and re-reads them per request, so regenerating a topic shows up on reload. It does not generate anything itself — run `explain` first.
 
 Without a configured conductor (`--no-ai`), the command skips the narration step and produces a template-only page: real symbols, call flow, and code snippets, but no prose overview. The output path and structure are identical either way.
 

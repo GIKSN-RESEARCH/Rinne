@@ -15,7 +15,8 @@ const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
     ("connect", "<backend> [key] [--model <id>]", "connect a harness or API provider"),
     ("mcp",     "[sub …]",                       "connect and manage MCP servers"),
     ("skill",   "[sub …]",                       "install and manage Agent Skills"),
-    ("learn",   "<topic>",                       "explain a subsystem as an HTML doc"),
+    ("learn",   "<topic> | serve",               "explain a subsystem, or serve all docs"),
+    ("serve",   "[--port N] | stop",             "browse learn docs in a browser"),
     ("index",   "",                              "reindex the repo's code graph now"),
     ("graph",   "[sub …]",                       "inspect the local code graph"),
     ("workers", "",                              "list workers + connected APIs"),
@@ -78,6 +79,14 @@ const GRAPH_SUBCOMMANDS: &[(&str, &str, &str)] = &[
     ("symbols",      "<file>",   "symbols defined in a file"),
     ("neighborhood", "<symbol>", "a symbol's callers and callees"),
     ("index",        "",         "reindex the repo now"),
+];
+
+/// `/serve` and `/learn serve` subcommands / flags.
+const SERVE_SUBCOMMANDS: &[(&str, &str, &str)] = &[
+    ("stop",      "", "stop the docs server"),
+    ("status",    "", "show the live URL if serving"),
+    ("--port",    "<n>", "bind port (default 7420)"),
+    ("--no-open", "", "don't open a browser"),
 ];
 
 /// Backends accepted by `/config conductor <backend>`.
@@ -189,6 +198,24 @@ pub fn suggest(input: &str) -> Option<Completion> {
         }
         "graph" if complete.len() == 1 => {
             filter(GRAPH_SUBCOMMANDS, partial, "/graph subcommand", token_start)
+        }
+        "serve" if complete.len() == 1 => {
+            filter(SERVE_SUBCOMMANDS, partial, "/serve", token_start)
+        }
+        "learn" if complete.len() == 1 => {
+            // Suggest `serve` as a peer of free-form topics; no full topic list.
+            filter(
+                &[
+                    ("serve", "[--port N] | stop", "browse all generated learn docs"),
+                    ("explain", "<topic>", "alias — same as /learn <topic>"),
+                ],
+                partial,
+                "/learn",
+                token_start,
+            )
+        }
+        "learn" if complete.len() >= 2 && complete[1] == "serve" => {
+            filter(SERVE_SUBCOMMANDS, partial, "/learn serve", token_start)
         }
         _ => None,
     }
