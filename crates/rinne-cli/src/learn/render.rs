@@ -63,65 +63,48 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     html.push_str(&format!("<title>{}</title>\n", esc(&doc.topic)));
     html.push_str("<style>\n");
     html.push_str(include_style());
-    html.push_str("</style>\n</head>\n<body>\n");
+    html.push_str("</style>\n</head>\n<body>\n<main>\n");
 
     // Header
+    html.push_str("<header class=\"masthead\">\n");
+    html.push_str("<p class=\"eyebrow\">rinne learn</p>\n");
     html.push_str(&format!("<h1>{}</h1>\n", esc(&doc.topic)));
+    html.push_str(
+        "<p class=\"lede\">Product context, the business journey this code serves, the rules \
+         and exceptions that encode how the company works, and the domain concepts you need — \
+         grounded in the real symbols.</p>\n",
+    );
+    html.push_str("</header>\n");
 
-    // Overview section
+    // 1. Overview — product problem + journey placement.
     html.push_str("<section id=\"overview\">\n");
-    html.push_str("<h2>Overview</h2>\n");
+    html.push_str("<p class=\"section-label\">Overview</p>\n");
     html.push_str(&overview);
     html.push('\n');
     html.push_str("</section>\n");
 
-    // Components / architecture section
-    html.push_str("<section id=\"components\">\n");
-    html.push_str("<h2>Components</h2>\n");
-    if doc.snippets.is_empty() {
-        html.push_str("<p>No components found.</p>\n");
-    } else {
-        html.push_str("<ul>\n");
-        for s in &doc.snippets {
-            html.push_str(&format!(
-                "<li><code>{}</code> — <span class=\"file\">{}</span> line {}</li>\n",
-                esc(&s.symbol),
-                esc(&s.file),
-                s.line,
-            ));
-        }
-        html.push_str("</ul>\n");
+    // 2. Business rules / conditions (AI-only; hidden when absent).
+    if let Some(dec) = narration.map(|n| n.decisions.trim()).filter(|d| !d.is_empty()) {
+        html.push_str("<section id=\"decisions\">\n");
+        html.push_str("<p class=\"section-label\">Business Rules</p>\n");
+        html.push_str(&render_markdown(dec));
+        html.push('\n');
+        html.push_str("</section>\n");
     }
-    html.push_str("</section>\n");
 
-    // Call-flow section
-    html.push_str("<section id=\"flow\">\n");
-    html.push_str("<h2>Call Flow</h2>\n");
-    if doc.flow.is_empty() {
-        html.push_str("<p>No call flow recorded.</p>\n");
-    } else {
-        html.push_str(&flow_mermaid(&doc.flow));
+    // 3. Domain + design concepts (AI-only; hidden when absent).
+    if let Some(con) = narration.map(|n| n.concepts.trim()).filter(|c| !c.is_empty()) {
+        html.push_str("<section id=\"concepts\">\n");
+        html.push_str("<p class=\"section-label\">Domain Concepts</p>\n");
+        html.push_str(&render_markdown(con));
+        html.push('\n');
+        html.push_str("</section>\n");
     }
-    html.push_str("</section>\n");
 
-    // Code snippets section
-    html.push_str("<section id=\"snippets\">\n");
-    html.push_str("<h2>Code Snippets</h2>\n");
-    for s in &doc.snippets {
-        html.push_str("<article class=\"snippet\">\n");
-        html.push_str(&format!("<h3>{}</h3>\n", esc(&s.symbol)));
-        if !s.doc.is_empty() {
-            html.push_str(&format!("<p class=\"doc\">{}</p>\n", esc(&s.doc)));
-        }
-        html.push_str(&format!("<pre><code>{}</code></pre>\n", esc(&s.code)));
-        html.push_str("</article>\n");
-    }
-    html.push_str("</section>\n");
-
-    // Design doc sections
+    // 4. Rationale from the repo's own design docs (deterministic, offline).
     if !doc.doc_sections.is_empty() {
         html.push_str("<section id=\"design\">\n");
-        html.push_str("<h2>Design References</h2>\n");
+        html.push_str("<p class=\"section-label\">Rationale</p>\n");
         for ds in &doc.doc_sections {
             html.push_str("<article class=\"doc-section\">\n");
             html.push_str(&format!(
@@ -136,11 +119,60 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
         html.push_str("</section>\n");
     }
 
+    // 5. Call flow.
+    html.push_str("<section id=\"flow\">\n");
+    html.push_str("<p class=\"section-label\">Call Flow</p>\n");
+    if doc.flow.is_empty() {
+        html.push_str("<p class=\"empty\">No call flow recorded.</p>\n");
+    } else {
+        html.push_str(&flow_mermaid(&doc.flow));
+    }
+    html.push_str("</section>\n");
+
+    // 6. Source reference — evidence, collapsed by default so understanding leads.
+    if !doc.snippets.is_empty() {
+        html.push_str("<section id=\"source\">\n");
+        html.push_str("<details class=\"source-ref\">\n");
+        html.push_str(&format!(
+            "<summary><span class=\"section-label\">Source reference</span>\
+             <span class=\"count\">{} symbols</span></summary>\n",
+            doc.snippets.len(),
+        ));
+
+        // Symbol index inside the collapsed block.
+        html.push_str("<ul class=\"symbol-index\">\n");
+        for s in &doc.snippets {
+            html.push_str(&format!(
+                "<li><code>{}</code> <span class=\"file\">{} line {}</span></li>\n",
+                esc(&s.symbol),
+                esc(&s.file),
+                s.line,
+            ));
+        }
+        html.push_str("</ul>\n");
+
+        for s in &doc.snippets {
+            html.push_str("<article class=\"snippet\">\n");
+            html.push_str(&format!("<h3>{}</h3>\n", esc(&s.symbol)));
+            if !s.doc.is_empty() {
+                html.push_str(&format!("<p class=\"doc\">{}</p>\n", esc(&s.doc)));
+            }
+            html.push_str(&format!("<pre><code>{}</code></pre>\n", esc(&s.code)));
+            html.push_str("</article>\n");
+        }
+        html.push_str("</details>\n");
+        html.push_str("</section>\n");
+    }
+
+    html.push_str("</main>\n");
+
     if html.contains("class=\"mermaid\"") {
+        // Theme the diagram dark so it sits on the slate ground instead of
+        // glaring as a white box.
         html.push_str(
             "<script type=\"module\">import mermaid from \
              \"https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs\";\
-             mermaid.initialize({startOnLoad:true});</script>\n",
+             mermaid.initialize({startOnLoad:true,theme:\"dark\"});</script>\n",
         );
     }
 
@@ -149,21 +181,202 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
 }
 
 fn include_style() -> &'static str {
+    // Design language: a terminal readout, because that's where Rinne lives.
+    // A cool slate ground (NOT the near-black+acid-green AI default) carries
+    // warm paper-serif prose for the "why"; every machine fact is mono. The
+    // signature is a left SPINE rail — each section label hangs off it as an
+    // amber tick, so the sections read as nodes on one graph (lenses on a
+    // single subsystem), not independent chapters. Amber (phosphor-terminal
+    // lineage) is the deliberate accent instead of the cliché acid green.
+    // Self-contained; system font stacks only.
     r#"
-body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; line-height: 1.6; }
-h1 { border-bottom: 2px solid #333; padding-bottom: .4rem; }
-h2 { color: #444; margin-top: 2rem; }
-h3 { color: #555; }
-pre { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 1rem; overflow-x: auto; }
-code { font-family: ui-monospace, monospace; font-size: .9em; }
-.file { color: #666; font-style: italic; }
-.doc { color: #555; border-left: 3px solid #ccc; padding-left: .75rem; margin-bottom: .5rem; }
-.source { font-size: .85em; color: #888; }
-section { margin-bottom: 2.5rem; }
-article.snippet, article.doc-section { margin-bottom: 1.5rem; border-bottom: 1px solid #eee; padding-bottom: 1rem; }
-ul { padding-left: 1.5rem; }
-li { margin: .3rem 0; }
+:root {
+  --bg: #0f1620;
+  --panel: #161f2b;
+  --panel-2: #1b2634;
+  --prose: #e6e4de;
+  --muted: #9aa5b1;
+  --faint: #5f6b78;
+  --hairline: #26313f;
+  --amber: #d8a657;
+  --amber-dim: #7a6438;
+  --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
+  --measure: 68ch;
+  --rail: 2.25rem; /* gutter reserved for the spine + ticks */
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: var(--serif);
+  background: var(--bg);
+  color: var(--prose);
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 1.75rem 6rem;
+  line-height: 1.72;
+  font-size: 1.03rem;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* The spine: a single amber-dim rail down the whole reading column, with a
+   soft glow. Sections sit to its right; each label puts an amber node on it. */
+main { position: relative; padding-left: var(--rail); }
+main::before {
+  content: "";
+  position: absolute;
+  left: .55rem; top: .4rem; bottom: .4rem;
+  width: 1px;
+  background: linear-gradient(var(--amber-dim), var(--hairline) 60%, transparent);
+}
+
+/* Masthead ------------------------------------------------------------- */
+.masthead { padding: 3.5rem 0 2.5rem; margin-bottom: 2.5rem; position: relative; }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .24em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin: 0 0 1rem;
+}
+h1 {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: clamp(2.2rem, 6.5vw, 3.4rem);
+  line-height: 1.02;
+  letter-spacing: -.015em;
+  margin: 0;
+  color: #f4f2ec;
+}
+.lede { color: var(--muted); font-size: 1.14rem; max-width: var(--measure); margin: 1.1rem 0 0; }
+
+/* Sections: the label is the tick on the spine ------------------------- */
+section { margin: 0 0 3.75rem; position: relative; }
+.section-label {
+  position: relative;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin: 0 0 1.5rem;
+}
+/* the node: a filled amber dot centered on the spine, aligned to the label */
+.section-label::before {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--rail) + .3rem);
+  top: .34em;
+  width: .5rem; height: .5rem;
+  background: var(--amber);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px var(--bg), 0 0 8px 1px rgba(216,166,87,.5);
+}
+
+h2 { font-family: var(--mono); font-weight: 600; font-size: 1.12rem; color: #f4f2ec; margin: 2.2rem 0 .7rem; }
+h3 { font-family: var(--mono); font-weight: 600; font-size: 1rem; color: var(--amber); margin: 0 0 .5rem; }
+p { max-width: var(--measure); }
+strong { color: #f4f2ec; }
+a { color: var(--amber); text-underline-offset: 2px; text-decoration-color: var(--amber-dim); }
+a:hover { text-decoration-color: var(--amber); }
+
+/* Inline code + fenced blocks ------------------------------------------ */
+code { font-family: var(--mono); font-size: .87em; }
+:not(pre) > code { color: var(--amber); }
+pre {
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--amber-dim);
+  border-radius: 5px;
+  padding: 1.1rem 1.25rem;
+  overflow-x: auto;
+  font-size: .85rem;
+  line-height: 1.6;
+  color: #d3d8de;
+}
+pre code { color: inherit; }
+
+.file { color: var(--faint); font-style: normal; font-family: var(--mono); }
+.empty { color: var(--faint); font-style: italic; }
+
+/* Source reference: collapsed by default so understanding leads -------- */
+.source-ref { margin: 0; }
+.source-ref > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.source-ref > summary::-webkit-details-marker { display: none; }
+.source-ref > summary .section-label { margin: 0; }
+.source-ref > summary::after {
+  content: "expand";
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .1em;
+  color: var(--faint);
+}
+.source-ref[open] > summary::after { content: "collapse"; }
+.source-ref[open] > summary { margin-bottom: 1.75rem; }
+.source-ref > summary .count { font-family: var(--mono); font-size: .74rem; color: var(--faint); }
+
+.symbol-index { list-style: none; padding: 0; margin: 0 0 2rem; border-top: 1px solid var(--hairline); }
+.symbol-index li {
+  font-family: var(--mono);
+  font-size: .83rem;
+  padding: .5rem .25rem;
+  border-bottom: 1px solid var(--hairline);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .6rem;
+}
+.symbol-index li code { color: var(--amber); }
+
+/* Snippets + rationale cards ------------------------------------------- */
+article.snippet, article.doc-section { margin: 0 0 2rem; }
+.doc {
+  color: var(--muted);
+  border-left: 2px solid var(--amber-dim);
+  padding-left: .9rem;
+  margin: 0 0 .7rem;
+  font-style: italic;
+  max-width: var(--measure);
+}
+.source { font-family: var(--mono); font-size: .74rem; letter-spacing: .04em; color: var(--faint); font-weight: 400; }
+
+/* Prose lists in narration / rationale --------------------------------- */
+section ul, section ol { padding-left: 1.3rem; max-width: var(--measure); }
+section li { margin: .4rem 0; }
+section li::marker { color: var(--amber-dim); }
+
+/* Tables from markdown narration --------------------------------------- */
+table { border-collapse: collapse; width: 100%; font-size: .9rem; margin: 1.2rem 0; }
+th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--hairline); }
+th { font-family: var(--mono); font-size: .76rem; letter-spacing: .06em; text-transform: uppercase; color: var(--amber); }
+td { color: var(--muted); }
+
+/* Blockquotes ---------------------------------------------------------- */
+blockquote { margin: 1.2rem 0; padding: .2rem 0 .2rem 1.1rem; border-left: 2px solid var(--hairline); color: var(--muted); }
+
+/* Call-flow diagram (mermaid is themed dark from the loader) ------------ */
 pre.mermaid { background: none; border: none; padding: 0; text-align: center; }
+
+@media (max-width: 640px) {
+  :root { --rail: 1.5rem; }
+  body { padding: 0 1.1rem 4rem; }
+  main::before { left: .3rem; }
+  .masthead { padding: 2.5rem 0 1.75rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
 "#
 }
 
@@ -239,6 +452,64 @@ mod tests {
         );
         // Escaped: raw <b> from code must not appear as a live tag.
         assert!(html.contains("&lt;b&gt;"));
+    }
+
+    #[test]
+    fn understanding_leads_and_source_is_collapsed() {
+        use crate::learn::Narration;
+        let doc = LearnDoc {
+            topic: "harness".into(),
+            snippets: vec![Snippet {
+                symbol: "HarnessAdapter".into(),
+                file: "common.rs".into(),
+                line: 10,
+                code: "fn run() {}".into(),
+                doc: String::new(),
+            }],
+            flow: vec![],
+            doc_sections: vec![],
+        };
+        let narration = Narration {
+            overview: "It adapts workers.".into(),
+            components: vec![],
+            decisions: "- handles a missing worker by degrading".into(),
+            concepts: "- Graceful degradation: keep working when a dep is absent".into(),
+        };
+        let html = render_html(&doc, Some(&narration));
+
+        // Understanding sections render from the narration parts.
+        assert!(html.contains("Business Rules"), "rules section missing");
+        assert!(html.contains("degrading"), "decisions body missing");
+        assert!(html.contains("Domain Concepts"), "concepts section missing");
+        assert!(html.contains("Graceful degradation"), "concepts body missing");
+
+        // Source is demoted into a collapsed <details>, after the understanding.
+        assert!(html.contains("<details class=\"source-ref\">"), "source not collapsed");
+        let rules_at = html.find(">Business Rules<").unwrap();
+        // Match the body markup, not the CSS comment in the <style> block.
+        let source_at = html.find("<details class=\"source-ref\">").unwrap();
+        assert!(rules_at < source_at, "source must come after understanding");
+        // The snippet still exists — as evidence, inside the collapsed block.
+        assert!(html.contains("HarnessAdapter"));
+    }
+
+    #[test]
+    fn no_narration_hides_understanding_sections() {
+        // --no-ai path: only structural facts, no invented understanding sections.
+        let doc = LearnDoc {
+            topic: "t".into(),
+            snippets: vec![Snippet {
+                symbol: "Foo".into(), file: "f.rs".into(), line: 1,
+                code: "fn foo() {}".into(), doc: String::new(),
+            }],
+            flow: vec![],
+            doc_sections: vec![],
+        };
+        let html = render_html(&doc, None);
+        assert!(!html.contains("Business Rules"), "rules leaked without AI");
+        assert!(!html.contains("Domain Concepts"), "concepts leaked without AI");
+        // Source reference is still present (structural), just collapsed.
+        assert!(html.contains("source-ref"), "source ref missing");
     }
 
     #[test]
