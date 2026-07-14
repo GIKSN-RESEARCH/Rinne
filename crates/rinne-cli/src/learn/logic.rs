@@ -115,18 +115,6 @@ pub struct RuleSite {
     pub kind: String,
 }
 
-/// Language detection from a file extension, matching the graph's supported set.
-fn lang_of(file: &str) -> Option<&'static str> {
-    let ext = Path::new(file).extension().and_then(|e| e.to_str())?;
-    Some(match ext {
-        "rs" => "rust",
-        "py" => "python",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        _ => return None,
-    })
-}
-
 fn kind_label(k: &BranchKind) -> &'static str {
     match k {
         BranchKind::If => "if",
@@ -142,7 +130,7 @@ pub fn cluster_branches(workspace: &Path, cluster: &Cluster) -> Vec<RuleSite> {
     const MAX_SITES: usize = 40;
     let mut out: Vec<RuleSite> = Vec::new();
     for file in &cluster.files {
-        let Some(lang) = lang_of(file) else { continue };
+        let Some(lang) = rinne_types::skip::source_lang(file) else { continue };
         let Ok(src) = std::fs::read_to_string(workspace.join(file)) else { continue };
         for b in extract_branches(lang, &src) {
             out.push(RuleSite {
