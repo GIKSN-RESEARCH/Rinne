@@ -1,5 +1,6 @@
 //! `learn` module for knowledge synthesis and code narration.
 
+pub mod logic;
 pub mod resolve;
 pub mod source;
 pub mod translate;
@@ -12,7 +13,9 @@ pub struct ClusterSymbol {
     pub name: String,
     pub file: String,
     pub line: u32,
-    // Reserved for future filtering/display; not yet consumed by the renderer.
+    /// 1-based last line of the symbol's span (from the graph). Used for exact
+    /// snippet extraction; falls back to `line` when unknown.
+    pub end_line: u32,
     #[allow(dead_code)]
     pub kind: String,
 }
@@ -23,6 +26,10 @@ pub struct Cluster {
     // Carried for serialisation and future use; the renderer uses symbols/files.
     #[allow(dead_code)]
     pub topic: String,
+    /// Topic-matched / AI-picked anchors (before neighborhood expansion).
+    /// Call-flow diagrams are rooted on these so the map tells a story about
+    /// the query instead of a random high-degree fragment of the graph.
+    pub seeds: Vec<String>,
     pub symbols: Vec<ClusterSymbol>,
     pub files: Vec<String>,
 }
@@ -50,8 +57,15 @@ pub struct DocSection {
 pub struct LearnDoc {
     pub topic: String,
     pub snippets: Vec<Snippet>,
-    pub flow: Vec<(String, String)>,  // (caller, callee) name pairs
+    /// Caller → callee pairs for the call-flow diagram.
+    pub flow: Vec<(String, String)>,
+    /// Seed symbol names the flow should stay anchored on (topic hits).
+    pub flow_seeds: Vec<String>,
     pub doc_sections: Vec<DocSection>,
+    /// Deterministic FDE facts (entry points, blast radius, ranked files).
+    pub fde: crate::learn::logic::FdeFacts,
+    /// Real-logic conditionals extracted from the cluster's files.
+    pub rule_sites: Vec<crate::learn::logic::RuleSite>,
 }
 
 /// A narration of architecture and design decisions.
@@ -139,6 +153,7 @@ mod tests {
     fn cluster_and_learndoc_construct() {
         let c = Cluster {
             topic: "harness".into(),
+            seeds: vec![],
             symbols: vec![],
             files: vec![],
         };
@@ -148,7 +163,10 @@ mod tests {
             topic: "harness".into(),
             snippets: vec![],
             flow: vec![],
+            flow_seeds: vec![],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         assert!(d.snippets.is_empty());
     }

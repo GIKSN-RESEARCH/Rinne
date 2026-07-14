@@ -64,9 +64,10 @@ pub fn render_markdown(md: &str) -> String {
             }
             Event::End(TagEnd::CodeBlock) if mermaid_buf.is_some() => {
                 let src = mermaid_buf.take().unwrap_or_default();
-                out.push_str("<pre class=\"mermaid\">");
+                // Scroll shell so wide/tall diagrams never blow the reading column.
+                out.push_str("<div class=\"diagram\"><pre class=\"mermaid\">");
                 out.push_str(&esc(&src));
-                out.push_str("</pre>\n");
+                out.push_str("</pre></div>\n");
             }
             Event::Text(t) if mermaid_buf.is_some() => {
                 mermaid_buf.as_mut().unwrap().push_str(&t);
@@ -113,6 +114,7 @@ mod tests {
     fn mermaid_fence_becomes_pre_mermaid_escaped() {
         let md = "```mermaid\nflowchart LR\n  A --> B\n```";
         let html = render_markdown(md);
+        assert!(html.contains("<div class=\"diagram\">"), "scroll shell missing: {html}");
         assert!(html.contains("<pre class=\"mermaid\">"), "got: {html}");
         // Arrows are HTML-escaped; mermaid decodes textContent back to `-->`.
         assert!(html.contains("A --&gt; B"), "got: {html}");

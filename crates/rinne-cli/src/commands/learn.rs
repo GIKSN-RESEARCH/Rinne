@@ -14,25 +14,127 @@ pub enum LearnCmd {
     Explain { topic: String },
 }
 
-/// Collect (caller, sym) and (sym, callee) pairs from each cluster symbol's
-/// neighborhood. Deduplicates the resulting list.
-fn cluster_flow(graph: &dyn CodeGraph, cluster: &Cluster) -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for sym in &cluster.symbols {
-        if let Some(nb) = graph.neighborhood(&sym.name) {
-            for caller in &nb.callers {
-                pairs.push((caller.name.clone(), sym.name.clone()));
+/// Build a seed-anchored call graph for the learn diagram.
+///
+/// Walks **seeds first** (topic hits), then other cluster symbols only as
+/// fill. Caps callers/callees per anchor so one popular type doesn't flood
+/// the edge list. Drops self-loops and dunder noise at collection time.
+///
+/// Returns `(edges, seeds_used)` — seeds_used is the ordered anchor list the
+/// renderer should root the diagram on.
+fn cluster_flow(
+    graph: &dyn CodeGraph,
+    cluster: &Cluster,
+) -> (Vec<(String, String)>, Vec<String>) {
+    /// Noise we never want on a "how this works" map.
+    fn is_noise(name: &str) -> bool {
+        let base = name.rsplit("::").next().unwrap_or(name);
+        let base = base.rsplit('.').next().unwrap_or(base);
+        // Python/JS dunders, empty, pure punctuation.
+        if base.is_empty() {
+            return true;
+        }
+        if base.starts_with("__") && base.ends_with("__") {
+            return true;
+        }
+        false
+    }
+
+    // Prefer function-like names as anchors: snake_case, leading _, camelCase
+    // starting lower. Pure PascalCase types are kept as seeds when the topic
+    // matched them, but deprioritized when expanding fill.
+    fn looks_callable(name: &str) -> bool {
+        let base = name.rsplit("::").next().unwrap_or(name);
+        let base = base.rsplit('.').next().unwrap_or(base);
+        if is_noise(base) {
+            return false;
+        }
+        if base.contains('_') {
+            return true;
+        }
+        matches!(base.chars().next(), Some(c) if c.is_lowercase())
+    }
+
+    const MAX_SEEDS: usize = 6;
+    const MAX_CALLERS_PER: usize = 3;
+    const MAX_CALLEES_PER: usize = 4;
+
+    // Anchors: declared seeds first (callable preferred), then fill from the
+    // expanded symbol list so we still have something when seeds were types.
+    let mut anchors: Vec<String> = Vec::new();
+    for s in &cluster.seeds {
+        if !is_noise(s) && !anchors.iter().any(|a| a == s) {
+            anchors.push(s.clone());
+        }
+        if anchors.len() >= MAX_SEEDS {
+            break;
+        }
+    }
+    if anchors.len() < MAX_SEEDS {
+        // Prefer callables from the expanded set.
+        for sym in &cluster.symbols {
+            if looks_callable(&sym.name) && !anchors.iter().any(|a| a == &sym.name) {
+                anchors.push(sym.name.clone());
             }
-            for callee in &nb.callees {
-                pairs.push((sym.name.clone(), callee.name.clone()));
+            if anchors.len() >= MAX_SEEDS {
+                break;
             }
         }
     }
-    // Sort before dedup so non-adjacent duplicate edges (the same caller→callee
-    // reached via different cluster symbols) collapse, not just consecutive ones.
+    if anchors.is_empty() {
+        // Last resort: any non-noise symbol.
+        for sym in &cluster.symbols {
+            if !is_noise(&sym.name) {
+                anchors.push(sym.name.clone());
+                break;
+            }
+        }
+    }
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for anchor in &anchors {
+        let Some(nb) = graph.neighborhood(anchor) else {
+            continue;
+        };
+        let mut callers: Vec<String> = nb
+            .callers
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|n| !is_noise(n) && n != anchor)
+            .collect();
+        // Prefer callables, then stable alpha.
+        callers.sort_by(|a, b| {
+            looks_callable(b)
+                .cmp(&looks_callable(a))
+                .then_with(|| a.cmp(b))
+        });
+        callers.dedup();
+        callers.truncate(MAX_CALLERS_PER);
+        for c in callers {
+            pairs.push((c, anchor.clone()));
+        }
+
+        let mut callees: Vec<String> = nb
+            .callees
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|n| !is_noise(n) && n != anchor)
+            .collect();
+        callees.sort_by(|a, b| {
+            looks_callable(b)
+                .cmp(&looks_callable(a))
+                .then_with(|| a.cmp(b))
+        });
+        callees.dedup();
+        callees.truncate(MAX_CALLEES_PER);
+        for c in callees {
+            pairs.push((anchor.clone(), c));
+        }
+    }
+
     pairs.sort();
     pairs.dedup();
-    pairs
+    (pairs, anchors)
 }
 
 /// Orchestrate `rinne learn explain <topic>`:
@@ -216,17 +318,28 @@ async fn explain_with_progress(
 
     let (snippets, doc_sections) = crate::learn::source::assemble(&workspace, &cluster);
 
-    // Build flow pairs — get Arc, coerce to trait object, compute, drop.
-    let flow: Vec<(String, String)> = match bb.concrete_graph() {
-        None => vec![],
+    // Seed-anchored call neighborhood for the diagram.
+    let (flow, flow_seeds) = match bb.concrete_graph() {
+        None => (vec![], cluster.seeds.clone()),
         Some(arc_g) => cluster_flow(arc_g.as_ref(), &cluster),
     };
+
+    // Deterministic FDE facts (entry points, blast radius, ranked files) and
+    // real-logic rule sites — both computed from the graph/cluster, no AI.
+    let fde = match bb.concrete_graph() {
+        Some(arc_g) => crate::learn::logic::fde_facts(arc_g.as_ref(), &cluster),
+        None => Default::default(),
+    };
+    let rule_sites = crate::learn::logic::cluster_branches(&workspace, &cluster);
 
     let doc = LearnDoc {
         topic: topic.clone(),
         snippets,
         flow,
+        flow_seeds,
         doc_sections,
+        fde,
+        rule_sites,
     };
 
     // The AI phase is the slow one; name the cheap tier up front and stream

@@ -83,7 +83,7 @@ const GRAPH_SUBCOMMANDS: &[(&str, &str, &str)] = &[
 
 /// `/serve` and `/learn serve` subcommands / flags.
 const SERVE_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("stop",      "", "stop the docs server"),
+    ("stop",      "", "stop the docs server (incl. ghosts)"),
     ("status",    "", "show the live URL if serving"),
     ("--port",    "<n>", "bind port (default 7420)"),
     ("--no-open", "", "don't open a browser"),

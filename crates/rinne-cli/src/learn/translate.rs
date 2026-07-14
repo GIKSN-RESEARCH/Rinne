@@ -416,9 +416,20 @@ fn teach_prompt(doc: &LearnDoc) -> String {
          2–4 short paragraphs: what this subsystem IS in product terms, the problem it solves, \
          who/what it serves, and where it sits in a larger journey or pipeline (whatever that \
          journey is for THIS domain — stages, jobs, evals, orders, encounters, builds…). Then \
-         ONE Mermaid `flowchart` in a ```mermaid fenced block of the real journey/stages/actors \
-         (short node labels; no characters that break Mermaid ids). Prefer a domain flow over a \
-         class diagram.\n\n\
+         ONE Mermaid diagram in a ```mermaid fenced block — a DOMAIN map of the real journey, \
+         not a code class diagram. Follow the Mermaid rules below strictly.\n\
+         Mermaid rules (readability > completeness):\n\
+         - Prefer `flowchart TD` (top-down). Use `LR` only for 2–4 node pairs; never a long \
+           left-to-right sausage of 6+ stages (those become unreadable).\n\
+         - Cap at ~8–10 nodes and ~12 edges. Collapse minor steps; omit pure plumbing.\n\
+         - Labels: 2–5 words max per node; edge labels ≤3 words. No HTML/`<br/>` in labels \
+           (breaks layout). Safe ids: letters/digits only (A, B1, reconcile…).\n\
+         - NOT everything is sequential. Real business logic has branches and multiple ends — \
+           show them. Use diamond decision nodes `{{}}` for gates (pass/fail, eligible?, \
+           over-allocated?, match found?). Parallel inputs can join; one stage can fan out to \
+           several outcomes (success / degraded / blocked / manual review).\n\
+         - Prefer shape over a single happy path: entry → decisions → 2–3 terminal outcomes \
+           beats a 10-step conveyor belt.\n\n\
          {dec}\n\
          The RULES and CONDITIONS — decisions that encode how this product/company works in its \
          industry. Prioritize what actually matters here: stage/state transitions, eligibility, \
@@ -683,7 +694,15 @@ mod tests {
 
     #[tokio::test]
     async fn null_translator_returns_none() {
-        let doc = LearnDoc { topic: "x".into(), snippets: vec![], flow: vec![], doc_sections: vec![] };
+        let doc = LearnDoc {
+            topic: "x".into(),
+            snippets: vec![],
+            flow: vec![],
+            flow_seeds: vec![],
+            doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
+        };
         assert!(NullTranslator.translate(&doc).await.is_none());
     }
 
@@ -786,7 +805,15 @@ mod tests {
 
     #[test]
     fn teach_prompt_demands_business_understanding_and_mermaid() {
-        let doc = LearnDoc { topic: "harness".into(), snippets: vec![], flow: vec![], doc_sections: vec![] };
+        let doc = LearnDoc {
+            topic: "harness".into(),
+            snippets: vec![],
+            flow: vec![],
+            flow_seeds: vec![],
+            doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
+        };
         let p = teach_prompt(&doc);
         let lower = p.to_lowercase();
         assert!(p.contains("harness"), "topic missing");
@@ -804,6 +831,13 @@ mod tests {
         assert!(lower.contains("rules") && lower.contains("conditions"), "no rules ask");
         assert!(p.to_uppercase().contains("CONCEPTS"), "no concepts ask");
         assert!(p.contains(OVERVIEW_MARK) && p.contains(DECISIONS_MARK) && p.contains(CONCEPTS_MARK));
+        // Diagram shape: prefer TD, branches/multiple ends, not a long LR sausage.
+        assert!(lower.contains("flowchart td") || lower.contains("top-down"), "no TD preference");
+        assert!(
+            lower.contains("branch") || lower.contains("diamond") || lower.contains("multiple"),
+            "should allow non-linear / multi-end business flows"
+        );
+        assert!(lower.contains("8") || lower.contains("10") || lower.contains("cap"), "no node budget");
     }
 
     #[test]

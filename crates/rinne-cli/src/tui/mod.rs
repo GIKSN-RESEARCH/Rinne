@@ -207,6 +207,9 @@ pub enum AppMsg {
         url: String,
         port: u16,
         topics: Vec<String>,
+        notes: Vec<String>,
+        /// True when we reattached to an existing same-project server.
+        reused: bool,
         cancel: CancellationToken,
     },
     /// Background `learn serve` failed to bind/start.
@@ -274,6 +277,8 @@ pub struct App {
     learn_serve_cancel: Option<CancellationToken>,
     /// URL of the live learn serve, for status / re-open messages.
     learn_serve_url: Option<String>,
+    /// Port of the live learn serve (for lock-file stop of ghosts).
+    learn_serve_port: Option<u16>,
 }
 
 impl App {
@@ -312,6 +317,7 @@ impl App {
             run_tokens: 0,
             learn_serve_cancel: None,
             learn_serve_url: None,
+            learn_serve_port: None,
         }
         // `set_intro` is called from `run()` with the loaded config to populate
         // the live intro table; the background probe then resolves availability.
@@ -592,17 +598,33 @@ impl App {
                 url,
                 port,
                 topics,
+                notes,
+                reused,
                 cancel,
             } => {
-                // Replace any previous serve session.
+                // Replace any previous serve session we owned.
                 if let Some(old) = self.learn_serve_cancel.take() {
                     old.cancel();
                 }
-                self.learn_serve_cancel = Some(cancel);
+                // Reused servers are owned elsewhere — keep no cancel token so
+                // /serve stop falls through to the lock-file path.
+                if !reused {
+                    self.learn_serve_cancel = Some(cancel);
+                }
                 self.learn_serve_url = Some(url.clone());
+                self.learn_serve_port = Some(port);
                 self.commit_tail();
                 let mut lines = crate::commands::learn_serve::status_lines(&url, &topics);
-                lines.push(format!("port {port} · /serve stop to shut down · browser opened if allowed"));
+                lines.extend(notes);
+                if reused {
+                    lines.push(format!(
+                        "reusing live server on :{port} · /serve stop to shut it down"
+                    ));
+                } else {
+                    lines.push(format!(
+                        "port {port} · /serve stop to shut down · browser opened if allowed"
+                    ));
+                }
                 self.push(FeedKind::System, lines.join("\n"));
             }
             AppMsg::LearnServeFailed(e) => {
@@ -1219,30 +1241,40 @@ impl App {
     }
 
     /// Stop a background learn-docs server if one is running.
+    ///
+    /// Prefers the in-session cancel token; if we don't own the loop (reused or
+    /// ghost from another process), falls back to the port lock file.
     fn stop_learn_serve(&mut self) {
+        let port = self.learn_serve_port.unwrap_or(7420);
         if let Some(cancel) = self.learn_serve_cancel.take() {
             cancel.cancel();
             let url = self.learn_serve_url.take().unwrap_or_default();
+            self.learn_serve_port = None;
             if url.is_empty() {
                 self.push(FeedKind::System, "serve stopped");
             } else {
                 self.push(FeedKind::System, format!("serve stopped ({url})"));
             }
+            return;
         }
+        // Ghost / other-session owner.
+        let lines = crate::commands::learn_serve::stop_port(port);
+        self.learn_serve_url = None;
+        self.learn_serve_port = None;
+        self.push(FeedKind::System, lines.join("\n"));
     }
 
     /// `/serve` — start (or stop) the local learn-docs browser server without
     /// leaving the TUI. Also reached via `/learn serve`.
     ///
     /// Args: empty · `stop` · `[port]` · `--port N` · `--no-open`.
+    ///
+    /// Cross-project: takes over port 7420 from a previous project's serve so
+    /// you never browse ghost docs. Same project reuses the live server.
     fn slash_serve(&mut self, rest: &str) {
         let tokens: Vec<&str> = rest.split_whitespace().collect();
         if tokens.first().is_some_and(|t| *t == "stop" || *t == "off") {
-            if self.learn_serve_cancel.is_some() {
-                self.stop_learn_serve();
-            } else {
-                self.push(FeedKind::System, "serve is not running");
-            }
+            self.stop_learn_serve();
             return;
         }
         if tokens.first().is_some_and(|t| *t == "status") {
@@ -1252,6 +1284,9 @@ impl App {
             }
             return;
         }
+        // If we already own a loop for this session, don't start a second one
+        // without an explicit stop. Reuse path (claim_port) still runs when we
+        // don't hold a cancel token (e.g. after reattach).
         if self.learn_serve_cancel.is_some() {
             let url = self.learn_serve_url.as_deref().unwrap_or("?");
             self.push(
@@ -1307,6 +1342,8 @@ impl App {
                         url: bg.url.clone(),
                         port: bg.port,
                         topics: bg.topics.clone(),
+                        notes: bg.notes.clone(),
+                        reused: bg.reused,
                         cancel: bg.cancel_token(),
                     });
                 }

@@ -28,9 +28,10 @@ pub fn assemble(workspace: &Path, cluster: &Cluster) -> (Vec<Snippet>, Vec<DocSe
 
         // `line` is 1-based; symbol's first line in 0-based index is `line - 1`.
         let sym_idx = (sym.line as usize).saturating_sub(1);
+        let end_idx = (sym.end_line as usize).saturating_sub(1).max(sym_idx);
 
         // --- Extract code snippet ---
-        let code = extract_code(lines, sym_idx);
+        let code = extract_code(lines, sym_idx, end_idx);
 
         // --- Extract doc comment (walk upward from sym_idx - 1) ---
         let doc = extract_doc(lines, sym_idx);
@@ -85,23 +86,33 @@ pub fn assemble(workspace: &Path, cluster: &Cluster) -> (Vec<Snippet>, Vec<DocSe
     (snippets, sections)
 }
 
-fn extract_code(lines: &[String], sym_idx: usize) -> String {
+/// Extract the exact source span `[sym_idx, end_idx]` (0-based, inclusive),
+/// capped at SNIPPET_CAP lines so a huge function can't dominate the page.
+fn extract_code(lines: &[String], sym_idx: usize, end_idx: usize) -> String {
     if sym_idx >= lines.len() {
         return String::new();
     }
-    let mut result: Vec<&str> = Vec::new();
-    let mut had_code = false;
-    for line in lines.iter().skip(sym_idx).take(SNIPPET_CAP) {
-        if line.trim().is_empty() {
-            if had_code {
-                break;
-            }
-        } else {
-            had_code = true;
-        }
-        result.push(line.as_str());
-    }
-    result.join("\n")
+    let end = end_idx.min(lines.len().saturating_sub(1));
+    let take = (end - sym_idx + 1).min(SNIPPET_CAP);
+    lines
+        .iter()
+        .skip(sym_idx)
+        .take(take)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// True when a trimmed line is a doc/line comment in any supported language.
+fn is_doc_comment(trimmed: &str) -> bool {
+    trimmed.starts_with("///")   // rust doc
+        || trimmed.starts_with("//!")   // rust inner doc
+        || trimmed.starts_with("//")    // rust/js/ts/go line
+        || (trimmed.starts_with('#') && !trimmed.starts_with("#[") && !trimmed.starts_with("#!")) // python/ruby/shell, excluding rust attrs
+        || trimmed.starts_with("/**")   // jsdoc open
+        || trimmed.starts_with("*")     // jsdoc/block continuation
+        || trimmed.starts_with("*/")    // block close
+        || trimmed.starts_with("\"\"\"") // python docstring fence
 }
 
 fn extract_doc(lines: &[String], sym_idx: usize) -> String {
@@ -112,7 +123,7 @@ fn extract_doc(lines: &[String], sym_idx: usize) -> String {
     let mut idx = sym_idx - 1;
     loop {
         let trimmed = lines[idx].trim();
-        if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+        if is_doc_comment(trimmed) {
             doc_lines.push(lines[idx].as_str());
         } else {
             break;
@@ -237,10 +248,12 @@ mod tests {
 
         let cluster = Cluster {
             topic: "thing".into(),
+            seeds: vec!["thing".into()],
             symbols: vec![ClusterSymbol {
                 name: "thing".into(),
                 file: "m.rs".into(),
                 line: 2,
+                end_line: 2,
                 kind: "symbol".into(),
             }],
             files: vec!["m.rs".into()],
@@ -294,10 +307,12 @@ mod tests {
 
         let cluster = Cluster {
             topic: "thing".into(),
+            seeds: vec!["thing".into()],
             symbols: vec![ClusterSymbol {
                 name: "thing".into(),
                 file: "m.rs".into(),
                 line: 2,
+                end_line: 2,
                 kind: "symbol".into(),
             }],
             files: vec!["m.rs".into()],
@@ -322,5 +337,56 @@ mod tests {
             out.contains(&("MCP_SKILLS.md".to_string(), 6)),
             "backtick MCP_SKILLS.md §6 not found"
         );
+    }
+
+    #[test]
+    fn extract_uses_exact_span_not_blank_line_heuristic() {
+        // A function with an internal blank line must NOT be truncated at the blank.
+        let dir = std::env::temp_dir().join(format!("rinne-span-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("m.rs"),
+            "fn rule() {\n    let a = 1;\n\n    if a > 0 { ship(); }\n}\nfn other() {}\n",
+        )
+        .unwrap();
+        let cluster = Cluster {
+            topic: "rule".into(),
+            seeds: vec!["rule".into()],
+            symbols: vec![ClusterSymbol {
+                name: "rule".into(), file: "m.rs".into(), line: 1, end_line: 5,
+                kind: "symbol".into(),
+            }],
+            files: vec!["m.rs".into()],
+        };
+        let (snippets, _) = assemble(&dir, &cluster);
+        assert!(snippets[0].code.contains("if a > 0"), "logic past blank line kept");
+        assert!(!snippets[0].code.contains("fn other"), "next symbol not bled in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_doc_excludes_rust_attributes() {
+        // A `#[derive]`/`#[allow]` attribute between the doc comment and the symbol
+        // must NOT be captured as documentation.
+        let lines = vec![
+            "/// The real doc.".to_string(),
+            "#[derive(Debug, Clone)]".to_string(),
+            "pub struct Thing;".to_string(),
+        ];
+        let doc = extract_doc(&lines, 2); // symbol at index 2
+        // extract_doc walks upward and stops at the first non-doc line; the attribute
+        // is not a doc line, so it stops there and captures nothing above it.
+        assert!(!doc.contains("derive"), "rust attribute leaked into doc: {doc:?}");
+    }
+
+    #[test]
+    fn extract_doc_recognizes_python_and_js_comments() {
+        // Python `#` and JS `//` / `/** */` doc lines above a symbol are captured.
+        let py = vec![
+            "# qualifies a lead".to_string(),
+            "def qualify():".to_string(),
+        ];
+        let doc = extract_doc(&py, 1); // sym at index 1 (def qualify)
+        assert!(doc.contains("qualifies a lead"), "python # comment captured: {doc:?}");
     }
 }
