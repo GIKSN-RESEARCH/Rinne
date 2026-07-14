@@ -4,6 +4,7 @@
 //! callers, callees, imports — so workers fetch the relevant slice of a repo
 //! instead of re-reading whole files (issue #11).
 
+pub mod branches;
 pub mod extract;
 pub mod indexer;
 pub mod lang;
