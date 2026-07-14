@@ -6,12 +6,16 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A lightweight reference to a symbol: name, file path, and line number.
+/// A lightweight reference to a symbol: name, file path, and 1-based line span.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {
     pub name: String,
     pub file: String,
+    /// 1-based first line of the definition.
     pub line: u32,
+    /// 1-based last line of the definition span. Equals `line` for one-liners
+    /// and for rows indexed before this field existed (COALESCE fallback).
+    pub end_line: u32,
 }
 
 /// The structural neighborhood of a symbol: its definition site plus all

@@ -135,12 +135,13 @@ impl Store {
     /// Returns the definition + callers + callees + imports for a symbol by name.
     pub fn neighborhood(&self, symbol_name: &str) -> Option<Neighborhood> {
         // Look up the definition symbol.
-        let (sym_id, file, start_line): (i64, String, u32) = self
+        let (sym_id, file, start_line, end_line): (i64, String, u32, u32) = self
             .conn
             .query_row(
-                "SELECT id, file, start_line FROM graph_symbols WHERE name = ?1 LIMIT 1",
+                "SELECT id, file, start_line, COALESCE(end_line, start_line) \
+                 FROM graph_symbols WHERE name = ?1 LIMIT 1",
                 [symbol_name],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok()?;
 
@@ -148,13 +149,14 @@ impl Store {
             name: symbol_name.to_string(),
             file: file.clone(),
             line: start_line,
+            end_line,
         };
 
         // Callers: symbols whose id is src_symbol of an edge with dst_symbol = sym_id.
         let callers = self
             .conn
             .prepare(
-                "SELECT s.name, s.file, s.start_line
+                "SELECT s.name, s.file, s.start_line, COALESCE(s.end_line, s.start_line)
                  FROM graph_edges e
                  JOIN graph_symbols s ON s.id = e.src_symbol
                  WHERE e.dst_symbol = ?1 AND e.kind = 'calls'",
@@ -165,6 +167,7 @@ impl Store {
                         name: row.get(0)?,
                         file: row.get(1)?,
                         line: row.get(2)?,
+                        end_line: row.get(3)?,
                     })
                 })
                 .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -175,7 +178,7 @@ impl Store {
         let callees = self
             .conn
             .prepare(
-                "SELECT s.name, s.file, s.start_line
+                "SELECT s.name, s.file, s.start_line, COALESCE(s.end_line, s.start_line)
                  FROM graph_edges e
                  JOIN graph_symbols s ON s.id = e.dst_symbol
                  WHERE e.src_symbol = ?1 AND e.kind = 'calls'",
@@ -186,6 +189,7 @@ impl Store {
                         name: row.get(0)?,
                         file: row.get(1)?,
                         line: row.get(2)?,
+                        end_line: row.get(3)?,
                     })
                 })
                 .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -197,7 +201,8 @@ impl Store {
         let imports = self
             .conn
             .prepare(
-                "SELECT COALESCE(s.name, e.dst_name), COALESCE(s.file, ''), COALESCE(s.start_line, 0)
+                "SELECT COALESCE(s.name, e.dst_name), COALESCE(s.file, ''), \
+                        COALESCE(s.start_line, 0), COALESCE(s.end_line, s.start_line, 0)
                  FROM graph_edges e
                  LEFT JOIN graph_symbols s ON s.id = e.dst_symbol
                  WHERE e.src_symbol = ?1 AND e.kind = 'imports'",
@@ -208,6 +213,7 @@ impl Store {
                         name: row.get(0)?,
                         file: row.get(1)?,
                         line: row.get(2)?,
+                        end_line: row.get(3)?,
                     })
                 })
                 .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -257,13 +263,15 @@ impl Store {
     pub fn resolve_in_file(&self, file: &str, name: &str) -> Option<SymbolRef> {
         self.conn
             .query_row(
-                "SELECT name, file, start_line FROM graph_symbols WHERE file = ?1 AND name = ?2 LIMIT 1",
+                "SELECT name, file, start_line, COALESCE(end_line, start_line) \
+                 FROM graph_symbols WHERE file = ?1 AND name = ?2 LIMIT 1",
                 rusqlite::params![file, name],
                 |row| {
                     Ok(SymbolRef {
                         name: row.get(0)?,
                         file: row.get(1)?,
                         line: row.get(2)?,
+                        end_line: row.get(3)?,
                     })
                 },
             )

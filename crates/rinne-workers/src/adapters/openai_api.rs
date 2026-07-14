@@ -420,8 +420,8 @@ mod tests {
     fn symbol_map_is_rendered_into_api_message() {
         use rinne_types::graph::{Neighborhood, SymbolRef};
         let nb = Neighborhood {
-            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1 },
-            callers: vec![SymbolRef { name: "main".into(), file: "main.rs".into(), line: 5 }],
+            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1, end_line: 1 },
+            callers: vec![SymbolRef { name: "main".into(), file: "main.rs".into(), line: 5, end_line: 5 }],
             callees: vec![],
             imports: vec![],
             stale: false,

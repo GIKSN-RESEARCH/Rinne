@@ -157,8 +157,8 @@ mod tests {
     impl CodeGraph for G {
         fn neighborhood(&self, s: &str) -> Option<Neighborhood> {
             (s == "HarnessAdapter").then(|| Neighborhood {
-                definition: SymbolRef { name: "HarnessAdapter".into(), file: "adapters/common.rs".into(), line: 10 },
-                callers: vec![SymbolRef { name: "run_node".into(), file: "engine.rs".into(), line: 5 }],
+                definition: SymbolRef { name: "HarnessAdapter".into(), file: "adapters/common.rs".into(), line: 10, end_line: 10 },
+                callers: vec![SymbolRef { name: "run_node".into(), file: "engine.rs".into(), line: 5, end_line: 5 }],
                 callees: vec![], imports: vec![], stale: false,
             })
         }

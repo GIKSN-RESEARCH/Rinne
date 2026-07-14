@@ -102,4 +102,20 @@ mod tests {
         assert_eq!(nb.definition.name, "helper");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn neighborhood_reports_symbol_end_line() {
+        let dir = std::env::temp_dir().join(format!("rinne-graph-endline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state.db");
+        let graph = Graph::open(&db, &dir).unwrap();
+        // `big` spans lines 1..=3; `helper` is line 4.
+        graph
+            .ensure_current("m.rs", "fn big() {\n    let x = 1;\n}\nfn helper() {}\n", 0)
+            .unwrap();
+        let nb = CodeGraph::neighborhood(&graph, "big").unwrap();
+        assert_eq!(nb.definition.line, 1, "start line");
+        assert_eq!(nb.definition.end_line, 3, "end line covers the whole body");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

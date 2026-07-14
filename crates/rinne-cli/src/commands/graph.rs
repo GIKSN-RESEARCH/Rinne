@@ -185,8 +185,8 @@ mod tests {
     fn formats_neighborhood_lines() {
         use rinne_types::graph::{Neighborhood, SymbolRef};
         let nb = Neighborhood {
-            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1 },
-            callers: vec![SymbolRef { name: "main".into(), file: "m.rs".into(), line: 2 }],
+            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1, end_line: 1 },
+            callers: vec![SymbolRef { name: "main".into(), file: "m.rs".into(), line: 2, end_line: 2 }],
             callees: vec![], imports: vec![], stale: false,
         };
         let out = format_neighborhood(&nb);
