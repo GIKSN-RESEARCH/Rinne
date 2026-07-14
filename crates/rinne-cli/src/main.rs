@@ -109,9 +109,11 @@ async fn main() -> Result<()> {
                     let learn_cmd = commands::learn::LearnCmd::Explain { topic };
                     commands::learn::run(learn_cmd, cwd, no_ai, open).await
                 }
-                CliLearnCmd::Serve { port, no_open } => {
-                    commands::learn_serve::run(cwd, port, !no_open).await
-                }
+                CliLearnCmd::Serve {
+                    port,
+                    no_open,
+                    stop,
+                } => commands::learn_serve::run(cwd, port, !no_open, stop).await,
             }
         }
         Some(Command::Human { args }) => run_human(&args).await,

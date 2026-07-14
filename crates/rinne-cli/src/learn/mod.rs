@@ -23,6 +23,10 @@ pub struct Cluster {
     // Carried for serialisation and future use; the renderer uses symbols/files.
     #[allow(dead_code)]
     pub topic: String,
+    /// Topic-matched / AI-picked anchors (before neighborhood expansion).
+    /// Call-flow diagrams are rooted on these so the map tells a story about
+    /// the query instead of a random high-degree fragment of the graph.
+    pub seeds: Vec<String>,
     pub symbols: Vec<ClusterSymbol>,
     pub files: Vec<String>,
 }
@@ -50,7 +54,10 @@ pub struct DocSection {
 pub struct LearnDoc {
     pub topic: String,
     pub snippets: Vec<Snippet>,
-    pub flow: Vec<(String, String)>,  // (caller, callee) name pairs
+    /// Caller → callee pairs for the call-flow diagram.
+    pub flow: Vec<(String, String)>,
+    /// Seed symbol names the flow should stay anchored on (topic hits).
+    pub flow_seeds: Vec<String>,
     pub doc_sections: Vec<DocSection>,
 }
 
@@ -139,6 +146,7 @@ mod tests {
     fn cluster_and_learndoc_construct() {
         let c = Cluster {
             topic: "harness".into(),
+            seeds: vec![],
             symbols: vec![],
             files: vec![],
         };
@@ -148,6 +156,7 @@ mod tests {
             topic: "harness".into(),
             snippets: vec![],
             flow: vec![],
+            flow_seeds: vec![],
             doc_sections: vec![],
         };
         assert!(d.snippets.is_empty());

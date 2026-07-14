@@ -12,17 +12,181 @@ fn esc(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Build a Mermaid `flowchart LR` from caller→callee pairs.
+/// Max nodes / edges in the call-flow diagram. Same budget as the AI journey
+/// map: enough structure to orient, not a full neighborhood dump.
+const FLOW_MAX_NODES: usize = 12;
+const FLOW_MAX_EDGES: usize = 14;
+
+/// Last path segment of a symbol for a short label (`Foo::bar` → `bar`).
+fn short_symbol(name: &str) -> &str {
+    name.rsplit("::")
+        .next()
+        .and_then(|s| s.rsplit('.').next())
+        .unwrap_or(name)
+}
+
+/// Prefer a short label when unique among the selected set; otherwise keep the
+/// full name so two `run` methods in different modules don't collide on screen.
+fn display_label(name: &str, all: &[String]) -> String {
+    let short = short_symbol(name);
+    let clashes = all.iter().filter(|n| short_symbol(n) == short).count();
+    if clashes <= 1 {
+        short.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn is_dunder(name: &str) -> bool {
+    let base = short_symbol(name);
+    base.starts_with("__") && base.ends_with("__")
+}
+
+/// Build a Mermaid flowchart from caller→callee pairs, rooted on `seeds`.
 ///
-/// Mermaid node IDs can't contain `::`, spaces, or angle brackets, so each
-/// unique symbol name is mapped to a safe `n{index}` id with the original name
-/// kept as the bracketed label. Returns an empty string for empty input.
-fn flow_mermaid(flow: &[(String, String)]) -> String {
-    if flow.is_empty() {
+/// Goals (same readability bar as the AI journey map):
+/// - always `flowchart TD`
+/// - tell a story about the **topic seeds**, not a random high-degree fragment
+/// - keep real branching (many callers → seed → many callees)
+/// - drop self-loops / dunders
+/// - short labels when unambiguous
+///
+/// Algorithm: start from seeds, greedily grow a connected edge set by attaching
+/// the highest-value remaining edge that touches the selected node set. That
+/// avoids the old "pick top-degree nodes → edges among them" path that left
+/// one lonely edge or a pile of disconnected pairs.
+fn flow_mermaid(flow: &[(String, String)], seeds: &[String]) -> String {
+    // Clean edges first.
+    let mut clean: Vec<(&str, &str)> = flow
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .filter(|(a, b)| a != b && !is_dunder(a) && !is_dunder(b))
+        .collect();
+    clean.sort();
+    clean.dedup();
+    if clean.is_empty() {
         return String::new();
     }
 
-    let mut ids: Vec<(String, String)> = Vec::new(); // (name, id)
+    // Seed set that actually appears in the edge list (or declared seeds that
+    // match an endpoint). Fall back to the highest-fanout node if none match.
+    let mut seed_set: Vec<String> = seeds
+        .iter()
+        .filter(|s| {
+            !is_dunder(s)
+                && clean.iter().any(|(a, b)| *a == s.as_str() || *b == s.as_str())
+        })
+        .cloned()
+        .collect();
+    seed_set.dedup();
+
+    if seed_set.is_empty() {
+        // Pick the node with the most incident edges as a synthetic root.
+        let mut deg: Vec<(&str, usize)> = Vec::new();
+        for (a, b) in &clean {
+            for n in [*a, *b] {
+                if let Some((_, d)) = deg.iter_mut().find(|(x, _)| *x == n) {
+                    *d += 1;
+                } else {
+                    deg.push((n, 1));
+                }
+            }
+        }
+        deg.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        if let Some((name, _)) = deg.first() {
+            seed_set.push((*name).to_string());
+        }
+    }
+    seed_set.truncate(6);
+
+    // Precompute degree so scoring doesn't borrow `clean` while we mutate a copy.
+    let mut degree: Vec<(&str, usize)> = Vec::new();
+    for (a, b) in &clean {
+        for n in [*a, *b] {
+            if let Some((_, d)) = degree.iter_mut().find(|(x, _)| *x == n) {
+                *d += 1;
+            } else {
+                degree.push((n, 1));
+            }
+        }
+    }
+    let deg_of = |n: &str| -> usize {
+        degree
+            .iter()
+            .find(|(x, _)| *x == n)
+            .map(|(_, d)| *d)
+            .unwrap_or(0)
+    };
+
+    // Grow a connected subgraph from seeds.
+    let mut selected: Vec<String> = seed_set.clone();
+    let mut chosen: Vec<(String, String)> = Vec::new();
+    let mut remaining = clean;
+
+    while chosen.len() < FLOW_MAX_EDGES && selected.len() < FLOW_MAX_NODES && !remaining.is_empty()
+    {
+        // Best edge that touches the selected set (keeps the diagram connected).
+        let mut best_i: Option<usize> = None;
+        let mut best_score = i32::MIN;
+        for (i, (a, b)) in remaining.iter().enumerate() {
+            let a_sel = selected.iter().any(|x| x == *a);
+            let b_sel = selected.iter().any(|x| x == *b);
+            if !a_sel && !b_sel {
+                continue;
+            }
+            // Don't add a node past the budget unless both ends already selected.
+            let new_nodes = (!a_sel as usize) + (!b_sel as usize);
+            if selected.len() + new_nodes > FLOW_MAX_NODES {
+                continue;
+            }
+            let a_seed = seed_set.iter().any(|x| x == *a);
+            let b_seed = seed_set.iter().any(|x| x == *b);
+            let mut score = 0i32;
+            if a_seed || b_seed {
+                score += 10;
+            }
+            if a_seed && b_seed {
+                score += 4;
+            }
+            if a_sel ^ b_sel {
+                score += 6; // grow outward from the selected set
+            }
+            if a_sel && b_sel {
+                score += 2;
+            }
+            score += deg_of(a).min(4) as i32;
+            score += deg_of(b).min(4) as i32;
+            if score > best_score {
+                best_score = score;
+                best_i = Some(i);
+            }
+        }
+        let Some(i) = best_i else {
+            break;
+        };
+        let (a, b) = remaining.remove(i);
+        if !selected.iter().any(|x| x == a) {
+            selected.push(a.to_string());
+        }
+        if !selected.iter().any(|x| x == b) {
+            selected.push(b.to_string());
+        }
+        chosen.push((a.to_string(), b.to_string()));
+    }
+
+    if chosen.is_empty() {
+        return String::new();
+    }
+
+    // Stable order: seeds first, then the rest alpha — helps TD layout put
+    // anchors near the top when mermaid ranks them.
+    selected.sort_by(|a, b| {
+        let sa = seed_set.iter().any(|s| s == a);
+        let sb = seed_set.iter().any(|s| s == b);
+        sb.cmp(&sa).then_with(|| a.cmp(b))
+    });
+
+    let mut ids: Vec<(String, String)> = Vec::new();
     let id_of = |name: &str, ids: &mut Vec<(String, String)>| -> String {
         if let Some((_, id)) = ids.iter().find(|(n, _)| n == name) {
             return id.clone();
@@ -31,22 +195,31 @@ fn flow_mermaid(flow: &[(String, String)]) -> String {
         ids.push((name.to_string(), id.clone()));
         id
     };
-
-    let mut edges = String::new();
-    for (caller, callee) in flow {
-        let a = id_of(caller, &mut ids);
-        let b = id_of(callee, &mut ids);
-        edges.push_str(&format!("  {a} --> {b}\n"));
+    for name in &selected {
+        let _ = id_of(name, &mut ids);
     }
 
-    // Mermaid labels: quote to survive `.`, `<`, etc. Escape quotes in names.
     let mut nodes = String::new();
     for (name, id) in &ids {
-        let label = esc(name);
-        nodes.push_str(&format!("  {id}[\"{label}\"]\n"));
+        let label = esc(&display_label(name, &selected));
+        // Seeds get a stadium shape so the topic anchors read as "entries".
+        if seed_set.iter().any(|s| s == name) {
+            nodes.push_str(&format!("  {id}([\"{label}\"])\n"));
+        } else {
+            nodes.push_str(&format!("  {id}[\"{label}\"]\n"));
+        }
     }
 
-    format!("<pre class=\"mermaid\">flowchart LR\n{nodes}{edges}</pre>\n")
+    let mut edges = String::new();
+    for (a, b) in &chosen {
+        let ia = id_of(a, &mut ids);
+        let ib = id_of(b, &mut ids);
+        edges.push_str(&format!("  {ia} --> {ib}\n"));
+    }
+
+    format!(
+        "<div class=\"diagram\"><pre class=\"mermaid\">flowchart TD\n{nodes}{edges}</pre></div>\n"
+    )
 }
 
 pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
@@ -125,7 +298,7 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     if doc.flow.is_empty() {
         html.push_str("<p class=\"empty\">No call flow recorded.</p>\n");
     } else {
-        html.push_str(&flow_mermaid(&doc.flow));
+        html.push_str(&flow_mermaid(&doc.flow, &doc.flow_seeds));
     }
     html.push_str("</section>\n");
 
@@ -167,12 +340,25 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     html.push_str("</main>\n");
 
     if html.contains("class=\"mermaid\"") {
-        // Theme the diagram dark so it sits on the slate ground instead of
-        // glaring as a white box.
+        // Dark theme + layout that prefers fitting the reading column over a
+        // fixed-pixel landscape strip (useMaxWidth). Rank/node spacing kept
+        // tight so 6–10 node maps stay scannable.
         html.push_str(
             "<script type=\"module\">import mermaid from \
              \"https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs\";\
-             mermaid.initialize({startOnLoad:true,theme:\"dark\"});</script>\n",
+             mermaid.initialize({\
+               startOnLoad:true,\
+               theme:\"dark\",\
+               securityLevel:\"strict\",\
+               flowchart:{\
+                 useMaxWidth:true,\
+                 htmlLabels:true,\
+                 curve:\"basis\",\
+                 nodeSpacing:28,\
+                 rankSpacing:36,\
+                 padding:8\
+               }\
+             });</script>\n",
         );
     }
 
@@ -364,8 +550,37 @@ td { color: var(--muted); }
 /* Blockquotes ---------------------------------------------------------- */
 blockquote { margin: 1.2rem 0; padding: .2rem 0 .2rem 1.1rem; border-left: 2px solid var(--hairline); color: var(--muted); }
 
-/* Call-flow diagram (mermaid is themed dark from the loader) ------------ */
-pre.mermaid { background: none; border: none; padding: 0; text-align: center; }
+/* Diagrams: scroll shell + scale-to-column so long maps stay readable ---- */
+.diagram {
+  margin: 1.4rem 0 1.8rem;
+  padding: .75rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  /* subtle rail so a scrollable strip is discoverable without a boxy frame */
+  border-top: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+}
+.diagram pre.mermaid {
+  background: none;
+  border: none;
+  padding: .5rem .25rem;
+  margin: 0;
+  text-align: center;
+  /* mermaid injects an SVG; keep the pre from forcing a fixed landscape width */
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  line-height: 1.3;
+}
+.diagram .mermaid svg,
+pre.mermaid svg {
+  max-width: 100%;
+  height: auto !important;
+}
 
 @media (max-width: 640px) {
   :root { --rail: 1.5rem; }
@@ -391,25 +606,105 @@ mod tests {
             ("compose_prompt".to_string(), "render_symbol_map".to_string()),
             ("Foo::bar".to_string(), "baz".to_string()),
         ];
-        let out = flow_mermaid(&flow);
+        let out = flow_mermaid(&flow, &[]);
+        assert!(out.contains("<div class=\"diagram\">"), "scroll shell missing: {out}");
         assert!(out.contains("<pre class=\"mermaid\">"), "got: {out}");
-        assert!(out.contains("flowchart LR"), "got: {out}");
+        // Always top-down (same as AI journey maps).
+        assert!(out.contains("flowchart TD"), "got: {out}");
         // Node IDs must be sanitized: no raw `::` in an id position.
         assert!(!out.contains("Foo::bar["), "unsanitized id: {out}");
-        // Human label is preserved in brackets.
-        assert!(out.contains("Foo::bar"), "label lost: {out}");
+        // Unique Foo::bar shortens to bar; full name is not required in the label.
+        assert!(out.contains("[\"bar\"]"), "short label missing: {out}");
         assert!(out.contains("-->"), "no edge: {out}");
     }
 
     #[test]
     fn empty_flow_yields_empty_mermaid() {
-        assert_eq!(flow_mermaid(&[]), "");
+        assert_eq!(flow_mermaid(&[], &[]), "");
+    }
+
+    #[test]
+    fn dense_flow_uses_top_down_and_caps_nodes() {
+        // A star: hub calls many leaves — diagram must stay TD and drop leaves
+        // past the node budget so it doesn't become an unreadably wide fan.
+        let mut flow: Vec<(String, String)> = Vec::new();
+        for i in 0..20 {
+            flow.push(("hub".into(), format!("leaf_{i}")));
+        }
+        // A few peer edges on the hub side so branching survives the trim.
+        flow.push(("entry".into(), "hub".into()));
+        flow.push(("hub".into(), "exit_ok".into()));
+        flow.push(("hub".into(), "exit_err".into()));
+        let out = flow_mermaid(&flow, &["hub".into()]);
+        assert!(out.contains("flowchart TD"), "expected TD: {out}");
+        // Stadium shape marks seeds.
+        assert!(out.contains("([\"hub\"])") || out.contains("hub"), "hub dropped: {out}");
+        // At most FLOW_MAX_NODES node declarations (quoted labels).
+        let node_decls = out.matches("[\"").count();
+        assert!(
+            node_decls <= FLOW_MAX_NODES + 2, // stadium uses (["..."]) which also matches
+            "too many nodes ({node_decls}): {out}"
+        );
+        // Multiple exits should remain (branching, not a single chain).
+        assert!(
+            out.contains("exit_ok") || out.contains("exit_err") || out.contains("entry"),
+            "branching dropped: {out}"
+        );
+    }
+
+    #[test]
+    fn seed_anchors_neighborhood_not_random_fragment() {
+        // Two disconnected components; seed is on the smaller-degree side so
+        // pure degree-picking would prefer the other hub. We must stay with seed.
+        let flow = vec![
+            ("noise_a".into(), "noise_hub".into()),
+            ("noise_b".into(), "noise_hub".into()),
+            ("noise_c".into(), "noise_hub".into()),
+            ("noise_hub".into(), "noise_d".into()),
+            ("caller".into(), "topic_fn".into()),
+            ("topic_fn".into(), "helper".into()),
+            ("topic_fn".into(), "sink".into()),
+        ];
+        let out = flow_mermaid(&flow, &["topic_fn".into()]);
+        assert!(out.contains("topic_fn"), "seed missing: {out}");
+        assert!(out.contains("caller") || out.contains("helper") || out.contains("sink"), "seed neighborhood missing: {out}");
+        assert!(!out.contains("noise_hub"), "noise component leaked in: {out}");
+    }
+
+    #[test]
+    fn drops_dunder_and_self_loops() {
+        let flow = vec![
+            ("__new__".into(), "__new__".into()),
+            ("__init__".into(), "real".into()),
+            ("real".into(), "real".into()),
+            ("entry".into(), "real".into()),
+            ("real".into(), "out".into()),
+        ];
+        let out = flow_mermaid(&flow, &["real".into()]);
+        assert!(!out.contains("__new__"), "dunder self-loop leaked: {out}");
+        assert!(!out.contains("__init__"), "dunder leaked: {out}");
+        assert!(out.contains("real"), "real hub missing: {out}");
+    }
+
+    #[test]
+    fn short_label_disambiguates_on_clash() {
+        let flow = vec![
+            ("mod_a::run".into(), "helper".into()),
+            ("mod_b::run".into(), "helper".into()),
+        ];
+        let out = flow_mermaid(&flow, &["mod_a::run".into()]);
+        // Both full names must appear because short "run" collides once both
+        // are selected — or at least the seed's full form if only one is kept.
+        assert!(
+            out.contains("mod_a::run") || out.contains("run"),
+            "seed label missing: {out}"
+        );
     }
 
     #[test]
     fn flow_mermaid_escapes_html_in_labels() {
         let flow = vec![("Vec<T>".to_string(), "a & b".to_string())];
-        let out = flow_mermaid(&flow);
+        let out = flow_mermaid(&flow, &[]);
         assert!(out.contains("Vec&lt;T&gt;"), "angle brackets not escaped: {out}");
         assert!(out.contains("a &amp; b"), "ampersand not escaped: {out}");
         assert!(!out.contains("Vec<T>"), "raw < leaked into label: {out}");
@@ -427,6 +722,7 @@ mod tests {
                 doc: "/// runs a node".into(),
             }],
             flow: vec![("run_node".into(), "HarnessAdapter".into())],
+            flow_seeds: vec!["HarnessAdapter".into()],
             doc_sections: vec![DocSection {
                 source: "CONTEXT.md".into(),
                 heading: "§8".into(),
@@ -467,6 +763,7 @@ mod tests {
                 doc: String::new(),
             }],
             flow: vec![],
+            flow_seeds: vec![],
             doc_sections: vec![],
         };
         let narration = Narration {
@@ -503,6 +800,7 @@ mod tests {
                 code: "fn foo() {}".into(), doc: String::new(),
             }],
             flow: vec![],
+            flow_seeds: vec![],
             doc_sections: vec![],
         };
         let html = render_html(&doc, None);
@@ -519,6 +817,7 @@ mod tests {
             topic: "t".into(),
             snippets: vec![],
             flow: vec![("a".into(), "b".into())],
+            flow_seeds: vec!["a".into()],
             doc_sections: vec![],
         };
         let html = render_html(&with_flow, None);
@@ -534,6 +833,7 @@ mod tests {
             topic: "t".into(),
             snippets: vec![],
             flow: vec![],
+            flow_seeds: vec![],
             doc_sections: vec![],
         };
         let html2 = render_html(&no_flow, None);

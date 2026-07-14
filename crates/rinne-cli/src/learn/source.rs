@@ -237,6 +237,7 @@ mod tests {
 
         let cluster = Cluster {
             topic: "thing".into(),
+            seeds: vec!["thing".into()],
             symbols: vec![ClusterSymbol {
                 name: "thing".into(),
                 file: "m.rs".into(),
@@ -294,6 +295,7 @@ mod tests {
 
         let cluster = Cluster {
             topic: "thing".into(),
+            seeds: vec!["thing".into()],
             symbols: vec![ClusterSymbol {
                 name: "thing".into(),
                 file: "m.rs".into(),

@@ -141,6 +141,7 @@ pub fn cluster_from_seeds(
 
     Cluster {
         topic: topic.to_string(),
+        seeds: seed_names.to_vec(),
         symbols,
         files,
     }
