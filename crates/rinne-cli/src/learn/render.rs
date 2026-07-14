@@ -374,6 +374,10 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
         for s in &doc.snippets {
             logic.push_str("<article class=\"snippet\">\n");
             logic.push_str(&format!("<h3>{}</h3>\n", esc(&s.symbol)));
+            logic.push_str(&format!(
+                "<p class=\"file\">{} line {}</p>\n",
+                esc(&s.file), s.line,
+            ));
             if !s.doc.is_empty() {
                 logic.push_str(&format!("<p class=\"doc\">{}</p>\n", esc(&s.doc)));
             }
@@ -934,6 +938,12 @@ mod tests {
         assert!(html.contains("amount &gt; limit") || html.contains("amount > limit"), "rule condition missing (escaped)");
         // Tab switch is inline JS, not an external script src.
         assert!(html.contains("data-tab") && !html.contains("<script src=\"http"), "tabs must be inline");
+        // Source-ref snippet shows file:line so an FDE can see where a symbol lives.
+        assert!(html.contains("pay.rs"), "snippet file missing from source-ref: {html}");
+        assert!(
+            html.contains("<p class=\"file\">pay.rs line 1</p>"),
+            "snippet file:line not rendered: {html}"
+        );
     }
 
     #[test]
