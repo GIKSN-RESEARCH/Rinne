@@ -32,11 +32,21 @@ pub struct Impact {
 
 #[derive(Debug, Clone, Default)]
 pub struct FdeFacts {
+    /// Cluster symbols with at least one caller from OUTSIDE the resolved
+    /// cluster — i.e. where control crosses INTO this neighborhood. Because
+    /// `cluster_from_seeds` pulls a seed's own callers into the cluster, the
+    /// topic seed itself usually will NOT appear here; the entries are the
+    /// cluster's inbound-boundary symbols instead.
     pub entry_points: Vec<EntryPoint>,
     pub ranked_files: Vec<FileRank>,
     pub blast_radius: Vec<Impact>,
 }
 
+/// Entry points are cluster symbols with at least one caller from OUTSIDE the
+/// resolved cluster — i.e. where control crosses INTO this neighborhood.
+/// Because the resolver (`cluster_from_seeds`) pulls a seed's own callers into
+/// the cluster, the topic seed itself usually will NOT appear here; the
+/// entries are the cluster's inbound-boundary symbols.
 pub fn fde_facts(graph: &dyn CodeGraph, cluster: &Cluster) -> FdeFacts {
     let in_cluster: std::collections::HashSet<&str> =
         cluster.symbols.iter().map(|s| s.name.as_str()).collect();
@@ -203,6 +213,69 @@ mod tests {
         assert_eq!(facts.entry_points.first().map(|e| e.name.as_str()), Some("public_api"));
         assert_eq!(facts.entry_points[0].external_callers, 2);
         assert!(!facts.entry_points.iter().any(|e| e.name == "helper"), "internal helper is not an entry");
+    }
+
+    /// Mocks the shape `cluster_from_seeds` actually produces: the seed's
+    /// caller (`caller_in_cluster`) is pulled INTO the cluster alongside the
+    /// seed, so the seed's only caller is in-cluster and filtered out of
+    /// entry points. `public_api` (unrelated to the seed here) keeps its two
+    /// external callers and so remains a genuine entry point.
+    struct GBoundary;
+    impl CodeGraph for GBoundary {
+        fn neighborhood(&self, s: &str) -> Option<Neighborhood> {
+            match s {
+                "seed_fn" => Some(Neighborhood {
+                    definition: SymbolRef { name: "seed_fn".into(), file: "core.rs".into(), line: 1, end_line: 3 },
+                    callers: vec![
+                        SymbolRef { name: "caller_in_cluster".into(), file: "core.rs".into(), line: 10, end_line: 12 },
+                    ],
+                    callees: vec![], imports: vec![], stale: false,
+                }),
+                "caller_in_cluster" => Some(Neighborhood {
+                    definition: SymbolRef { name: "caller_in_cluster".into(), file: "core.rs".into(), line: 10, end_line: 12 },
+                    // Called from outside the cluster — this is the real boundary.
+                    callers: vec![
+                        SymbolRef { name: "outside_caller".into(), file: "web.rs".into(), line: 4, end_line: 4 },
+                    ],
+                    callees: vec![
+                        SymbolRef { name: "seed_fn".into(), file: "core.rs".into(), line: 1, end_line: 3 },
+                    ],
+                    imports: vec![], stale: false,
+                }),
+                _ => None,
+            }
+        }
+        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> { None }
+        fn symbol_names(&self) -> Vec<String> { vec!["seed_fn".into(), "caller_in_cluster".into()] }
+    }
+
+    #[test]
+    fn entry_points_reflect_cluster_boundary_when_callers_are_in_cluster() {
+        // Cluster mirrors `cluster_from_seeds`: it includes both the seed AND
+        // the seed's caller (the resolver pulls callers/callees IN).
+        let cluster = Cluster {
+            topic: "seed_fn".into(),
+            seeds: vec!["seed_fn".into()],
+            symbols: vec![
+                ClusterSymbol { name: "seed_fn".into(), file: "core.rs".into(), line: 1, end_line: 3, kind: "symbol".into() },
+                ClusterSymbol { name: "caller_in_cluster".into(), file: "core.rs".into(), line: 10, end_line: 12, kind: "symbol".into() },
+            ],
+            files: vec!["core.rs".into()],
+        };
+        let facts = fde_facts(&GBoundary, &cluster);
+        // The topic seed's only caller is now in-cluster → seed is NOT an entry.
+        assert!(
+            !facts.entry_points.iter().any(|e| e.name == "seed_fn"),
+            "seed with in-cluster-only caller must not be an entry point: {:?}",
+            facts.entry_points
+        );
+        // `caller_in_cluster` has a caller from OUTSIDE the cluster → it IS
+        // the real inbound-boundary entry point.
+        assert!(
+            facts.entry_points.iter().any(|e| e.name == "caller_in_cluster"),
+            "in-cluster caller with an external caller must be the entry point: {:?}",
+            facts.entry_points
+        );
     }
 
     #[test]
