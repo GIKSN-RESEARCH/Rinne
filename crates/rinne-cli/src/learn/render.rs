@@ -728,6 +728,8 @@ mod tests {
                 heading: "§8".into(),
                 body: "the why".into(),
             }],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         let html = render_html(&doc, None);
         assert!(html.starts_with("<!DOCTYPE html>"));
@@ -765,6 +767,8 @@ mod tests {
             flow: vec![],
             flow_seeds: vec![],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         let narration = Narration {
             overview: "It adapts workers.".into(),
@@ -802,6 +806,8 @@ mod tests {
             flow: vec![],
             flow_seeds: vec![],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         let html = render_html(&doc, None);
         assert!(!html.contains("Business Rules"), "rules leaked without AI");
@@ -819,6 +825,8 @@ mod tests {
             flow: vec![("a".into(), "b".into())],
             flow_seeds: vec!["a".into()],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         let html = render_html(&with_flow, None);
         assert!(html.contains("class=\"mermaid\""), "no diagram: {html}");
@@ -835,6 +843,8 @@ mod tests {
             flow: vec![],
             flow_seeds: vec![],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         let html2 = render_html(&no_flow, None);
         assert!(!html2.contains("mermaid.initialize"), "init leaked: {html2}");

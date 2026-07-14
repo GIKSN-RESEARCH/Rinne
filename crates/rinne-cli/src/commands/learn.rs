@@ -324,12 +324,22 @@ async fn explain_with_progress(
         Some(arc_g) => cluster_flow(arc_g.as_ref(), &cluster),
     };
 
+    // Deterministic FDE facts (entry points, blast radius, ranked files) and
+    // real-logic rule sites — both computed from the graph/cluster, no AI.
+    let fde = match bb.concrete_graph() {
+        Some(arc_g) => crate::learn::logic::fde_facts(arc_g.as_ref(), &cluster),
+        None => Default::default(),
+    };
+    let rule_sites = crate::learn::logic::cluster_branches(&workspace, &cluster);
+
     let doc = LearnDoc {
         topic: topic.clone(),
         snippets,
         flow,
         flow_seeds,
         doc_sections,
+        fde,
+        rule_sites,
     };
 
     // The AI phase is the slow one; name the cheap tier up front and stream

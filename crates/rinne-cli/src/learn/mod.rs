@@ -62,6 +62,10 @@ pub struct LearnDoc {
     /// Seed symbol names the flow should stay anchored on (topic hits).
     pub flow_seeds: Vec<String>,
     pub doc_sections: Vec<DocSection>,
+    /// Deterministic FDE facts (entry points, blast radius, ranked files).
+    pub fde: crate::learn::logic::FdeFacts,
+    /// Real-logic conditionals extracted from the cluster's files.
+    pub rule_sites: Vec<crate::learn::logic::RuleSite>,
 }
 
 /// A narration of architecture and design decisions.
@@ -161,6 +165,8 @@ mod tests {
             flow: vec![],
             flow_seeds: vec![],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         assert!(d.snippets.is_empty());
     }

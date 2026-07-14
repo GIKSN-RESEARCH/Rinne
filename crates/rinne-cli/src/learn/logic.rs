@@ -2,6 +2,9 @@
 //! entry points (where to start reading), blast radius (what a change touches),
 //! and ranked files (the few that hold the logic).
 
+use std::path::Path;
+
+use rinne_graph::branches::{extract_branches, BranchKind};
 use rinne_types::graph::{CodeGraph, SymbolRef};
 
 use crate::learn::Cluster;
@@ -94,6 +97,58 @@ pub fn fde_facts(graph: &dyn CodeGraph, cluster: &Cluster) -> FdeFacts {
     FdeFacts { entry_points, ranked_files, blast_radius }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleSite {
+    pub file: String,
+    pub line: u32,
+    pub condition: String,
+    pub kind: String,
+}
+
+/// Language detection from a file extension, matching the graph's supported set.
+fn lang_of(file: &str) -> Option<&'static str> {
+    let ext = Path::new(file).extension().and_then(|e| e.to_str())?;
+    Some(match ext {
+        "rs" => "rust",
+        "py" => "python",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        _ => return None,
+    })
+}
+
+fn kind_label(k: &BranchKind) -> &'static str {
+    match k {
+        BranchKind::If => "if",
+        BranchKind::Match => "match",
+        BranchKind::Guard => "guard",
+        BranchKind::ErrorPath => "error-path",
+    }
+}
+
+/// Extract branch/guard conditions across the cluster's files. Reads each file
+/// once, caps total sites so a huge subsystem doesn't flood the render.
+pub fn cluster_branches(workspace: &Path, cluster: &Cluster) -> Vec<RuleSite> {
+    const MAX_SITES: usize = 40;
+    let mut out: Vec<RuleSite> = Vec::new();
+    for file in &cluster.files {
+        let Some(lang) = lang_of(file) else { continue };
+        let Ok(src) = std::fs::read_to_string(workspace.join(file)) else { continue };
+        for b in extract_branches(lang, &src) {
+            out.push(RuleSite {
+                file: file.clone(),
+                line: b.line,
+                condition: b.condition,
+                kind: kind_label(&b.kind).to_string(),
+            });
+            if out.len() >= MAX_SITES {
+                return out;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +211,29 @@ mod tests {
         let api = facts.blast_radius.iter().find(|i| i.name == "public_api").unwrap();
         assert_eq!(api.caller_count, 2);
         assert_eq!(api.caller_files, 1, "both callers live in web.rs");
+    }
+
+    #[test]
+    fn cluster_branches_extracts_conditions_with_file_and_line() {
+        use std::path::Path;
+        let dir = std::env::temp_dir().join(format!("rinne-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("gate.rs"),
+            "fn gate(tier: &str) {\n    if tier == \"enterprise\" {\n        allow();\n    }\n}\n",
+        )
+        .unwrap();
+        let cluster = Cluster {
+            topic: "gate".into(),
+            seeds: vec!["gate".into()],
+            symbols: vec![ClusterSymbol { name: "gate".into(), file: "gate.rs".into(), line: 1, end_line: 5, kind: "symbol".into() }],
+            files: vec!["gate.rs".into()],
+        };
+        let sites = cluster_branches(Path::new(&dir), &cluster);
+        assert!(
+            sites.iter().any(|s| s.file == "gate.rs" && s.condition.contains("enterprise")),
+            "rule condition surfaced with file: {sites:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -700,6 +700,8 @@ mod tests {
             flow: vec![],
             flow_seeds: vec![],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         assert!(NullTranslator.translate(&doc).await.is_none());
     }
@@ -809,6 +811,8 @@ mod tests {
             flow: vec![],
             flow_seeds: vec![],
             doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
         };
         let p = teach_prompt(&doc);
         let lower = p.to_lowercase();
