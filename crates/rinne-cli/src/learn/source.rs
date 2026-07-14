@@ -108,7 +108,7 @@ fn is_doc_comment(trimmed: &str) -> bool {
     trimmed.starts_with("///")   // rust doc
         || trimmed.starts_with("//!")   // rust inner doc
         || trimmed.starts_with("//")    // rust/js/ts/go line
-        || trimmed.starts_with("#")     // python/ruby/shell
+        || (trimmed.starts_with('#') && !trimmed.starts_with("#[") && !trimmed.starts_with("#!")) // python/ruby/shell, excluding rust attrs
         || trimmed.starts_with("/**")   // jsdoc open
         || trimmed.starts_with("*")     // jsdoc/block continuation
         || trimmed.starts_with("*/")    // block close
@@ -362,6 +362,21 @@ mod tests {
         assert!(snippets[0].code.contains("if a > 0"), "logic past blank line kept");
         assert!(!snippets[0].code.contains("fn other"), "next symbol not bled in");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_doc_excludes_rust_attributes() {
+        // A `#[derive]`/`#[allow]` attribute between the doc comment and the symbol
+        // must NOT be captured as documentation.
+        let lines = vec![
+            "/// The real doc.".to_string(),
+            "#[derive(Debug, Clone)]".to_string(),
+            "pub struct Thing;".to_string(),
+        ];
+        let doc = extract_doc(&lines, 2); // symbol at index 2
+        // extract_doc walks upward and stops at the first non-doc line; the attribute
+        // is not a doc line, so it stops there and captures nothing above it.
+        assert!(!doc.contains("derive"), "rust attribute leaked into doc: {doc:?}");
     }
 
     #[test]
