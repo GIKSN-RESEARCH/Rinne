@@ -1,5 +1,6 @@
 //! `learn` module for knowledge synthesis and code narration.
 
+pub mod logic;
 pub mod resolve;
 pub mod source;
 pub mod translate;
