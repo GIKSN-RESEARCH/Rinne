@@ -262,7 +262,7 @@ fn fde_panel(doc: &LearnDoc) -> String {
 /// Real-logic panel: the conditionals that encode the rules, plus call flow and
 /// collapsed source evidence.
 fn logic_panel(doc: &LearnDoc, flow_html: &str) -> String {
-    let mut s = String::from("<section class=\"tab-panel\" data-panel=\"logic\">\n");
+    let mut s = String::from("<section class=\"tab-panel hidden\" data-panel=\"logic\">\n");
     s.push_str("<p class=\"section-label\">Conditions &amp; guards</p>\n");
     if doc.rule_sites.is_empty() {
         s.push_str("<p class=\"empty\">No branch conditions extracted for the cluster's languages.</p>\n");
@@ -934,6 +934,37 @@ mod tests {
         assert!(html.contains("amount &gt; limit") || html.contains("amount > limit"), "rule condition missing (escaped)");
         // Tab switch is inline JS, not an external script src.
         assert!(html.contains("data-tab") && !html.contains("<script src=\"http"), "tabs must be inline");
+    }
+
+    #[test]
+    fn only_fde_panel_visible_on_load() {
+        // Exactly one tab-panel (the FDE/Engineer panel) is un-hidden on initial
+        // render; PM and Logic carry `hidden` so the inline switcher reveals them.
+        use crate::learn::logic::{EntryPoint, FdeFacts, FileRank, Impact, RuleSite};
+        let doc = LearnDoc {
+            topic: "checkout".into(),
+            snippets: vec![Snippet {
+                symbol: "charge".into(), file: "pay.rs".into(), line: 1,
+                code: "fn charge() {}".into(), doc: String::new(),
+            }],
+            flow: vec![("route".into(), "charge".into())],
+            flow_seeds: vec!["charge".into()],
+            doc_sections: vec![],
+            fde: FdeFacts {
+                entry_points: vec![EntryPoint { name: "charge".into(), file: "pay.rs".into(), external_callers: 3 }],
+                ranked_files: vec![FileRank { file: "pay.rs".into(), symbols: 1, inbound: 3 }],
+                blast_radius: vec![Impact { name: "charge".into(), caller_count: 3, caller_files: 2 }],
+            },
+            rule_sites: vec![RuleSite {
+                file: "pay.rs".into(), line: 4, condition: "amount > limit".into(), kind: "if".into(),
+            }],
+        };
+        let html = render_html(&doc, None);
+        assert!(html.contains("data-panel=\"fde\""));
+        assert!(html.contains("<section class=\"tab-panel hidden\" data-panel=\"pm\">"), "pm must be hidden");
+        assert!(html.contains("<section class=\"tab-panel hidden\" data-panel=\"logic\">"), "logic must be hidden on load");
+        // The FDE panel must NOT be hidden.
+        assert!(!html.contains("<section class=\"tab-panel hidden\" data-panel=\"fde\">"), "fde must be visible");
     }
 
     #[test]
