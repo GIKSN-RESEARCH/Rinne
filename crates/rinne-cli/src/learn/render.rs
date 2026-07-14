@@ -222,6 +222,70 @@ fn flow_mermaid(flow: &[(String, String)], seeds: &[String]) -> String {
     )
 }
 
+/// Deterministic FDE panel: where to start, which files matter, what a change
+/// touches. All graph-derived — present even with `--no-ai`.
+fn fde_panel(doc: &LearnDoc) -> String {
+    let mut s = String::from("<section class=\"tab-panel\" data-panel=\"fde\">\n");
+    s.push_str("<p class=\"section-label\">Start here</p>\n");
+    if doc.fde.entry_points.is_empty() {
+        s.push_str("<p class=\"empty\">No external entry points — this reads as internal machinery.</p>\n");
+    } else {
+        s.push_str("<ul class=\"fde-entries\">\n");
+        for e in &doc.fde.entry_points {
+            s.push_str(&format!(
+                "<li><code>{}</code> <span class=\"file\">{}</span> \
+                 <span class=\"count\">{} external caller(s)</span></li>\n",
+                esc(&e.name), esc(&e.file), e.external_callers,
+            ));
+        }
+        s.push_str("</ul>\n");
+    }
+    s.push_str("<p class=\"section-label\">Files that matter</p>\n<ul class=\"fde-files\">\n");
+    for f in &doc.fde.ranked_files {
+        s.push_str(&format!(
+            "<li><span class=\"file\">{}</span> <span class=\"count\">{} symbols · {} inbound</span></li>\n",
+            esc(&f.file), f.symbols, f.inbound,
+        ));
+    }
+    s.push_str("</ul>\n");
+    s.push_str("<p class=\"section-label\">If you change this</p>\n<ul class=\"fde-impact\">\n");
+    for i in &doc.fde.blast_radius {
+        s.push_str(&format!(
+            "<li><code>{}</code> <span class=\"count\">{} caller(s) across {} file(s)</span></li>\n",
+            esc(&i.name), i.caller_count, i.caller_files,
+        ));
+    }
+    s.push_str("</ul>\n</section>\n");
+    s
+}
+
+/// Real-logic panel: the conditionals that encode the rules, plus call flow and
+/// collapsed source evidence.
+fn logic_panel(doc: &LearnDoc, flow_html: &str) -> String {
+    let mut s = String::from("<section class=\"tab-panel\" data-panel=\"logic\">\n");
+    s.push_str("<p class=\"section-label\">Conditions &amp; guards</p>\n");
+    if doc.rule_sites.is_empty() {
+        s.push_str("<p class=\"empty\">No branch conditions extracted for the cluster's languages.</p>\n");
+    } else {
+        s.push_str("<table class=\"rules\">\n<tr><th>where</th><th>kind</th><th>condition</th></tr>\n");
+        for r in &doc.rule_sites {
+            s.push_str(&format!(
+                "<tr><td class=\"file\">{}:{}</td><td>{}</td><td><code>{}</code></td></tr>\n",
+                esc(&r.file), r.line, esc(&r.kind), esc(&r.condition),
+            ));
+        }
+        s.push_str("</table>\n");
+    }
+    s.push_str("<p class=\"section-label\">Call flow</p>\n");
+    if flow_html.is_empty() {
+        s.push_str("<p class=\"empty\">No call flow recorded.</p>\n");
+    } else {
+        s.push_str(flow_html);
+    }
+    s.push_str("</section>\n");
+    s
+}
+
 pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     let overview = narration
         .map(|n| render_markdown(&n.overview))
@@ -249,95 +313,92 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     );
     html.push_str("</header>\n");
 
-    // 1. Overview — product problem + journey placement.
-    html.push_str("<section id=\"overview\">\n");
+    // Tab bar.
+    html.push_str(
+        "<nav class=\"tabs\">\
+         <button class=\"tab active\" data-tab=\"fde\">Engineer</button>\
+         <button class=\"tab\" data-tab=\"pm\">Product</button>\
+         <button class=\"tab\" data-tab=\"logic\">Logic</button>\
+         </nav>\n",
+    );
+
+    // FDE panel (deterministic; shown first).
+    html.push_str(&fde_panel(doc));
+
+    // PM panel: narration overview (journey map lives inside it) + business
+    // rules, code-free. Hidden sections when no narration.
+    html.push_str("<section class=\"tab-panel hidden\" data-panel=\"pm\">\n");
     html.push_str("<p class=\"section-label\">Overview</p>\n");
     html.push_str(&overview);
     html.push('\n');
-    html.push_str("</section>\n");
-
-    // 2. Business rules / conditions (AI-only; hidden when absent).
     if let Some(dec) = narration.map(|n| n.decisions.trim()).filter(|d| !d.is_empty()) {
-        html.push_str("<section id=\"decisions\">\n");
         html.push_str("<p class=\"section-label\">Business Rules</p>\n");
         html.push_str(&render_markdown(dec));
         html.push('\n');
-        html.push_str("</section>\n");
     }
-
-    // 3. Domain + design concepts (AI-only; hidden when absent).
     if let Some(con) = narration.map(|n| n.concepts.trim()).filter(|c| !c.is_empty()) {
-        html.push_str("<section id=\"concepts\">\n");
         html.push_str("<p class=\"section-label\">Domain Concepts</p>\n");
         html.push_str(&render_markdown(con));
         html.push('\n');
-        html.push_str("</section>\n");
     }
-
-    // 4. Rationale from the repo's own design docs (deterministic, offline).
     if !doc.doc_sections.is_empty() {
-        html.push_str("<section id=\"design\">\n");
         html.push_str("<p class=\"section-label\">Rationale</p>\n");
         for ds in &doc.doc_sections {
             html.push_str("<article class=\"doc-section\">\n");
             html.push_str(&format!(
                 "<h3>{} <span class=\"source\">({})</span></h3>\n",
-                esc(&ds.heading),
-                esc(&ds.source),
+                esc(&ds.heading), esc(&ds.source),
             ));
             html.push_str(&render_markdown(&ds.body));
-            html.push('\n');
             html.push_str("</article>\n");
         }
-        html.push_str("</section>\n");
-    }
-
-    // 5. Call flow.
-    html.push_str("<section id=\"flow\">\n");
-    html.push_str("<p class=\"section-label\">Call Flow</p>\n");
-    if doc.flow.is_empty() {
-        html.push_str("<p class=\"empty\">No call flow recorded.</p>\n");
-    } else {
-        html.push_str(&flow_mermaid(&doc.flow, &doc.flow_seeds));
     }
     html.push_str("</section>\n");
 
-    // 6. Source reference — evidence, collapsed by default so understanding leads.
+    // Logic panel (deterministic rule sites + flow).
+    let flow_html = if doc.flow.is_empty() {
+        String::new()
+    } else {
+        flow_mermaid(&doc.flow, &doc.flow_seeds)
+    };
+    let mut logic = logic_panel(doc, &flow_html);
+    // Fold the collapsed source reference into the logic panel as evidence.
     if !doc.snippets.is_empty() {
-        html.push_str("<section id=\"source\">\n");
-        html.push_str("<details class=\"source-ref\">\n");
-        html.push_str(&format!(
+        logic.pop(); // drop the trailing "</section>\n" to append inside it
+        logic.push_str("<details class=\"source-ref\">\n");
+        logic.push_str(&format!(
             "<summary><span class=\"section-label\">Source reference</span>\
              <span class=\"count\">{} symbols</span></summary>\n",
             doc.snippets.len(),
         ));
-
-        // Symbol index inside the collapsed block.
-        html.push_str("<ul class=\"symbol-index\">\n");
         for s in &doc.snippets {
-            html.push_str(&format!(
-                "<li><code>{}</code> <span class=\"file\">{} line {}</span></li>\n",
-                esc(&s.symbol),
-                esc(&s.file),
-                s.line,
-            ));
-        }
-        html.push_str("</ul>\n");
-
-        for s in &doc.snippets {
-            html.push_str("<article class=\"snippet\">\n");
-            html.push_str(&format!("<h3>{}</h3>\n", esc(&s.symbol)));
+            logic.push_str("<article class=\"snippet\">\n");
+            logic.push_str(&format!("<h3>{}</h3>\n", esc(&s.symbol)));
             if !s.doc.is_empty() {
-                html.push_str(&format!("<p class=\"doc\">{}</p>\n", esc(&s.doc)));
+                logic.push_str(&format!("<p class=\"doc\">{}</p>\n", esc(&s.doc)));
             }
-            html.push_str(&format!("<pre><code>{}</code></pre>\n", esc(&s.code)));
-            html.push_str("</article>\n");
+            logic.push_str(&format!("<pre><code>{}</code></pre>\n", esc(&s.code)));
+            logic.push_str("</article>\n");
         }
-        html.push_str("</details>\n");
-        html.push_str("</section>\n");
+        logic.push_str("</details>\n</section>\n");
     }
+    html.push_str(&logic);
 
     html.push_str("</main>\n");
+
+    // Inline tab switcher — no external dependency.
+    html.push_str(
+        "<script>\
+         document.querySelectorAll('.tab').forEach(function(b){\
+           b.addEventListener('click',function(){\
+             var t=b.getAttribute('data-tab');\
+             document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x===b);});\
+             document.querySelectorAll('.tab-panel').forEach(function(p){\
+               p.classList.toggle('hidden',p.getAttribute('data-panel')!==t);\
+             });\
+           });\
+         });</script>\n",
+    );
 
     if html.contains("class=\"mermaid\"") {
         // Dark theme + layout that prefers fitting the reading column over a
@@ -592,6 +653,24 @@ pre.mermaid svg {
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+.tabs { display: flex; gap: .5rem; margin: 0 0 2.5rem; border-bottom: 1px solid var(--hairline); }
+.tab {
+  font-family: var(--mono); font-size: .78rem; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted); background: none; border: none; border-bottom: 2px solid transparent;
+  padding: .6rem .4rem; cursor: pointer;
+}
+.tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+.tab-panel.hidden { display: none; }
+.rules { border-collapse: collapse; width: 100%; font-size: .86rem; margin: 1rem 0; }
+.rules th, .rules td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+.rules th { font-family: var(--mono); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: var(--amber); }
+.fde-entries, .fde-files, .fde-impact { list-style: none; padding: 0; margin: 0 0 2rem; }
+.fde-entries li, .fde-files li, .fde-impact li {
+  font-family: var(--mono); font-size: .84rem; padding: .45rem .2rem;
+  border-bottom: 1px solid var(--hairline); display: flex; flex-wrap: wrap; gap: .6rem; align-items: baseline;
+}
+.count { color: var(--faint); font-family: var(--mono); font-size: .76rem; }
 "#
 }
 
@@ -778,18 +857,22 @@ mod tests {
         };
         let html = render_html(&doc, Some(&narration));
 
-        // Understanding sections render from the narration parts.
-        assert!(html.contains("Business Rules"), "rules section missing");
-        assert!(html.contains("degrading"), "decisions body missing");
-        assert!(html.contains("Domain Concepts"), "concepts section missing");
-        assert!(html.contains("Graceful degradation"), "concepts body missing");
+        // Understanding sections render from the narration parts, inside the
+        // Product (PM) panel.
+        let pm_at = html.find("data-panel=\"pm\"").expect("pm panel missing");
+        let logic_at = html.find("data-panel=\"logic\"").expect("logic panel missing");
+        let pm_region = &html[pm_at..logic_at];
+        assert!(pm_region.contains("Business Rules"), "rules section missing from pm panel");
+        assert!(pm_region.contains("degrading"), "decisions body missing from pm panel");
+        assert!(pm_region.contains("Domain Concepts"), "concepts section missing from pm panel");
+        assert!(pm_region.contains("Graceful degradation"), "concepts body missing from pm panel");
 
-        // Source is demoted into a collapsed <details>, after the understanding.
-        assert!(html.contains("<details class=\"source-ref\">"), "source not collapsed");
-        let rules_at = html.find(">Business Rules<").unwrap();
-        // Match the body markup, not the CSS comment in the <style> block.
-        let source_at = html.find("<details class=\"source-ref\">").unwrap();
-        assert!(rules_at < source_at, "source must come after understanding");
+        // Source is demoted into a collapsed <details>, folded into the Logic panel.
+        let logic_region = &html[logic_at..];
+        assert!(
+            logic_region.contains("<details class=\"source-ref\">"),
+            "source not collapsed inside logic panel"
+        );
         // The snippet still exists — as evidence, inside the collapsed block.
         assert!(html.contains("HarnessAdapter"));
     }
@@ -810,10 +893,60 @@ mod tests {
             rule_sites: vec![],
         };
         let html = render_html(&doc, None);
-        assert!(!html.contains("Business Rules"), "rules leaked without AI");
-        assert!(!html.contains("Domain Concepts"), "concepts leaked without AI");
+        // The PM panel exists but carries neither AI-only section.
+        let pm_at = html.find("data-panel=\"pm\"").expect("pm panel missing");
+        let logic_at = html.find("data-panel=\"logic\"").expect("logic panel missing");
+        let pm_region = &html[pm_at..logic_at];
+        assert!(!pm_region.contains("Business Rules"), "rules leaked without AI");
+        assert!(!pm_region.contains("Domain Concepts"), "concepts leaked without AI");
         // Source reference is still present (structural), just collapsed.
         assert!(html.contains("source-ref"), "source ref missing");
+    }
+
+    #[test]
+    fn renders_three_audience_tabs_with_deterministic_fde_facts() {
+        use crate::learn::logic::{EntryPoint, FdeFacts, FileRank, Impact, RuleSite};
+        let doc = LearnDoc {
+            topic: "checkout".into(),
+            snippets: vec![Snippet {
+                symbol: "charge".into(), file: "pay.rs".into(), line: 1,
+                code: "fn charge() {}".into(), doc: String::new(),
+            }],
+            flow: vec![("route".into(), "charge".into())],
+            flow_seeds: vec!["charge".into()],
+            doc_sections: vec![],
+            fde: FdeFacts {
+                entry_points: vec![EntryPoint { name: "charge".into(), file: "pay.rs".into(), external_callers: 3 }],
+                ranked_files: vec![FileRank { file: "pay.rs".into(), symbols: 1, inbound: 3 }],
+                blast_radius: vec![Impact { name: "charge".into(), caller_count: 3, caller_files: 2 }],
+            },
+            rule_sites: vec![RuleSite {
+                file: "pay.rs".into(), line: 4, condition: "amount > limit".into(), kind: "if".into(),
+            }],
+        };
+        let html = render_html(&doc, None);
+        // Tab controls exist for all three audiences.
+        assert!(html.contains("data-tab=\"fde\""), "FDE tab missing");
+        assert!(html.contains("data-tab=\"pm\""), "PM tab missing");
+        assert!(html.contains("data-tab=\"logic\""), "Logic tab missing");
+        // FDE facts render deterministically (no AI).
+        assert!(html.contains("charge") && html.contains("Start here"), "entry point missing");
+        assert!(html.contains("amount &gt; limit") || html.contains("amount > limit"), "rule condition missing (escaped)");
+        // Tab switch is inline JS, not an external script src.
+        assert!(html.contains("data-tab") && !html.contains("<script src=\"http"), "tabs must be inline");
+    }
+
+    #[test]
+    fn logic_tab_escapes_rule_conditions() {
+        use crate::learn::logic::{FdeFacts, RuleSite};
+        let doc = LearnDoc {
+            topic: "t".into(), snippets: vec![], flow: vec![], flow_seeds: vec![], doc_sections: vec![],
+            fde: FdeFacts::default(),
+            rule_sites: vec![RuleSite { file: "f.rs".into(), line: 1, condition: "x < 1 && y > 2".into(), kind: "if".into() }],
+        };
+        let html = render_html(&doc, None);
+        assert!(html.contains("x &lt; 1 &amp;&amp; y &gt; 2"), "condition not escaped: {html}");
+        assert!(!html.contains("x < 1 &&"), "raw condition leaked");
     }
 
     #[test]
