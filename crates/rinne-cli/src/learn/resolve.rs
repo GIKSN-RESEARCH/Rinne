@@ -108,6 +108,7 @@ pub fn cluster_from_seeds(
                     name: nbr.definition.name,
                     file: nbr.definition.file,
                     line: nbr.definition.line,
+                    end_line: nbr.definition.end_line,
                     kind: "symbol".into(),
                 });
             }
@@ -124,6 +125,7 @@ pub fn cluster_from_seeds(
                         name: sym_ref.name,
                         file: sym_ref.file,
                         line: sym_ref.line,
+                        end_line: sym_ref.end_line,
                         kind: "symbol".into(),
                     });
                 }

@@ -12,7 +12,9 @@ pub struct ClusterSymbol {
     pub name: String,
     pub file: String,
     pub line: u32,
-    // Reserved for future filtering/display; not yet consumed by the renderer.
+    /// 1-based last line of the symbol's span (from the graph). Used for exact
+    /// snippet extraction; falls back to `line` when unknown.
+    pub end_line: u32,
     #[allow(dead_code)]
     pub kind: String,
 }
