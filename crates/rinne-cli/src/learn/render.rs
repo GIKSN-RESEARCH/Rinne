@@ -400,6 +400,10 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
              document.querySelectorAll('.tab-panel').forEach(function(p){\
                p.classList.toggle('hidden',p.getAttribute('data-panel')!==t);\
              });\
+             var shown=document.querySelector('.tab-panel[data-panel=\"'+t+'\"]');\
+             if(shown&&window.__rinneRenderMermaid){\
+               requestAnimationFrame(function(){window.__rinneRenderMermaid(shown);});\
+             }\
            });\
          });</script>\n",
     );
@@ -408,11 +412,19 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
         // Dark theme + layout that prefers fitting the reading column over a
         // fixed-pixel landscape strip (useMaxWidth). Rank/node spacing kept
         // tight so 6–10 node maps stay scannable.
+        //
+        // Diagrams live inside audience tab-panels that are `display:none` until
+        // shown. Mermaid's `startOnLoad` would render every diagram at page load,
+        // including hidden ones — which measure 0×0, so dagre produces NaN edge
+        // geometry on any non-trivial graph and mermaid paints "Syntax error in
+        // text". So we disable startOnLoad and render a panel's diagrams only when
+        // it becomes visible (has a real width): once for the initially-active
+        // panel here, and again from the tab switcher via `window.__rinneRenderMermaid`.
         html.push_str(
             "<script type=\"module\">import mermaid from \
              \"https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs\";\
              mermaid.initialize({\
-               startOnLoad:true,\
+               startOnLoad:false,\
                theme:\"dark\",\
                securityLevel:\"strict\",\
                flowchart:{\
@@ -423,7 +435,14 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
                  rankSpacing:36,\
                  padding:8\
                }\
-             });</script>\n",
+             });\
+             window.__rinneRenderMermaid=function(root){\
+               var nodes=[].slice.call((root||document).querySelectorAll('pre.mermaid:not([data-processed])'));\
+               if(nodes.length)mermaid.run({nodes:nodes});\
+             };\
+             var act=document.querySelector('.tab-panel:not(.hidden)');\
+             requestAnimationFrame(function(){window.__rinneRenderMermaid(act||document);});\
+             </script>\n",
         );
     }
 
@@ -633,9 +652,10 @@ blockquote { margin: 1.2rem 0; padding: .2rem 0 .2rem 1.1rem; border-left: 2px s
   padding: .5rem .25rem;
   margin: 0;
   text-align: center;
-  /* mermaid injects an SVG; keep the pre from forcing a fixed landscape width */
-  display: flex;
-  justify-content: center;
+  /* Block (not flex): a `min-width:0` flex box collapses to 0 width when its
+     tab-panel is measured, which breaks mermaid's edge routing. Center the
+     injected SVG with margin auto instead. */
+  display: block;
   min-width: 0;
   max-width: 100%;
   overflow: visible;
@@ -643,6 +663,8 @@ blockquote { margin: 1.2rem 0; padding: .2rem 0 .2rem 1.1rem; border-left: 2px s
 }
 .diagram .mermaid svg,
 pre.mermaid svg {
+  display: block;
+  margin: 0 auto;
   max-width: 100%;
   height: auto !important;
 }
@@ -1025,6 +1047,42 @@ mod tests {
         assert!(
             !html2.contains("cdn.jsdelivr.net"),
             "cdn leaked into diagram-free doc: {html2}"
+        );
+    }
+
+    #[test]
+    fn mermaid_renders_lazily_not_on_load_so_hidden_tabs_dont_break() {
+        // Regression: diagrams live inside tab-panels that are `display:none` until
+        // shown. If mermaid runs at page load (`startOnLoad:true`), the hidden
+        // panels measure 0×0 and dagre yields NaN edge geometry → mermaid paints
+        // "Syntax error in text" on any non-trivial diagram. The fix defers render
+        // until a panel is visible.
+        let doc = LearnDoc {
+            topic: "t".into(),
+            snippets: vec![],
+            flow: vec![("a".into(), "b".into())],
+            flow_seeds: vec!["a".into()],
+            doc_sections: vec![],
+            fde: Default::default(),
+            rule_sites: vec![],
+        };
+        let html = render_html(&doc, None);
+        // Must NOT auto-run on load.
+        assert!(html.contains("startOnLoad:false"), "startOnLoad must be false: {html}");
+        assert!(!html.contains("startOnLoad:true"), "startOnLoad:true is the bug: {html}");
+        // Must expose the lazy renderer and call it when a tab is shown.
+        assert!(
+            html.contains("window.__rinneRenderMermaid"),
+            "lazy render hook missing: {html}"
+        );
+        assert!(
+            html.contains("__rinneRenderMermaid(shown)"),
+            "tab switcher must render the newly-shown panel's diagrams: {html}"
+        );
+        // The diagram pre must not be a zero-collapsing flex box.
+        assert!(
+            !html.contains("display: flex;\n  justify-content: center;\n  min-width: 0;"),
+            "pre.mermaid must not be a min-width:0 flex box (collapses to 0 width): {html}"
         );
     }
 }
