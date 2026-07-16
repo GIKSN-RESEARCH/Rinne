@@ -25,6 +25,76 @@ pub struct Config {
     pub routing: RoutingConfig,
     /// Live harness limit probes and status-line chip (`/limit-usage`).
     pub limits: LimitsConfig,
+    /// Visible harness delegation (“Harness Stage”) — `plan.md`.
+    pub harness_stage: HarnessStageConfig,
+}
+
+/// `[harness_stage]` — open harness agent CLIs so the user can see them work
+/// (PTY / Stage UI) while Rinne still conducts the DAG (`plan.md`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HarnessStageConfig {
+    /// When to run harness workers under a visible session (PTY / Stage UI).
+    pub mode: HarnessStageMode,
+    /// `auto` = pass non-interactive approve flags; `human` = user approves in the pane.
+    pub approvals: HarnessApprovals,
+    /// Cap concurrent visible harness sessions (subscriptions + CPU).
+    pub max_sessions: u8,
+}
+
+impl Default for HarnessStageConfig {
+    fn default() -> Self {
+        Self {
+            // hybrid: visible in interactive TUI/GUI; headless for `rinne -p` / CI
+            mode: HarnessStageMode::Hybrid,
+            approvals: HarnessApprovals::Auto,
+            max_sessions: 3,
+        }
+    }
+}
+
+/// When harness workers open a visible Stage session vs stay headless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessStageMode {
+    /// Never open visible sessions (always piped headless).
+    Headless,
+    /// Always try visible sessions (even non-TTY — may fall back).
+    Visible,
+    /// Visible when Rinne is interactive (TTY/GUI); headless for automation.
+    #[default]
+    Hybrid,
+    /// Do not run harness workers (API-only). Rare escape hatch.
+    Off,
+}
+
+impl HarnessStageMode {
+    /// Whether a harness node should request a visible Stage/PTY session.
+    pub fn wants_visible(self, interactive: bool) -> bool {
+        match self {
+            HarnessStageMode::Headless | HarnessStageMode::Off => false,
+            HarnessStageMode::Visible => true,
+            HarnessStageMode::Hybrid => interactive,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HarnessStageMode::Headless => "headless",
+            HarnessStageMode::Visible => "visible",
+            HarnessStageMode::Hybrid => "hybrid",
+            HarnessStageMode::Off => "off",
+        }
+    }
+}
+
+/// How permission prompts inside a visible harness are handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessApprovals {
+    #[default]
+    Auto,
+    Human,
 }
 
 /// `[limits]` — subscription usage probes, status chip, threshold alerts.
