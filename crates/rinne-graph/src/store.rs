@@ -25,6 +25,9 @@ impl Store {
              PRAGMA synchronous=NORMAL;",
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Wipe stale graph tables on a schema/extractor version bump so an upgraded
+        // binary re-extracts every file automatically (no manual re-index needed).
+        crate::schema::migrate_graph_if_stale(&conn)?;
         init_graph_schema(&conn)?;
         Ok(Store { conn, root: root.to_path_buf() })
     }
