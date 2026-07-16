@@ -398,6 +398,7 @@ impl<'a> Engine<'a> {
         let critique = tracker.critiques.remove(&node.id);
         let mut last_error = None;
 
+        let mut prev_family: Option<WorkerFamily> = None;
         for (attempt, (worker, tools_servable)) in candidates.into_iter().enumerate() {
         let worker_name = worker.descriptor().name.clone();
         let family = worker.descriptor().family;
@@ -417,16 +418,47 @@ impl<'a> Engine<'a> {
         }
 
         if attempt == 0 {
-            narrate(sink, format!(
-                "routed {} ({:?}) to {} [{}]",
-                node.id, node.role, worker_name, family_label(family)
-            ));
+            match family {
+                WorkerFamily::Harness => narrate(
+                    sink,
+                    format!(
+                        "spawning {worker_name} as harness agent (native tools + prompting) for {} ({:?})",
+                        node.id, node.role
+                    ),
+                ),
+                WorkerFamily::Api => narrate(
+                    sink,
+                    format!(
+                        "calling {worker_name} API (model only — no harness agent loop) for {} ({:?})",
+                        node.id, node.role
+                    ),
+                ),
+            }
         } else if let Some(error) = &last_error {
-            narrate(sink, format!(
-                "{} failed on {error}; switching to {} [{}]",
-                node.id, worker_name, family_label(family)
-            ));
+            let lost = matches!(prev_family, Some(WorkerFamily::Harness))
+                && matches!(family, WorkerFamily::Api);
+            if lost {
+                narrate(
+                    sink,
+                    format!(
+                        "{node_id} failed on {error}; falling back to {worker_name} [api] — \
+                         harness power lost (model-only path)",
+                        node_id = node.id
+                    ),
+                );
+            } else {
+                narrate(
+                    sink,
+                    format!(
+                        "{} failed on {error}; switching to {} [{}]",
+                        node.id,
+                        worker_name,
+                        family_label(family)
+                    ),
+                );
+            }
         }
+        prev_family = Some(family);
         emit_engine(sink, EngineEvent::NodeStarted {
             id: node.id.clone(),
             worker: worker_name.clone(),
@@ -491,6 +523,10 @@ impl<'a> Engine<'a> {
             workspace: self.blackboard.workspace().to_path_buf(),
             constraints: Constraints {
                 model,
+                // Stage mode is resolved by the CLI/GUI and passed via env for
+                // now; engine sets false here and runner may overlay before
+                // dispatch when wiring config (see `RINNE_HARNESS_STAGE_VISIBLE`).
+                visible_stage: stage_visible_from_env(),
                 ..Default::default()
             },
             tools: self.tool_specs_for(node),
@@ -1364,6 +1400,7 @@ impl EvalContext for GradeCtx<'_, '_> {
             workspace: e.blackboard.workspace().to_path_buf(),
             constraints: Constraints {
                 model,
+                visible_stage: stage_visible_from_env(),
                 ..Default::default()
             },
             // Evaluators grade; they do not call tools.
@@ -1398,6 +1435,14 @@ fn family_label(f: WorkerFamily) -> &'static str {
         WorkerFamily::Harness => "harness",
         WorkerFamily::Api => "api",
     }
+}
+
+/// CLI/GUI sets `RINNE_HARNESS_STAGE_VISIBLE=1` when Stage mode wants PTY sessions.
+fn stage_visible_from_env() -> bool {
+    matches!(
+        std::env::var("RINNE_HARNESS_STAGE_VISIBLE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 fn narrate(sink: &Option<EngineSink>, line: String) {
