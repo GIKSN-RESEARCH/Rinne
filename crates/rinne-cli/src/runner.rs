@@ -224,6 +224,7 @@ pub fn build_conductor(
 /// stdout, so the only output is the JSON the caller prints.
 pub async fn oneshot_json(goal: &str, no_graph: bool) -> Result<serde_json::Value> {
     let config = rinne_config::load_cwd()?;
+    apply_harness_stage_env(&config, false);
     let cwd = std::env::current_dir()?;
     let bb = Blackboard::open_with(&cwd, !no_graph)?;
     let (executor, tool_specs, mcp_servers) = host_setup(&config).await;
@@ -519,6 +520,27 @@ pub fn conductor_config_with_session(
     c
 }
 
+/// Apply `[harness_stage]` to the process env so the engine/workers can open
+/// visible PTY sessions when appropriate (`plan.md`).
+///
+/// `interactive` is true for the TUI / GUI and false for `rinne -p` / scripts.
+pub fn apply_harness_stage_env(config: &Config, interactive: bool) {
+    let mode = config.harness_stage.mode;
+    let visible = mode.wants_visible(interactive);
+    if visible {
+        std::env::set_var("RINNE_HARNESS_STAGE_VISIBLE", "1");
+    } else {
+        std::env::remove_var("RINNE_HARNESS_STAGE_VISIBLE");
+    }
+    std::env::set_var("RINNE_HARNESS_STAGE_MODE", mode.as_str());
+    tracing::info!(
+        mode = mode.as_str(),
+        visible,
+        interactive,
+        "harness stage"
+    );
+}
+
 /// Engine options derived from config (`[loop]`, `[models]`, `[preferences]`).
 pub fn options_from_config(config: &Config) -> EngineOptions {
     EngineOptions {
@@ -642,6 +664,9 @@ pub async fn run_plan_with(
     resume: Option<rinne_core::ResumeInput>,
 ) -> Result<RunReport> {
     let config = rinne_config::load_cwd()?;
+    // Headless CLI paths (`rinne -p`, `rinne run`) stay non-interactive → hybrid
+    // Stage mode does not open PTYs (CI-safe). Override with mode = "visible".
+    apply_harness_stage_env(&config, false);
     let (executor, tool_specs, mcp_servers) = host_setup(&config).await;
     let (registry, names) = build_registry_with_tools(&config, executor).await?;
     if registry.is_empty() {
@@ -727,6 +752,17 @@ fn print_event(ev: EngineEvent) {
                 Message(m) | Reading(m) | Editing(m) | ToolUse(m) => {
                     println!("   {id}  {m}")
                 }
+                SessionOpened {
+                    worker,
+                    model,
+                    backend,
+                } => {
+                    let m = model
+                        .as_deref()
+                        .map(|m| format!(":{m}"))
+                        .unwrap_or_default();
+                    println!("   {id}  stage open {worker}{m} [{backend}]")
+                }
                 Raw(_) | Done => {}
             }
         }
@@ -804,6 +840,17 @@ fn print_event_json(ev: EngineEvent) {
                     "type": "raw",
                     "node": id,
                     "text": m,
+                }),
+                SessionOpened {
+                    worker,
+                    model,
+                    backend,
+                } => serde_json::json!({
+                    "type": "session_opened",
+                    "node": id,
+                    "worker": worker,
+                    "model": model,
+                    "backend": backend,
                 }),
                 Done => serde_json::json!({
                     "type": "done",
