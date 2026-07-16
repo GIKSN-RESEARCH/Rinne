@@ -218,7 +218,48 @@ impl Worker for HarnessAdapter {
                 timeout: Some(timeout),
                 env: provision.env.clone(),
             };
-            match subprocess::run(spec, &events, &cancel, mapper).await {
+            let visible = request.constraints.visible_stage;
+            if attempt == 1 {
+                let model = model.map(|m| m.to_string());
+                emit(
+                    &events,
+                    WorkerEvent::SessionOpened {
+                        worker: self.descriptor.name.clone(),
+                        model,
+                        backend: if visible {
+                            "pty".into()
+                        } else {
+                            "headless".into()
+                        },
+                    },
+                );
+                if visible {
+                    emit(
+                        &events,
+                        WorkerEvent::Message(format!(
+                            "Harness Stage: opening {} under PTY (native agent session)",
+                            self.descriptor.name
+                        )),
+                    );
+                }
+            }
+            let run_result = if visible {
+                match crate::transport::pty::run(spec.clone(), &events, &cancel, mapper).await {
+                    Ok(out) => Ok(out),
+                    Err(e) => {
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "PTY stage failed ({e}) — falling back to headless subprocess"
+                            )),
+                        );
+                        subprocess::run(spec, &events, &cancel, mapper).await
+                    }
+                }
+            } else {
+                subprocess::run(spec, &events, &cancel, mapper).await
+            };
+            match run_result {
                 Ok(out) => {
                     let timed_out = matches!(out.status, ExecStatus::TimedOut);
                     if timed_out && attempt < MAX_ATTEMPTS && !cancel.is_cancelled() {

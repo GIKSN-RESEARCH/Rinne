@@ -5,6 +5,7 @@
 //! JSON-RPC transport is deferred to V2.
 
 pub mod http;
+pub mod pty;
 pub mod subprocess;
 
 pub use http::{
