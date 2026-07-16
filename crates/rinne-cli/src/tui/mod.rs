@@ -115,7 +115,7 @@ fn action_label(ev: &rinne_core::worker::WorkerEvent) -> Option<String> {
                 Some(m.to_string())
             }
         }
-        Token(_) | Thinking(_) | Message(_) | Raw(_) | Done => None,
+        Token(_) | Thinking(_) | Message(_) | Raw(_) | SessionOpened { .. } | Done => None,
     }
 }
 
@@ -612,6 +612,21 @@ impl App {
                 let action = action_label(&event);
                 match event {
                     Done => {}
+                    SessionOpened {
+                        worker,
+                        model,
+                        backend,
+                    } => {
+                        self.commit_tail();
+                        let m = model
+                            .as_deref()
+                            .map(|m| format!(":{m}"))
+                            .unwrap_or_default();
+                        self.push(
+                            FeedKind::System,
+                            format!("stage  {worker}{m} [{backend}]"),
+                        );
+                    }
                     Reading(_) | Editing(_) | ToolUse(_) => {
                         self.commit_tail();
                         if let Some(label) = action {
@@ -1597,6 +1612,8 @@ async fn do_run(
     no_graph: bool,
 ) -> Result<RunReport> {
     let config = rinne_config::load_cwd()?;
+    // Interactive TUI: hybrid/visible Stage modes open harness PTYs.
+    runner::apply_harness_stage_env(&config, true);
     let cwd = std::env::current_dir()?;
     let bb = Blackboard::open_with(&cwd, !no_graph)?;
     let (executor, tool_specs, mcp_servers) = runner::host_setup(&config).await;
