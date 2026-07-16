@@ -13,14 +13,17 @@ use crate::worker::{ContextPacket, InlinedFile, WorkerFamily};
 use crate::{Result, BLACKBOARD_DIR};
 use rinne_types::Blackboard;
 
-const COMMON_NAMES: &[&str] = &["new", "run", "get", "set", "build", "main", "init", "from", "into"];
 const MIN_IDENT_LEN: usize = 4;
 
 /// Picks symbol names to attach from the graph for a given node instruction.
 ///
 /// Returns exact identifier tokens in `instruction` that match a known symbol
 /// name, plus symbols named like a mentioned file's stem. Deduplicates output.
-/// Skips tokens shorter than `MIN_IDENT_LEN` and tokens in `COMMON_NAMES`.
+/// Skips tokens shorter than `MIN_IDENT_LEN`.
+///
+/// Note: there is no hardcoded common-name denylist. Ambiguous names (`build`,
+/// `run`, `new`) are disambiguated downstream by the mentioned-file hint in
+/// [`ContextAssembler::build`], so they no longer need blanket suppression.
 pub fn resolve_symbols(
     graph: &dyn rinne_types::graph::CodeGraph,
     instruction: &str,
@@ -32,7 +35,6 @@ pub fn resolve_symbols(
     // Exact identifier tokens from the instruction that name a known symbol.
     for tok in instruction.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if tok.len() >= MIN_IDENT_LEN
-            && !COMMON_NAMES.contains(&tok)
             && known_set.contains(tok)
             && !out.iter().any(|o| o == tok)
         {
@@ -49,6 +51,39 @@ pub fn resolve_symbols(
     }
     let _ = graph;
     out
+}
+
+/// Picks the neighborhoods to attach for a resolved symbol name, using the
+/// node's mentioned files as a disambiguation hint.
+///
+/// A name may resolve to several definitions across files (e.g. `build` on
+/// `ContextAssembler` vs `Blackboard`). When any definition lives in a mentioned
+/// file, only those are attached — the mention is a strong signal of intent.
+/// Otherwise every definition is attached, so a worker sees the full set rather
+/// than one silently-chosen (possibly wrong) anchor.
+fn neighborhoods_for(
+    graph: &dyn rinne_types::graph::CodeGraph,
+    name: &str,
+    mentioned: &[std::path::PathBuf],
+) -> Vec<rinne_types::graph::Neighborhood> {
+    let all = graph.neighborhood_all(name);
+    if all.len() <= 1 {
+        return all;
+    }
+    let in_mentioned: Vec<_> = all
+        .iter()
+        .filter(|nb| {
+            mentioned
+                .iter()
+                .any(|m| m.to_str().is_some_and(|p| p == nb.definition.file))
+        })
+        .cloned()
+        .collect();
+    if in_mentioned.is_empty() {
+        all
+    } else {
+        in_mentioned
+    }
 }
 
 /// Builds context packets against a plan and its blackboard.
@@ -133,7 +168,7 @@ impl<'a> ContextAssembler<'a> {
             let known = graph.symbol_names();
             let picked = resolve_symbols(graph, &node.instruction, mentioned, &known);
             for name in &picked {
-                if let Some(neighborhood) = graph.neighborhood(name) {
+                for neighborhood in neighborhoods_for(graph, name, mentioned) {
                     packet.symbol_map.push(neighborhood);
                 }
             }
@@ -207,9 +242,69 @@ mod graph_tests {
     }
 
     #[test]
-    fn skips_common_short_names() {
+    fn skips_short_names_below_min_ident_len() {
+        // `new`/`run` are shorter than MIN_IDENT_LEN (4) and are skipped by the
+        // length filter — NOT by any common-name denylist (which Stage 1 removed).
         let names = vec!["new".to_string(), "run".to_string()];
         let picked = resolve_symbols(&FakeGraph, "run the new thing", &[], &names);
         assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn keeps_formerly_denylisted_long_names() {
+        // Stage 1 removed the COMMON_NAMES denylist: a 4+ char name like `build`
+        // is now KEPT (to be disambiguated downstream by the mentioned-file hint),
+        // whereas the old denylist suppressed it wholesale.
+        let names = vec!["build".to_string()];
+        let picked = resolve_symbols(&FakeGraph, "call build to assemble", &[], &names);
+        assert_eq!(picked, vec!["build".to_string()]);
+    }
+
+    /// A graph where `build` is defined in two files, for testing the
+    /// mentioned-file disambiguation in `neighborhoods_for`.
+    struct AmbiguousGraph;
+    impl AmbiguousGraph {
+        fn nb(file: &str) -> Neighborhood {
+            Neighborhood {
+                definition: SymbolRef { name: "build".into(), file: file.into(), line: 1, end_line: 1 },
+                callers: vec![],
+                callees: vec![],
+                imports: vec![],
+                stale: false,
+            }
+        }
+    }
+    impl CodeGraph for AmbiguousGraph {
+        fn neighborhood(&self, symbol: &str) -> Option<Neighborhood> {
+            self.neighborhood_all(symbol).into_iter().next()
+        }
+        fn neighborhood_all(&self, symbol: &str) -> Vec<Neighborhood> {
+            if symbol == "build" {
+                vec![Self::nb("assembler.rs"), Self::nb("blackboard.rs")]
+            } else {
+                vec![]
+            }
+        }
+        fn resolve_in_file(&self, _f: &str, _n: &str) -> Option<SymbolRef> { None }
+        fn symbol_names(&self) -> Vec<String> { vec!["build".into()] }
+    }
+
+    #[test]
+    fn mentioned_file_disambiguates_among_same_name_defs() {
+        // Mention assembler.rs → only that file's `build` is attached, not blackboard's.
+        let mentioned = vec![std::path::PathBuf::from("assembler.rs")];
+        let got = neighborhoods_for(&AmbiguousGraph, "build", &mentioned);
+        assert_eq!(got.len(), 1, "hint must narrow to the mentioned file");
+        assert_eq!(got[0].definition.file, "assembler.rs");
+    }
+
+    #[test]
+    fn without_hint_attaches_all_same_name_defs() {
+        // No mention → attach BOTH, so the worker sees the full set rather than
+        // one silently-chosen (possibly wrong) anchor. This is the core Stage 1 fix.
+        let got = neighborhoods_for(&AmbiguousGraph, "build", &[]);
+        let mut files: Vec<&str> = got.iter().map(|n| n.definition.file.as_str()).collect();
+        files.sort_unstable();
+        assert_eq!(files, vec!["assembler.rs", "blackboard.rs"]);
     }
 }

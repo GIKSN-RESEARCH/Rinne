@@ -12,12 +12,19 @@ pub struct RawSymbol {
     pub start_line: u32,
     pub end_line: u32,
     pub signature: Option<String>,
+    /// Enclosing type/class/trait name for a method (e.g. `ContextAssembler` for
+    /// `ContextAssembler::build`); `None` for free functions.
+    pub container: Option<String>,
 }
 
 pub struct RawEdge {
     pub src_name: Option<String>,
     pub dst_name: String,
     pub kind: EdgeKind,
+    /// Enclosing container of the call site (e.g. the `impl`/module the call is
+    /// inside), used to disambiguate a call to a name defined more than once in
+    /// the same file. `None` when the call is at file scope.
+    pub src_container: Option<String>,
 }
 
 pub fn extract(lang: &str, source: &str) -> Option<(Vec<RawSymbol>, Vec<RawEdge>)> {
@@ -86,6 +93,44 @@ fn enclosing_symbol_name<'a>(
     None
 }
 
+/// Walk up from a node to its nearest enclosing container (type/class/trait/
+/// module) and return that container's name, or `None` at file scope.
+///
+/// Used two ways: for a *definition's* name node it gives the method's owning
+/// type; for a *call site* it gives the scope the call lives in. Matching the two
+/// disambiguates a name defined more than once in the same file. Covers Rust
+/// `impl Type`/`impl Trait for Type` (the `type` field) and `mod name`, plus
+/// class-like containers in ts/js/python (the `name` field).
+fn container_of(name_node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let mut node = name_node;
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            // Rust: `impl ContextAssembler { ... }` / `impl Trait for T { ... }`.
+            // The `type` field is the type receiving the methods.
+            "impl_item" => {
+                if let Some(ty) = parent.child_by_field_name("type") {
+                    return ty.utf8_text(source).ok().map(str::to_string);
+                }
+            }
+            // Rust module: `mod second { ... }`.
+            "mod_item" => {
+                if let Some(n) = parent.child_by_field_name("name") {
+                    return n.utf8_text(source).ok().map(str::to_string);
+                }
+            }
+            // ts/js/python class-like containers name themselves via `name`.
+            "class_declaration" | "class_definition" | "class" | "interface_declaration" => {
+                if let Some(n) = parent.child_by_field_name("name") {
+                    return n.utf8_text(source).ok().map(str::to_string);
+                }
+            }
+            _ => {}
+        }
+        node = parent;
+    }
+    None
+}
+
 fn walk(
     query: &tree_sitter::Query,
     tree: &tree_sitter::Tree,
@@ -130,9 +175,19 @@ fn walk(
                 {
                     if kind == SymbolKind::Method && existing.kind == SymbolKind::Function {
                         existing.kind = SymbolKind::Method;
+                        // Backfill the container now that we know it's a method:
+                        // the earlier `function_item` capture set it to None.
+                        existing.container = container_of(node, source);
                     }
                     continue;
                 }
+
+                // Every definition carries its nearest enclosing container: a
+                // method gets its `impl` type, a function inside a module gets the
+                // module, a file-scope function gets `None`. This qualified identity
+                // lets same-name defs in one file be told apart, and matches the
+                // container recorded on call-site edges for scope-aware resolution.
+                let container = container_of(node, source);
 
                 symbols.push(RawSymbol {
                     name,
@@ -140,6 +195,7 @@ fn walk(
                     start_line,
                     end_line,
                     signature,
+                    container,
                 });
             } else if cap_name.starts_with("call.") {
                 let dst_name = node.utf8_text(source).unwrap_or("").to_string();
@@ -147,10 +203,12 @@ fn walk(
                     continue;
                 }
                 let src_name = enclosing_symbol_name(node, query, source);
+                let src_container = container_of(node, source);
                 edges.push(RawEdge {
                     src_name,
                     dst_name,
                     kind: EdgeKind::Calls,
+                    src_container,
                 });
             } else if cap_name.starts_with("import.") {
                 let dst_name = node.utf8_text(source).unwrap_or("").to_string();
@@ -161,6 +219,7 @@ fn walk(
                     src_name: None,
                     dst_name,
                     kind: EdgeKind::Imports,
+                    src_container: None,
                 });
             }
         }

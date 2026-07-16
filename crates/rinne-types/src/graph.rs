@@ -35,7 +35,21 @@ pub struct Neighborhood {
 pub trait CodeGraph: Send + Sync {
     /// Returns the neighborhood of the first symbol matching `symbol`, or `None`
     /// if the symbol is not in the index.
+    ///
+    /// Prefer [`CodeGraph::neighborhood_all`] when the same name may be defined in
+    /// more than one place: this method collapses those to one arbitrary match.
     fn neighborhood(&self, symbol: &str) -> Option<Neighborhood>;
+
+    /// Returns the neighborhood of *every* symbol matching `symbol`, one per
+    /// definition site, in a deterministic order (by file, then line).
+    ///
+    /// This is the multi-result form that avoids the single-winner collapse of
+    /// [`CodeGraph::neighborhood`]. The default implementation returns at most the
+    /// single [`CodeGraph::neighborhood`] result so existing implementations keep
+    /// compiling; the concrete `rinne-graph` store overrides it to return all.
+    fn neighborhood_all(&self, symbol: &str) -> Vec<Neighborhood> {
+        self.neighborhood(symbol).into_iter().collect()
+    }
 
     /// Returns the first symbol named `name` defined in `file`, or `None`.
     fn resolve_in_file(&self, file: &str, name: &str) -> Option<SymbolRef>;

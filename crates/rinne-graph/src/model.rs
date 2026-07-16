@@ -89,6 +89,8 @@ pub struct Symbol {
     pub start_line: u32,
     pub end_line: u32,
     pub signature: Option<String>,
+    /// Enclosing type/class/trait for a method; `None` for free functions.
+    pub container: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -72,6 +72,13 @@ impl CodeGraph for Graph {
             .neighborhood(symbol)
     }
 
+    fn neighborhood_all(&self, symbol: &str) -> Vec<Neighborhood> {
+        self.store
+            .lock()
+            .expect("graph store lock poisoned")
+            .neighborhood_all(symbol)
+    }
+
     fn resolve_in_file(&self, file: &str, name: &str) -> Option<SymbolRef> {
         self.store
             .lock()

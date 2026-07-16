@@ -20,7 +20,11 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
             kind       TEXT NOT NULL,
             start_line INTEGER NOT NULL,
             end_line   INTEGER NOT NULL,
-            signature  TEXT
+            signature  TEXT,
+            -- Enclosing type/class/trait for a method (e.g. "ContextAssembler" for
+            -- ContextAssembler::build), NULL for free functions. Gives same-file
+            -- same-name defs a qualified identity so they can be disambiguated.
+            container  TEXT
         );
 
         CREATE TABLE IF NOT EXISTS graph_edges (
@@ -36,7 +40,18 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_edges_dst ON graph_edges(dst_symbol);
         CREATE INDEX IF NOT EXISTS idx_edges_dstname ON graph_edges(dst_name);
         "#,
-    )
+    )?;
+
+    // Migration: add `container` to graph_symbols tables created before it existed.
+    // `CREATE TABLE IF NOT EXISTS` above won't touch a pre-existing table, so add
+    // the column here. Idempotent: ignore the "duplicate column" error on re-run.
+    if let Err(e) = conn.execute("ALTER TABLE graph_symbols ADD COLUMN container TEXT", []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -71,14 +71,13 @@ impl Store {
 
         if let Some(lang_str) = lang {
             if let Some((raw_symbols, raw_edges)) = extract(lang_str, source) {
-                // Insert each symbol, capture its rowid immediately.
-                let mut name_to_id: std::collections::HashMap<String, i64> =
-                    std::collections::HashMap::new();
-
+                // Insert each symbol, capturing its rowid by position. Distinct rows
+                // get distinct ids, so same-name defs in one file are not collapsed.
+                let mut ids: Vec<i64> = Vec::with_capacity(raw_symbols.len());
                 for rs in &raw_symbols {
                     tx.execute(
-                        "INSERT INTO graph_symbols (file, name, kind, start_line, end_line, signature) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT INTO graph_symbols (file, name, kind, start_line, end_line, signature, container) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         rusqlite::params![
                             path,
                             rs.name,
@@ -86,17 +85,13 @@ impl Store {
                             rs.start_line,
                             rs.end_line,
                             rs.signature,
+                            rs.container,
                         ],
                     )?;
-                    let id = tx.last_insert_rowid();
-                    // Last-write-wins for duplicate names within one file (acceptable for v1).
-                    name_to_id.insert(rs.name.clone(), id);
+                    ids.push(tx.last_insert_rowid());
                 }
 
-                let (_, edges) =
-                    resolve_file(path, raw_symbols, raw_edges, |name| {
-                        name_to_id.get(name).copied().unwrap_or(0)
-                    });
+                let (_, edges) = resolve_file(path, raw_symbols, raw_edges, |i| ids[i]);
 
                 for edge in &edges {
                     tx.execute(
@@ -132,19 +127,51 @@ impl Store {
         tx.commit()
     }
 
-    /// Returns the definition + callers + callees + imports for a symbol by name.
+    /// Returns the definition + callers + callees + imports for the first symbol
+    /// matching `symbol_name`.
+    ///
+    /// When the same name is defined in more than one place this collapses to one
+    /// arbitrary match; prefer [`Store::neighborhood_all`] in that case.
     pub fn neighborhood(&self, symbol_name: &str) -> Option<Neighborhood> {
-        // Look up the definition symbol.
-        let (sym_id, file, start_line, end_line): (i64, String, u32, u32) = self
-            .conn
-            .query_row(
-                "SELECT id, file, start_line, COALESCE(end_line, start_line) \
-                 FROM graph_symbols WHERE name = ?1 LIMIT 1",
-                [symbol_name],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .ok()?;
+        self.neighborhood_all(symbol_name).into_iter().next()
+    }
 
+    /// Returns one [`Neighborhood`] per definition site matching `symbol_name`,
+    /// ordered by file then start line (deterministic). Empty when the name is
+    /// not indexed. This is the multi-result form that avoids the single-winner
+    /// collapse of [`Store::neighborhood`].
+    pub fn neighborhood_all(&self, symbol_name: &str) -> Vec<Neighborhood> {
+        // Every definition row for this name, in a stable order.
+        let defs: Vec<(i64, String, u32, u32)> = self
+            .conn
+            .prepare(
+                "SELECT id, file, start_line, COALESCE(end_line, start_line) \
+                 FROM graph_symbols WHERE name = ?1 ORDER BY file, start_line",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([symbol_name], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+            })
+            .unwrap_or_default();
+
+        defs.into_iter()
+            .map(|(sym_id, file, start_line, end_line)| {
+                self.neighborhood_for(symbol_name, sym_id, file, start_line, end_line)
+            })
+            .collect()
+    }
+
+    /// Build the neighborhood for one specific definition row.
+    fn neighborhood_for(
+        &self,
+        symbol_name: &str,
+        sym_id: i64,
+        file: String,
+        start_line: u32,
+        end_line: u32,
+    ) -> Neighborhood {
         let definition = SymbolRef {
             name: symbol_name.to_string(),
             file: file.clone(),
@@ -239,13 +266,13 @@ impl Store {
             }
         };
 
-        Some(Neighborhood {
+        Neighborhood {
             definition,
             callers,
             callees,
             imports,
             stale,
-        })
+        }
     }
 
     /// Returns the names of every symbol currently in the index.
@@ -296,7 +323,7 @@ impl Store {
     pub fn symbols_in(&self, path: &str) -> Vec<Symbol> {
         self.conn
             .prepare(
-                "SELECT id, file, name, kind, start_line, end_line, signature
+                "SELECT id, file, name, kind, start_line, end_line, signature, container
                  FROM graph_symbols WHERE file = ?1",
             )
             .and_then(|mut stmt| {
@@ -312,6 +339,7 @@ impl Store {
                         start_line: row.get(4)?,
                         end_line: row.get(5)?,
                         signature: row.get(6)?,
+                        container: row.get(7)?,
                     })
                 })
                 .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -368,6 +396,178 @@ mod tests {
         store.index_file(path, "fn second_sym() {}\n", 1).unwrap();
         assert!(store.neighborhood("first_sym").is_none(), "old symbol must be gone after reindex");
         assert!(store.neighborhood("second_sym").is_some(), "new symbol must exist after reindex");
+    }
+
+    // REPRODUCTION (Stage 1 bug): two symbols named `build` in different files.
+    // `neighborhood("build")` today returns exactly one arbitrary definition
+    // (WHERE name = ?1 LIMIT 1, no ORDER BY) and silently drops the other — so
+    // the assembler can anchor a worker's context on the WRONG `build`.
+    //
+    // This test asserts the *fix's* contract: given the caller's file hint, the
+    // store can resolve to the RIGHT `build`. It exercises `resolve_in_file`,
+    // which already filters by file and is the primitive Stage 1 wires into the
+    // assembler. It should PASS today (proving the primitive exists) — the gap is
+    // that `neighborhood` ignores it. See the companion `neighborhood`-level
+    // assertion below for the part that FAILS today.
+    #[test]
+    fn resolve_in_file_disambiguates_same_name_across_files() {
+        let store = mem_store();
+        store
+            .index_file("assembler.rs", "fn build() {}\nfn assemble() { build(); }\n", 0)
+            .unwrap();
+        store
+            .index_file("blackboard.rs", "fn build() {}\nfn open() { build(); }\n", 0)
+            .unwrap();
+
+        let in_assembler = store
+            .resolve_in_file("assembler.rs", "build")
+            .expect("build exists in assembler.rs");
+        assert_eq!(in_assembler.file, "assembler.rs");
+
+        let in_blackboard = store
+            .resolve_in_file("blackboard.rs", "build")
+            .expect("build exists in blackboard.rs");
+        assert_eq!(in_blackboard.file, "blackboard.rs");
+    }
+
+    // STAGE 1 FIX VERIFIED: with two `build` defs indexed, `neighborhood_all`
+    // surfaces BOTH definitions' files, ordered deterministically. The singular
+    // `neighborhood` still returns one (the first in order) for callers that want
+    // a single best-effort result.
+    #[test]
+    fn neighborhood_surfaces_all_same_name_definitions() {
+        let store = mem_store();
+        store.index_file("assembler.rs", "fn build() {}\n", 0).unwrap();
+        store.index_file("blackboard.rs", "fn build() {}\n", 0).unwrap();
+
+        let all = store.neighborhood_all("build");
+        let mut files: Vec<&str> = all.iter().map(|n| n.definition.file.as_str()).collect();
+        files.sort_unstable();
+        assert_eq!(
+            files,
+            vec!["assembler.rs", "blackboard.rs"],
+            "neighborhood_all must surface BOTH build definitions, not collapse to one"
+        );
+
+        // Deterministic order: ORDER BY file, start_line → assembler.rs first.
+        assert_eq!(all.first().unwrap().definition.file, "assembler.rs");
+
+        // Singular form still works, returning the first in order.
+        assert_eq!(
+            store.neighborhood("build").unwrap().definition.file,
+            "assembler.rs"
+        );
+    }
+
+    // ===== STAGE 2 (within-file duplicate-name collapse) =====
+    //
+    // `index_file` builds a `name_to_id` HashMap with last-write-wins
+    // (store.rs, "Last-write-wins for duplicate names within one file") and the
+    // resolver closure uses `unwrap_or(0)`. Two symbols with the SAME name in the
+    // SAME file therefore collapse: the first symbol's id is overwritten, so
+    // edges that should point at the first are mis-attributed to the second (or
+    // aliased to a bogus id). This is distinct from the Stage 1 cross-file case.
+    //
+    // Ignored until Stage 2: the fix is to key symbols by (name, start_line) or a
+    // real per-symbol id so same-name-same-file defs stay distinct.
+    // CORRECTED SCOPE: symbols never collapse — graph_symbols.id is AUTOINCREMENT,
+    // so distinct rows get distinct ids regardless of the name_to_id HashMap. The
+    // real Stage 2 defect is EDGE ATTRIBUTION: `name_to_id` is last-write-wins per
+    // file (store.rs), so a call to a name with two same-file definitions resolves
+    // to whichever won the map — both callers attach to ONE build, not each to its
+    // own. This test targets that edge property directly.
+    //
+    // `#[ignore]` with the real assertion below: it FAILS today (edges mis-attribute)
+    // and is the true Stage 2 red spec. The symbol-distinctness part is kept as a
+    // separate always-run assertion since it already holds.
+    #[test]
+    fn same_name_symbols_in_one_file_get_distinct_ids() {
+        let store = mem_store();
+        let src = "\
+fn build() {}
+mod second { pub fn build() {} }
+";
+        store.index_file("dup.rs", src, 0).unwrap();
+        let builds: Vec<_> = store
+            .symbols_in("dup.rs")
+            .into_iter()
+            .filter(|s| s.name == "build")
+            .collect();
+        // This ALREADY holds (AUTOINCREMENT) — proves symbols themselves don't collapse.
+        assert_eq!(builds.len(), 2, "both `build` symbols indexed");
+        assert_ne!(builds[0].id, builds[1].id, "distinct rows get distinct ids");
+    }
+
+    #[test]
+    fn same_name_defs_in_one_file_get_correct_edge_attribution() {
+        let store = mem_store();
+        // Two `build` in one file, each with its own exclusive caller.
+        let src = "\
+fn build() {}
+fn caller_one() { build(); }
+mod second { pub fn build() {} pub fn caller_two() { build(); } }
+";
+        store.index_file("dup.rs", src, 0).unwrap();
+
+        let builds: Vec<_> = store
+            .symbols_in("dup.rs")
+            .into_iter()
+            .filter(|s| s.name == "build")
+            .collect();
+        assert_eq!(builds.len(), 2);
+
+        // Each `build` should have exactly its own caller. Today the HashMap
+        // collapse routes both callers to one build (so one has 2 callers, the
+        // other 0) — this assertion catches that mis-attribution.
+        let nbs = store.neighborhood_all("build");
+        let caller_counts: Vec<usize> = nbs.iter().map(|n| n.callers.len()).collect();
+        assert!(
+            caller_counts.iter().all(|&c| c == 1),
+            "each same-file `build` must own exactly its caller, got caller counts {caller_counts:?} \
+             (last-write-wins mis-attribution)"
+        );
+    }
+
+    // ===== STAGE 3 (qualified identity via `container`) =====
+    //
+    // The STRUCTURAL fix: a symbol today is (file, name, kind) with NO container,
+    // so `ContextAssembler::build` and `Blackboard::build` are indistinguishable
+    // except by file — and within one file, not at all. Stage 3 adds a `container`
+    // column (enclosing impl/class/trait) so a symbol has a qualified identity.
+    //
+    // This test asserts the fix's contract: `symbols_in` surfaces a `container`
+    // for a method inside an `impl`. It FAILS/does-not-compile until the schema +
+    // extractor carry `container`, hence ignored and written against the future
+    // shape. Left as the executable spec for Stage 3.
+    #[test]
+    fn method_carries_its_impl_container() {
+        let store = mem_store();
+        // `build` is a method on `ContextAssembler`; its container must be recorded.
+        let src = "\
+struct ContextAssembler;
+impl ContextAssembler {
+    fn build(&self) {}
+}
+";
+        store.index_file("assembler.rs", src, 0).unwrap();
+
+        let build = store
+            .symbols_in("assembler.rs")
+            .into_iter()
+            .find(|s| s.name == "build")
+            .expect("build method indexed");
+
+        // Stage 3 contract: the method carries its enclosing impl type.
+        assert_eq!(
+            build.container.as_deref(),
+            Some("ContextAssembler"),
+            "method `build` must record its container `ContextAssembler`"
+        );
+        assert!(
+            build.signature.as_deref().unwrap_or("").contains("build"),
+            "placeholder: strengthen to assert container == \"ContextAssembler\" once \
+             the container column is added"
+        );
     }
 
     #[test]
