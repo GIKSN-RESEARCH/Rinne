@@ -205,7 +205,8 @@ pub enum Command {
     /// Synthesise a code-literacy document for a topic or symbol.
     ///
     /// Subcommands: `explain <topic>` — resolves symbols, assembles snippets,
-    /// optionally narrates with an AI worker, and writes `.rinne/learn/<topic>.html`.
+    /// optionally narrates with an AI worker, and writes `.rinne/learn/<slug>.html`
+    /// (topic is slugged: e.g. `accounts module` → `accounts-module.html`).
     Learn {
         #[command(subcommand)]
         cmd: LearnCmd,
@@ -274,6 +275,27 @@ pub enum LearnCmd {
     Explain {
         /// The topic, symbol name, or path fragment to explain.
         topic: String,
+    },
+
+    /// Serve every generated explainer in a browser, with a sidebar to switch
+    /// between topics. Reads `.rinne/learn/*.html`; does not regenerate them.
+    ///
+    /// One process owns port 7420 at a time. Starting serve in a different
+    /// project takes the port over (stops the previous owner) so you don't
+    /// browse ghost docs. Same project reuses the live server.
+    Serve {
+        /// Port to bind on 127.0.0.1 (default: 7420).
+        #[arg(long, default_value_t = 7420)]
+        port: u16,
+
+        /// Don't open a browser automatically.
+        #[arg(long)]
+        no_open: bool,
+
+        /// Stop whatever rinne learn serve currently owns `--port` (including a
+        /// ghost from another terminal/project) and exit.
+        #[arg(long)]
+        stop: bool,
     },
 }
 

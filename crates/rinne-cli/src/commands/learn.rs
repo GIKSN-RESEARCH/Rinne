@@ -14,25 +14,127 @@ pub enum LearnCmd {
     Explain { topic: String },
 }
 
-/// Collect (caller, sym) and (sym, callee) pairs from each cluster symbol's
-/// neighborhood. Deduplicates the resulting list.
-fn cluster_flow(graph: &dyn CodeGraph, cluster: &Cluster) -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for sym in &cluster.symbols {
-        if let Some(nb) = graph.neighborhood(&sym.name) {
-            for caller in &nb.callers {
-                pairs.push((caller.name.clone(), sym.name.clone()));
+/// Build a seed-anchored call graph for the learn diagram.
+///
+/// Walks **seeds first** (topic hits), then other cluster symbols only as
+/// fill. Caps callers/callees per anchor so one popular type doesn't flood
+/// the edge list. Drops self-loops and dunder noise at collection time.
+///
+/// Returns `(edges, seeds_used)` — seeds_used is the ordered anchor list the
+/// renderer should root the diagram on.
+fn cluster_flow(
+    graph: &dyn CodeGraph,
+    cluster: &Cluster,
+) -> (Vec<(String, String)>, Vec<String>) {
+    /// Noise we never want on a "how this works" map.
+    fn is_noise(name: &str) -> bool {
+        let base = name.rsplit("::").next().unwrap_or(name);
+        let base = base.rsplit('.').next().unwrap_or(base);
+        // Python/JS dunders, empty, pure punctuation.
+        if base.is_empty() {
+            return true;
+        }
+        if base.starts_with("__") && base.ends_with("__") {
+            return true;
+        }
+        false
+    }
+
+    // Prefer function-like names as anchors: snake_case, leading _, camelCase
+    // starting lower. Pure PascalCase types are kept as seeds when the topic
+    // matched them, but deprioritized when expanding fill.
+    fn looks_callable(name: &str) -> bool {
+        let base = name.rsplit("::").next().unwrap_or(name);
+        let base = base.rsplit('.').next().unwrap_or(base);
+        if is_noise(base) {
+            return false;
+        }
+        if base.contains('_') {
+            return true;
+        }
+        matches!(base.chars().next(), Some(c) if c.is_lowercase())
+    }
+
+    const MAX_SEEDS: usize = 6;
+    const MAX_CALLERS_PER: usize = 3;
+    const MAX_CALLEES_PER: usize = 4;
+
+    // Anchors: declared seeds first (callable preferred), then fill from the
+    // expanded symbol list so we still have something when seeds were types.
+    let mut anchors: Vec<String> = Vec::new();
+    for s in &cluster.seeds {
+        if !is_noise(s) && !anchors.iter().any(|a| a == s) {
+            anchors.push(s.clone());
+        }
+        if anchors.len() >= MAX_SEEDS {
+            break;
+        }
+    }
+    if anchors.len() < MAX_SEEDS {
+        // Prefer callables from the expanded set.
+        for sym in &cluster.symbols {
+            if looks_callable(&sym.name) && !anchors.iter().any(|a| a == &sym.name) {
+                anchors.push(sym.name.clone());
             }
-            for callee in &nb.callees {
-                pairs.push((sym.name.clone(), callee.name.clone()));
+            if anchors.len() >= MAX_SEEDS {
+                break;
             }
         }
     }
-    // Sort before dedup so non-adjacent duplicate edges (the same caller→callee
-    // reached via different cluster symbols) collapse, not just consecutive ones.
+    if anchors.is_empty() {
+        // Last resort: any non-noise symbol.
+        for sym in &cluster.symbols {
+            if !is_noise(&sym.name) {
+                anchors.push(sym.name.clone());
+                break;
+            }
+        }
+    }
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for anchor in &anchors {
+        let Some(nb) = graph.neighborhood(anchor) else {
+            continue;
+        };
+        let mut callers: Vec<String> = nb
+            .callers
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|n| !is_noise(n) && n != anchor)
+            .collect();
+        // Prefer callables, then stable alpha.
+        callers.sort_by(|a, b| {
+            looks_callable(b)
+                .cmp(&looks_callable(a))
+                .then_with(|| a.cmp(b))
+        });
+        callers.dedup();
+        callers.truncate(MAX_CALLERS_PER);
+        for c in callers {
+            pairs.push((c, anchor.clone()));
+        }
+
+        let mut callees: Vec<String> = nb
+            .callees
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|n| !is_noise(n) && n != anchor)
+            .collect();
+        callees.sort_by(|a, b| {
+            looks_callable(b)
+                .cmp(&looks_callable(a))
+                .then_with(|| a.cmp(b))
+        });
+        callees.dedup();
+        callees.truncate(MAX_CALLEES_PER);
+        for c in callees {
+            pairs.push((anchor.clone(), c));
+        }
+    }
+
     pairs.sort();
     pairs.dedup();
-    pairs
+    (pairs, anchors)
 }
 
 /// Orchestrate `rinne learn explain <topic>`:
@@ -42,14 +144,20 @@ fn cluster_flow(graph: &dyn CodeGraph, cluster: &Cluster) -> Vec<(String, String
 /// 4. Phase-2 refresh: reindex the cluster's files before reading.
 /// 5. Assemble snippets + doc sections.
 /// 6. Build a translator (NullTranslator on --no-ai or no registry).
-/// 7. Render HTML and write to `.rinne/learn/<topic>.html`.
+/// 7. Render HTML and write to `.rinne/learn/<slug>.html` where `<slug>` is a
+///    standardised form of the topic (see [`crate::learn::topic_slug`]).
+///
+/// Live progress goes to **stderr** so it doesn't mix with the final result
+/// lines on stdout (and so piping still works).
 pub async fn run(cmd: LearnCmd, cwd: PathBuf, no_ai: bool, open: bool) -> Result<()> {
     let LearnCmd::Explain { topic } = cmd;
-    let mut lines = explain_to_lines(&topic, cwd, no_ai).await?;
+    let on_progress: crate::learn::translate::ProgressSink =
+        std::sync::Arc::new(|m: String| eprintln!("  learn  {m}"));
+    let mut lines = explain_with_progress(&topic, cwd, no_ai, on_progress).await?;
     // The CLI's `--open` adds a browser hint after the "wrote …" line; the TUI
     // path (run_lines) never sets it.
     if open {
-        if let Some(path) = lines.last().and_then(|l| l.strip_prefix("wrote ")) {
+        if let Some(path) = lines.iter().find_map(|l| l.strip_prefix("wrote ")) {
             lines.push(format!("open it in your browser: {path}"));
         }
     }
@@ -69,7 +177,7 @@ pub async fn run(cmd: LearnCmd, cwd: PathBuf, no_ai: bool, open: bool) -> Result
 pub async fn run_lines_with_progress(
     topic: &str,
     cwd: PathBuf,
-    on_progress: &(dyn Fn(String) + Send + Sync),
+    on_progress: crate::learn::translate::ProgressSink,
 ) -> Vec<String> {
     match explain_with_progress(topic, cwd, false, on_progress).await {
         Ok(lines) => lines,
@@ -77,24 +185,18 @@ pub async fn run_lines_with_progress(
     }
 }
 
-/// The shared pipeline with a no-op progress sink. See [`explain_with_progress`].
-async fn explain_to_lines(topic: &str, cwd: PathBuf, no_ai: bool) -> Result<Vec<String>> {
-    explain_with_progress(topic, cwd, no_ai, &|_| {}).await
-}
-
 /// The shared pipeline: resolve → refresh → assemble → translate → render →
 /// write. Returns the human-readable result lines (e.g. `wrote <path>` or the
 /// "no code found" note); the caller decides how to surface them.
 ///
-/// `on_progress` is invoked with a short milestone string at each phase
-/// boundary so a long-running caller (the TUI) can show it is alive; the CLI
-/// passes a no-op. The AI-narration phase is the slow one (up to the worker
-/// timeout), so its milestone fires before the `translate` await, not after.
+/// `on_progress` is invoked with short milestone / worker-event strings while
+/// the pipeline runs (resolve, AI tool use, elapsed heartbeats). The CLI prints
+/// these to stderr; the TUI pushes them into the feed.
 async fn explain_with_progress(
     topic: &str,
     cwd: PathBuf,
     no_ai: bool,
-    on_progress: &(dyn Fn(String) + Send + Sync),
+    on_progress: crate::learn::translate::ProgressSink,
 ) -> Result<Vec<String>> {
     let topic = topic.to_string();
 
@@ -133,7 +235,7 @@ async fn explain_with_progress(
         .unwrap_or(0)
         == 0
     {
-        on_progress("indexing repository…".to_string());
+        on_progress(crate::learn::translate::progress("index", "repository"));
         bb.index_repo();
     }
 
@@ -153,6 +255,7 @@ async fn explain_with_progress(
     // Resolve the cluster — clone the Arc so we don't hold a borrow of bb.
     // Literal/per-word matching first; on a miss, fall back to letting a worker
     // pick relevant symbols from the graph so a plain description still resolves.
+    let mut total_usage = rinne_loop::worker::Usage::default();
     let cluster: Cluster = {
         let Some(arc_g) = bb.concrete_graph() else {
             anyhow::bail!("code graph unavailable");
@@ -161,14 +264,27 @@ async fn explain_with_progress(
         let mut c = crate::learn::resolve::resolve_cluster(g, &topic, 40);
 
         if c.symbols.is_empty() && !no_ai && !registry.is_empty() {
-            on_progress("no literal match — asking AI to find relevant code…".to_string());
+            let pick_label = crate::learn::translate::planned_worker_model(&registry)
+                .map(|m| m.label())
+                .unwrap_or_else(|| "AI".into());
+            on_progress(crate::learn::translate::progress(
+                "pick",
+                format!("no literal match · {pick_label}"),
+            ));
             let known = g.symbol_names();
             let picked = crate::learn::translate::ai_pick_symbols(
-                no_ai, &registry, &workspace, &topic, &known,
+                no_ai,
+                &registry,
+                &workspace,
+                &topic,
+                &known,
+                &on_progress,
             )
             .await;
-            if !picked.is_empty() {
-                c = crate::learn::resolve::cluster_from_seeds(g, &topic, &picked, 40);
+            total_usage =
+                crate::learn::translate::add_usage(total_usage, picked.usage);
+            if !picked.symbols.is_empty() {
+                c = crate::learn::resolve::cluster_from_seeds(g, &topic, &picked.symbols, 40);
             }
         }
         c
@@ -185,10 +301,13 @@ async fn explain_with_progress(
         return Ok(vec![hint.replace("{topic}", &topic)]);
     }
 
-    on_progress(format!(
-        "resolved {} symbols across {} files",
-        cluster.symbols.len(),
-        cluster.files.len(),
+    on_progress(crate::learn::translate::progress(
+        "resolve",
+        format!(
+            "{} symbols · {} files",
+            cluster.symbols.len(),
+            cluster.files.len(),
+        ),
     ));
 
     // Phase 2: reindex the cluster's files before reading snippets.
@@ -199,36 +318,92 @@ async fn explain_with_progress(
 
     let (snippets, doc_sections) = crate::learn::source::assemble(&workspace, &cluster);
 
-    // Build flow pairs — get Arc, coerce to trait object, compute, drop.
-    let flow: Vec<(String, String)> = match bb.concrete_graph() {
-        None => vec![],
+    // Seed-anchored call neighborhood for the diagram.
+    let (flow, flow_seeds) = match bb.concrete_graph() {
+        None => (vec![], cluster.seeds.clone()),
         Some(arc_g) => cluster_flow(arc_g.as_ref(), &cluster),
     };
+
+    // Deterministic FDE facts (entry points, blast radius, ranked files) and
+    // real-logic rule sites — both computed from the graph/cluster, no AI.
+    let fde = match bb.concrete_graph() {
+        Some(arc_g) => crate::learn::logic::fde_facts(arc_g.as_ref(), &cluster),
+        None => Default::default(),
+    };
+    let rule_sites = crate::learn::logic::cluster_branches(&workspace, &cluster);
 
     let doc = LearnDoc {
         topic: topic.clone(),
         snippets,
         flow,
+        flow_seeds,
         doc_sections,
+        fde,
+        rule_sites,
     };
 
-    // The AI phase is the slow one; narrate its start before awaiting so the
-    // TUI isn't silent for up to the worker timeout. Only when a real worker
-    // will run — the template-only path (no_ai / empty registry) is instant.
+    // The AI phase is the slow one; name the cheap tier up front and stream
+    // worker events + elapsed heartbeats via `on_progress` during the await.
     if !no_ai && !registry.is_empty() {
-        on_progress("narrating with AI (may take ~1–2 min)…".to_string());
+        let label = crate::learn::translate::planned_worker_model(&registry)
+            .map(|m| m.label())
+            .unwrap_or_else(|| "AI".into());
+        on_progress(crate::learn::translate::progress(
+            "narrate",
+            format!("{label} · up to ~5 min"),
+        ));
     }
 
-    let translator = crate::learn::translate::build_translator(no_ai, &registry, &workspace);
-    let narration = translator.translate(&doc).await;
+    let translator =
+        crate::learn::translate::build_translator(no_ai, &registry, &workspace, on_progress);
+    let translation = translator.translate(&doc).await;
+    let (narration, used) = match translation {
+        Some(t) => {
+            total_usage = crate::learn::translate::add_usage(total_usage, t.usage);
+            (Some(t.narration), Some(t.used))
+        }
+        None => (None, None),
+    };
 
     let html = crate::learn::render::render_html(&doc, narration.as_ref());
 
-    let out = bb.root().join("learn").join(format!("{topic}.html"));
+    // Artifact name is always a stable slug. Display title inside the HTML keeps
+    // the original free-form topic (e.g. "accounts module" → accounts-module.html).
+    let slug = crate::learn::topic_slug(&topic);
+    let out = bb.root().join("learn").join(format!("{slug}.html"));
     std::fs::create_dir_all(out.parent().unwrap())?;
     std::fs::write(&out, html)?;
 
-    Ok(vec![format!("wrote {}", out.display())])
+    // Final lines: path, which model ran, and tokens/time (CLI + TUI both see these).
+    let mut lines = vec![format!("wrote {}", out.display())];
+    if slug != topic {
+        lines.push(format!("slug: {slug}  (from `{topic}`)"));
+    }
+    if let Some(used) = used {
+        lines.push(format!("narrated with {}", used.label()));
+        if total_usage.total_tokens() > 0 || total_usage.wall_ms > 0 {
+            lines.push(format!(
+                "tokens: {}",
+                crate::learn::translate::format_usage(&total_usage)
+            ));
+        }
+    } else if !no_ai && !registry.is_empty() {
+        lines.push("template only — narration failed".into());
+        if total_usage.total_tokens() > 0 || total_usage.wall_ms > 0 {
+            lines.push(format!(
+                "tokens: {}",
+                crate::learn::translate::format_usage(&total_usage)
+            ));
+        }
+    } else {
+        lines.push("template only".into());
+    }
+    // Point at the local browser so people don't hunt for HTML files on disk.
+    // TUI: `/serve` · CLI: `rinne learn serve`.
+    lines.push(format!(
+        "browse all docs: /serve   (or: rinne learn serve · http://127.0.0.1:7420 · this topic: {slug})"
+    ));
+    Ok(lines)
 }
 
 #[cfg(test)]
@@ -258,6 +433,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn free_form_topic_writes_slug_filename() {
+        let dir = std::env::temp_dir().join(format!("rinne-learn-slug-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/accounts.rs"),
+            "/// Accounts module.\npub fn accounts_open() {}\n",
+        )
+        .unwrap();
+
+        run(
+            LearnCmd::Explain {
+                topic: "accounts module".into(),
+            },
+            dir.clone(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Standardised name — not "accounts module.html".
+        assert!(
+            dir.join(".rinne/learn/accounts-module.html").is_file(),
+            "expected accounts-module.html"
+        );
+        assert!(
+            !dir.join(".rinne/learn/accounts module.html").exists(),
+            "must not write raw spaced filename"
+        );
+        // Page title still uses the human query.
+        let html = std::fs::read_to_string(dir.join(".rinne/learn/accounts-module.html")).unwrap();
+        assert!(html.contains("accounts module") || html.contains("accounts_open"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn run_lines_returns_wrote_path_for_tui() {
         let dir = std::env::temp_dir().join(format!("rinne-learn-tui-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -268,11 +479,16 @@ mod tests {
         .unwrap();
 
         // No worker configured in the test env → template-only, must not error.
-        let lines = run_lines_with_progress("harness", dir.clone(), &|_| {}).await;
+        let noop: crate::learn::translate::ProgressSink = std::sync::Arc::new(|_: String| {});
+        let lines = run_lines_with_progress("harness", dir.clone(), noop).await;
 
         assert!(
             lines.iter().any(|l| l.starts_with("wrote ") && l.contains("harness.html")),
             "run_lines returns the wrote-path line, got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("rinne learn serve")),
+            "should guide to learn serve, got: {lines:?}"
         );
         assert!(dir.join(".rinne/learn/harness.html").is_file());
         let _ = std::fs::remove_dir_all(&dir);
@@ -289,18 +505,22 @@ mod tests {
         )
         .unwrap();
 
-        let seen: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let seen: std::sync::Arc<Mutex<Vec<String>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
         // no_ai = true → template-only path, no worker required; the resolve
         // milestone must still fire.
-        let lines = explain_with_progress("harness", dir.clone(), true, &|m| {
-            seen.lock().unwrap().push(m);
-        })
-        .await
-        .unwrap();
+        let seen_cb = seen.clone();
+        let on_progress: crate::learn::translate::ProgressSink =
+            std::sync::Arc::new(move |m: String| {
+                seen_cb.lock().unwrap().push(m);
+            });
+        let lines = explain_with_progress("harness", dir.clone(), true, on_progress)
+            .await
+            .unwrap();
 
-        let seen = seen.into_inner().unwrap();
+        let seen = seen.lock().unwrap().clone();
         assert!(
-            seen.iter().any(|m| m.contains("resolved")),
+            seen.iter().any(|m| m.contains("resolve") && m.contains("symbols")),
             "resolve milestone reported, got: {seen:?}"
         );
         assert!(
@@ -316,7 +536,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/a.rs"), "fn alpha() {}\n").unwrap();
 
-        let lines = run_lines_with_progress("zzz-nonexistent-topic", dir.clone(), &|_| {}).await;
+        let noop: crate::learn::translate::ProgressSink = std::sync::Arc::new(|_: String| {});
+        let lines = run_lines_with_progress("zzz-nonexistent-topic", dir.clone(), noop).await;
         assert!(
             lines.iter().any(|l| l.contains("no code found")),
             "reports no-match, got: {lines:?}"

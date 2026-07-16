@@ -1498,6 +1498,7 @@ mod tests {
                     name: "HttpTransport".into(),
                     file: "src/t.rs".into(),
                     line: 1,
+                    end_line: 1,
                 },
                 callers: vec![],
                 callees: vec![],

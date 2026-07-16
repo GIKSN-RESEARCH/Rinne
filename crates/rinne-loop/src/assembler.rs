@@ -188,8 +188,8 @@ mod graph_tests {
     impl CodeGraph for FakeGraph {
         fn neighborhood(&self, symbol: &str) -> Option<Neighborhood> {
             (symbol == "HttpTransport").then(|| Neighborhood {
-                definition: SymbolRef { name: "HttpTransport".into(), file: "t.rs".into(), line: 10 },
-                callers: vec![SymbolRef { name: "send".into(), file: "s.rs".into(), line: 3 }],
+                definition: SymbolRef { name: "HttpTransport".into(), file: "t.rs".into(), line: 10, end_line: 10 },
+                callers: vec![SymbolRef { name: "send".into(), file: "s.rs".into(), line: 3, end_line: 3 }],
                 callees: vec![],
                 imports: vec![],
                 stale: false,

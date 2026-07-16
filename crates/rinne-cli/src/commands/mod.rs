@@ -7,6 +7,7 @@ pub mod forget;
 pub mod graph;
 pub mod human;
 pub mod learn;
+pub mod learn_serve;
 pub mod limits;
 pub mod logs;
 pub mod mcp;
