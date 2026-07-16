@@ -39,6 +39,12 @@ fn defaults_load_with_no_files() {
     assert_eq!(cfg.loop_.max_iterations_per_node, 8);
     assert!(cfg.loop_.test_ratchet);
     assert_eq!(cfg.preferences.prefer, PreferFamily::Harness);
+    assert_eq!(
+        cfg.harness_stage.mode,
+        rinne_config::HarnessStageMode::Hybrid
+    );
+    assert!(cfg.harness_stage.mode.wants_visible(true));
+    assert!(!cfg.harness_stage.mode.wants_visible(false));
 }
 
 #[test]
