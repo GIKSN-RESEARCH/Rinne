@@ -78,4 +78,7 @@ anyhow = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Pseudo-TTY for visible harness Stage sessions (`plan.md`)
+portable-pty = "0.8"
 tracing-appender = "0.2"
