@@ -22,6 +22,7 @@ use rinne_core::{Result, RinneError};
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How to invoke a subprocess worker.
+#[derive(Debug, Clone)]
 pub struct SubprocessSpec {
     pub program: String,
     pub args: Vec<String>,
