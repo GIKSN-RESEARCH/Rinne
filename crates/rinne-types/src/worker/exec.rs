@@ -159,6 +159,10 @@ pub struct Constraints {
     /// Model the harness should run for this node, if selected. Passed to the
     /// CLI as e.g. `--model sonnet` / `-m grok-build`.
     pub model: Option<String>,
+    /// When true, harness workers should open a visible Stage/PTY session so the
+    /// user can watch the native agent CLI (`plan.md` Harness Stage).
+    #[serde(default)]
+    pub visible_stage: bool,
 }
 
 /// Everything a worker needs to do one unit of work (`CONTEXT.md` §8).

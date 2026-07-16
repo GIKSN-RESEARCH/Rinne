@@ -30,6 +30,13 @@ pub enum WorkerEvent {
     ToolUse(String),
     /// Raw stdout/stderr passthrough, used when no richer structure exists.
     Raw(String),
+    /// A visible Harness Stage session opened (PTY / Stage UI). `backend` is
+    /// `pty` or `headless` (or future `external-terminal`).
+    SessionOpened {
+        worker: String,
+        model: Option<String>,
+        backend: String,
+    },
     /// Terminal marker: the worker finished emitting events.
     Done,
 }
