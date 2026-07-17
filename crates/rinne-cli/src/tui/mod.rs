@@ -10,6 +10,7 @@ mod index;
 mod complete;
 mod markdown;
 mod picker;
+mod stage;
 mod ui;
 
 use std::io::{self, IsTerminal};
@@ -41,6 +42,7 @@ use crate::runner;
 use complete::Completion;
 use index::FileIndex;
 use picker::Picker;
+use stage::StageBoard;
 
 /// Guardrail: refuse a glob that expands past this before the conductor sees it.
 const GLOB_LIMIT: usize = 400;
@@ -279,6 +281,8 @@ pub struct App {
     learn_serve_url: Option<String>,
     /// Port of the live learn serve (for lock-file stop of ghosts).
     learn_serve_port: Option<u16>,
+    /// Harness Stage: multi-pane live harness transcripts (`plan.md` Phase 2).
+    pub(super) stage: StageBoard,
 }
 
 impl App {
@@ -318,6 +322,7 @@ impl App {
             learn_serve_cancel: None,
             learn_serve_url: None,
             learn_serve_port: None,
+            stage: StageBoard::new(),
         }
         // `set_intro` is called from `run()` with the loaded config to populate
         // the live intro table; the background probe then resolves availability.
@@ -675,6 +680,12 @@ impl App {
                         model,
                         backend,
                     } => {
+                        self.stage.open_session(
+                            id.clone(),
+                            worker.clone(),
+                            model.clone(),
+                            backend.clone(),
+                        );
                         self.commit_tail();
                         let m = model
                             .as_deref()
@@ -685,22 +696,35 @@ impl App {
                             format!("stage  {worker}{m} [{backend}]"),
                         );
                     }
-                    Reading(_) | Editing(_) | ToolUse(_) => {
+                    Reading(ref p) | Editing(ref p) | ToolUse(ref p) => {
                         self.commit_tail();
                         if let Some(label) = action {
+                            self.stage.append(&id, &label);
                             let acts = self.live_actions.entry(id.clone()).or_default();
                             acts.push(label);
                             let n = acts.len();
                             if n > ACTIONS_PER_AGENT { acts.drain(0..n - ACTIONS_PER_AGENT); }
+                        } else {
+                            self.stage.append(&id, p);
                         }
                     }
                     Thinking(t) => self.stream_thinking(&id, &t),
-                    Token(t) => self.stream_token(&id, &t),
-                    Message(m) | Raw(m) => self.stream_line(&id, &m),
+                    Token(t) => {
+                        // Tokens are mid-word fragments — fold into Stage as a
+                        // single growing line via `append_token`, not one row each.
+                        self.stage_append_token(&id, &t);
+                        self.stream_token(&id, &t);
+                    }
+                    Message(m) | Raw(m) => {
+                        self.stage.append(&id, &m);
+                        self.stream_line(&id, &m);
+                    }
                 }
             }
             EngineEvent::NodeFinished { id, status, tokens } => {
                 self.commit_tail();
+                self.stage.finish(&id, status);
+                self.stage.prune_finished(4);
                 if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
                     n.status = status;
                 }
@@ -741,6 +765,39 @@ impl App {
         {
             self.should_quit = true;
             return;
+        }
+
+        // Ctrl+Y toggles Harness Stage visibility (multi-pane harness transcripts).
+        if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('y')) {
+            let on = self.stage.toggle_visible();
+            self.push(
+                FeedKind::System,
+                format!("harness stage {}", if on { "shown" } else { "hidden" }),
+            );
+            return;
+        }
+
+        // When Stage is active: Tab cycles panes; PgUp/PgDn scroll the focused pane.
+        if self.stage.is_active() && self.picker.is_none() && self.completion.is_none() {
+            match code {
+                KeyCode::Tab if !mods.contains(KeyModifiers::SHIFT) => {
+                    self.stage.cycle_focus();
+                    return;
+                }
+                KeyCode::PageUp => {
+                    if let Some(s) = self.stage.focused_mut() {
+                        s.scroll_up(5);
+                    }
+                    return;
+                }
+                KeyCode::PageDown => {
+                    if let Some(s) = self.stage.focused_mut() {
+                        s.scroll_down(5);
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // Ctrl+O toggles reasoning verbosity for blocks committed from here on
@@ -1053,11 +1110,28 @@ impl App {
         }
     }
 
+    /// Fold a token fragment into the Stage pane for `node_id` (if any).
+    fn stage_append_token(&mut self, node_id: &str, token: &str) {
+        self.stage.append_token(node_id, token);
+    }
+
     fn slash(&mut self, cmd: &str) {
         let head = cmd.split_whitespace().next().unwrap_or("");
         let rest = cmd[head.len()..].trim().to_string();
         match head {
             "help" => self.push(FeedKind::System, help_text()),
+            "stage" => {
+                let on = self.stage.toggle_visible();
+                let n = self.stage.sessions.len();
+                self.push(
+                    FeedKind::System,
+                    format!(
+                        "harness stage {} · {n} session{} · tab cycles panes · pgup/pgdn scrolls (ctrl+y)",
+                        if on { "shown" } else { "hidden" },
+                        if n == 1 { "" } else { "s" }
+                    ),
+                );
+            }
             "plan" => {
                 let ids: Vec<&str> = self.nodes.iter().map(|n| n.id.as_str()).collect();
                 self.push(
@@ -1237,6 +1311,7 @@ impl App {
                     self.run_participants.clear();
                     self.run_tokens = 0;
                     self.pending.clear();
+                    self.stage.clear();
                     // Drop any intro banner staged by commit_intro this submit, so
                     // the screen wipe isn't immediately undone by re-printing it.
                     self.pending_intro = None;
@@ -1752,6 +1827,7 @@ fn help_text() -> String {
         (6, "--port N · --no-open    bind port (default 7420) / don't open browser"),
         (6, "stop · status           shut down / show the live URL"),
         (2, "/logs                       where logs are written (.rinne/logs/)"),
+        (2, "/stage                      show/hide Harness Stage panes  (ctrl+y · tab cycle · pgup/pgdn)"),
         (2, "/clear                      wipe the screen and reset the session  (alias: /new, ctrl-l wipes only)"),
         (2, "/help                       this reference"),
         (2, "/quit                       exit  (alias: /q, ctrl-q)"),
@@ -1823,13 +1899,25 @@ async fn do_run(
     let session = HumanSession::load(bb.root());
     let cond_cfg = runner::conductor_config_with_session(&config, &session);
     let narration_tx = tx.clone();
-    let conductor = runner::build_conductor(
+    // Harness planner events → Stage board under synthetic node "conductor".
+    let (planner_tx, mut planner_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stage_tx = tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = planner_rx.recv().await {
+            let _ = stage_tx.send(AppMsg::Engine(EngineEvent::NodeStream {
+                id: "conductor".into(),
+                event,
+            }));
+        }
+    });
+    let conductor = runner::build_conductor_with_events(
         &Config {
             conductor: cond_cfg,
             ..config.clone()
         },
         &registry,
         cwd.clone(),
+        Some(planner_tx),
     )
     .ok()
     .map(|c| {
