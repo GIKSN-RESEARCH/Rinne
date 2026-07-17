@@ -16,3 +16,9 @@ Cargo.lock
 
 .env.Local
 .gstack/
+
+.write-test
+CONDUCTOR_LOOP_PLAN.md
+MCP_SKILLS.md
+plan.md
+update.md
