@@ -39,10 +39,11 @@ fn api_worker_serves_tools_only_with_an_executor() {
 fn harness_serves_tools_only_with_a_provisioner() {
     assert!(
         claude_code::worker().serves_mcp_tools(),
-        "claude-code provisions MCP"
+        "claude-code provisions MCP natively"
     );
+    // Phase 3: codex/opencode get best-effort env-based MCP config files.
     assert!(
-        !codex::worker().serves_mcp_tools(),
-        "codex has no provisioner yet"
+        codex::worker().serves_mcp_tools(),
+        "codex has env-based MCP provisioner"
     );
 }
