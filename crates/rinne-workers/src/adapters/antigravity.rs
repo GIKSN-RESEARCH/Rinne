@@ -18,12 +18,18 @@ pub fn worker() -> HarnessAdapter {
         program: "agy".to_string(),
         build_args,
         plan_args: None,
+        interactive_args: Some(interactive_args),
         parse: parse_generic_json,
         line_mapper: raw_lines,
         prompt_via_stdin: false,
         default_timeout: Duration::from_secs(600),
         provisioner: None,
     }
+}
+
+fn interactive_args(prompt: &str, _model: Option<&str>) -> Vec<String> {
+    // Interactive agy (no --print).
+    vec![prompt.into()]
 }
 
 fn descriptor() -> WorkerDescriptor {
