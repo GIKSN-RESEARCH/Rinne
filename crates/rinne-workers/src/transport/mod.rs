@@ -4,6 +4,7 @@
 //! harness CLIs and `http` for API workers and the conductor backend. The `acp`
 //! JSON-RPC transport is deferred to V2.
 
+pub mod external_terminal;
 pub mod http;
 pub mod pty;
 pub mod subprocess;
