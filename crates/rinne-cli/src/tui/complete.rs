@@ -25,6 +25,7 @@ const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
     ("usage",   "",                              "alias for /limit-usage"),
     ("forget",  "<provider>",                   "delete a stored API key"),
     ("plan",    "",                              "show the current plan"),
+    ("stage",   "",                              "show/hide Harness Stage panes (ctrl+y)"),
     ("human",   "[sub …]",                       "pin roles for this run"),
     ("steer",   "<text>",                        "guide a parked node"),
     ("approve", "",                              "accept the current state"),
