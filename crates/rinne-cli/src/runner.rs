@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use rinne_conductor::{
     load_user_exemplars, resolve_openai, Conductor, ConductorInput, HarnessBackend, PlanBackend,
 };
+// EventSink used when wiring harness conductor → Stage.
 use rinne_config::model::{ConductorBackend, ConductorConfig, PreferFamily};
 use rinne_config::probe::WorkerFamily;
 use rinne_config::Config;
@@ -188,10 +189,24 @@ fn default_api_base(provider: &str) -> Option<&'static str> {
 /// Build the conductor: the configured OpenAI-compatible backend first (if its
 /// key is available), then the cheapest installed harness as the fallback
 /// conductor (`CONTEXT.md` §7). Needs a non-empty registry for the fallback.
+///
+/// `planner_events`: optional sink so harness-based planning opens Stage panes
+/// and streams tool/message events into the TUI (node id `conductor`).
 pub fn build_conductor(
     config: &Config,
     registry: &WorkerRegistry,
     workspace: std::path::PathBuf,
+) -> Result<Conductor> {
+    build_conductor_with_events(config, registry, workspace, None)
+}
+
+/// Like [`build_conductor`], but forwards harness planner events to `events`
+/// (wrapped as `EngineEvent::NodeStream` with id `conductor` by the caller).
+pub fn build_conductor_with_events(
+    config: &Config,
+    registry: &WorkerRegistry,
+    workspace: std::path::PathBuf,
+    planner_events: Option<rinne_core::worker::EventSink>,
 ) -> Result<Conductor> {
     let mut backends: Vec<Box<dyn PlanBackend>> = Vec::new();
 
@@ -203,20 +218,93 @@ pub fn build_conductor(
         ));
     }
 
-    // Fallback planners, tried in order: every installed harness first (usually
-    // subscription/free), then API workers as a last resort. Chaining means one
-    // harness failing (e.g. `claude` exits 1) falls through to the next instead
-    // of killing the run.
+    // Planners in preference order. Harness order respects
+    // `preferences.roles.conductor` / generator pins so "use grok only" does not
+    // always hit claude-code first. Auth failures fall through quickly.
     use rinne_core::worker::WorkerFamily as Fam;
-    let mut fallbacks = registry.by_family(Fam::Harness);
-    fallbacks.extend(registry.by_family(Fam::Api));
+    let mut harnesses = registry.by_family(Fam::Harness);
+    harnesses = order_harnesses_for_conductor(config, harnesses);
+    let mut fallbacks = harnesses;
+    // When the user pinned a harness conductor (or backend = harness), do not
+    // put API workers in the same chain as "silent" planners ahead of grok —
+    // API is still tried first inside run_once when backend has a key.
+    if config.conductor.backend != ConductorBackend::Harness
+        && preferred_conductor_harness(config).is_none()
+    {
+        fallbacks.extend(registry.by_family(Fam::Api));
+    }
     for worker in fallbacks {
-        backends.push(Box::new(HarnessBackend::new(worker, workspace.clone())));
+        let is_harness = worker.descriptor().family == Fam::Harness;
+        let mut hb = HarnessBackend::new(worker, workspace.clone());
+        if is_harness {
+            if let Some(ref sink) = planner_events {
+                hb = hb.with_events(sink.clone());
+            }
+        }
+        backends.push(Box::new(hb));
     }
 
     Ok(Conductor::new(backends)
         .map_err(|e| anyhow!("{e}"))?
         .with_conductor_config(config.conductor.clone()))
+}
+
+/// Parse `preferences.roles.conductor` / `generator` (and models keys) into a
+/// bare worker name (`grok`, `claude-code`, …).
+fn preferred_conductor_harness(config: &Config) -> Option<String> {
+    let candidates = [
+        config.preferences.roles.get("conductor"),
+        config.preferences.roles.get("planner"),
+        // Soft: if the user pinned generator to one harness, prefer it for planning too.
+        config.preferences.roles.get("generator"),
+    ];
+    for raw in candidates.into_iter().flatten() {
+        let name = strip_prefer_prefix(raw);
+        if matches!(
+            name.as_str(),
+            "claude-code"
+                | "codex"
+                | "opencode"
+                | "grok"
+                | "cursor-agent"
+                | "aider"
+                | "antigravity"
+        ) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn strip_prefer_prefix(s: &str) -> String {
+    let s = s.trim();
+    s.strip_prefix("harness:")
+        .or_else(|| s.strip_prefix("api:"))
+        .unwrap_or(s)
+        .to_string()
+}
+
+/// Put the user's preferred harness first; keep relative order of the rest.
+fn order_harnesses_for_conductor(
+    config: &Config,
+    mut harnesses: Vec<std::sync::Arc<dyn rinne_core::Worker>>,
+) -> Vec<std::sync::Arc<dyn rinne_core::Worker>> {
+    let Some(want) = preferred_conductor_harness(config) else {
+        return harnesses;
+    };
+    if let Some(i) = harnesses
+        .iter()
+        .position(|w| w.descriptor().name == want)
+    {
+        let preferred = harnesses.remove(i);
+        harnesses.insert(0, preferred);
+        tracing::info!(
+            preferred = %want,
+            order = ?harnesses.iter().map(|w| w.descriptor().name.as_str()).collect::<Vec<_>>(),
+            "conductor harness order"
+        );
+    }
+    harnesses
 }
 
 /// One-shot headless run that returns a structured JSON result instead of
@@ -533,10 +621,15 @@ pub fn apply_harness_stage_env(config: &Config, interactive: bool) {
         std::env::remove_var("RINNE_HARNESS_STAGE_VISIBLE");
     }
     std::env::set_var("RINNE_HARNESS_STAGE_MODE", mode.as_str());
+    std::env::set_var(
+        "RINNE_HARNESS_STAGE_MAX",
+        config.harness_stage.max_sessions.to_string(),
+    );
     tracing::info!(
         mode = mode.as_str(),
         visible,
         interactive,
+        max = config.harness_stage.max_sessions,
         "harness stage"
     );
 }
