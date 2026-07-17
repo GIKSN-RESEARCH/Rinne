@@ -23,3 +23,4 @@ futures-util = "0.3"
 thiserror.workspace = true
 tracing.workspace = true
 portable-pty.workspace = true
+libc.workspace = true
