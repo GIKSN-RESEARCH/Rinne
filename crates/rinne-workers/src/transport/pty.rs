@@ -1,11 +1,12 @@
 //! PTY-backed harness transport for visible Harness Stage sessions (`plan.md`).
 //!
 //! Spawns the same harness CLI as the headless subprocess transport, but under a
-//! pseudo-TTY so tools that check for interactive terminals behave more like
-//! their native UX. Output is still line-parsed via [`LineMapper`] for the loop.
+//! pseudo-TTY. On cancel or timeout the child is **hard-killed** (Phase 5).
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -20,7 +21,7 @@ const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 enum PtyMsg {
     Chunk(Vec<u8>),
-    Exit { success: bool, timed_out: bool },
+    Exit { success: bool, timed_out: bool, cancelled: bool },
     Err(String),
 }
 
@@ -33,6 +34,8 @@ pub async fn run(
 ) -> Result<SubprocessOutput> {
     let started = Instant::now();
     let (tx, rx) = mpsc::channel::<PtyMsg>();
+    let kill_flag = Arc::new(AtomicBool::new(false));
+    let child_pid = Arc::new(AtomicU32::new(0));
 
     let program = spec.program.clone();
     let args = spec.args.clone();
@@ -40,9 +43,21 @@ pub async fn run(
     let stdin = spec.stdin.clone();
     let env = spec.env.clone();
     let timeout = spec.timeout;
+    let kill_flag_b = kill_flag.clone();
+    let child_pid_b = child_pid.clone();
 
     let join = tokio::task::spawn_blocking(move || {
-        run_pty_blocking(program, args, workspace, stdin, env, timeout, tx)
+        run_pty_blocking(
+            program,
+            args,
+            workspace,
+            stdin,
+            env,
+            timeout,
+            tx,
+            kill_flag_b,
+            child_pid_b,
+        )
     });
 
     let mut captured = String::new();
@@ -53,6 +68,8 @@ pub async fn run(
 
     loop {
         if cancel.is_cancelled() {
+            kill_flag.store(true, Ordering::SeqCst);
+            hard_kill_pid(child_pid.load(Ordering::SeqCst));
             terminal = Some(ExecStatus::Cancelled);
             break;
         }
@@ -76,6 +93,7 @@ pub async fn run(
             Ok(PtyMsg::Exit {
                 success,
                 timed_out,
+                cancelled,
             }) => {
                 if !line_buf.is_empty() {
                     flush_line(
@@ -87,7 +105,9 @@ pub async fn run(
                     );
                 }
                 exit_success = success;
-                if timed_out {
+                if cancelled {
+                    terminal = Some(ExecStatus::Cancelled);
+                } else if timed_out {
                     terminal = Some(ExecStatus::TimedOut);
                 }
                 break;
@@ -105,7 +125,12 @@ pub async fn run(
         }
     }
 
-    // Ensure the blocking task finishes.
+    // Ensure kill if we left the loop for any non-clean reason while cancelled.
+    if cancel.is_cancelled() {
+        kill_flag.store(true, Ordering::SeqCst);
+        hard_kill_pid(child_pid.load(Ordering::SeqCst));
+    }
+
     let _ = join.await;
 
     let status = terminal.unwrap_or_else(|| {
@@ -120,10 +145,35 @@ pub async fn run(
     Ok(SubprocessOutput {
         stdout: captured,
         stderr: String::new(),
-        exit_code: if exit_success { Some(0) } else { Some(1) },
+        exit_code: match &status {
+            ExecStatus::Success => Some(0),
+            ExecStatus::Cancelled => None,
+            _ => Some(1),
+        },
         status,
         wall_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn hard_kill_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // SIGTERM then SIGKILL — best-effort; ignore errors (already dead).
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
 }
 
 fn flush_line(
@@ -146,6 +196,7 @@ fn flush_line(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_pty_blocking(
     program: String,
     args: Vec<String>,
@@ -154,6 +205,8 @@ fn run_pty_blocking(
     env: Vec<(String, String)>,
     timeout: Option<Duration>,
     tx: mpsc::Sender<PtyMsg>,
+    kill_flag: Arc<AtomicBool>,
+    child_pid: Arc<AtomicU32>,
 ) {
     let pty_system = native_pty_system();
     let pair = match pty_system.openpty(PtySize {
@@ -185,6 +238,10 @@ fn run_pty_blocking(
     };
     drop(pair.slave);
 
+    if let Some(pid) = child.process_id() {
+        child_pid.store(pid, Ordering::SeqCst);
+    }
+
     if let Some(input) = stdin {
         match pair.master.take_writer() {
             Ok(mut writer) => {
@@ -208,31 +265,49 @@ fn run_pty_blocking(
         }
     };
 
+    // Watcher: poll kill_flag and kill child so a blocked read can unblock via EOF.
+    let kill_flag_w = kill_flag.clone();
+    let pid_w = child_pid.clone();
+    let watcher = std::thread::spawn(move || {
+        while !kill_flag_w.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        hard_kill_pid(pid_w.load(Ordering::SeqCst));
+    });
+
     let deadline = timeout.map(|d| Instant::now() + d);
     let mut buf = [0u8; 4096];
     let mut timed_out = false;
+    let mut cancelled = false;
     loop {
+        if kill_flag.load(Ordering::SeqCst) {
+            cancelled = true;
+            let _ = child.kill();
+            break;
+        }
         if let Some(dl) = deadline {
             if Instant::now() >= dl {
                 timed_out = true;
+                kill_flag.store(true, Ordering::SeqCst);
                 let _ = child.kill();
+                hard_kill_pid(child_pid.load(Ordering::SeqCst));
                 break;
             }
         }
-        // Non-blocking-ish: portable-pty reader may block; rely on timeout kill
-        // from another approach — for now read with short lifetime via blocking.
+        // Set a short read deadline if supported — otherwise kill_flag watcher
+        // unblocks us on cancel. portable-pty reader is blocking; we rely on kill.
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 if tx.send(PtyMsg::Chunk(buf[..n].to_vec())).is_err() {
+                    kill_flag.store(true, Ordering::SeqCst);
                     let _ = child.kill();
-                    return;
+                    break;
                 }
             }
             Err(_) => break,
         }
         if child.try_wait().ok().flatten().is_some() {
-            // Drain remaining
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
                     break;
@@ -243,7 +318,10 @@ fn run_pty_blocking(
         }
     }
 
-    let success = if timed_out {
+    kill_flag.store(true, Ordering::SeqCst); // stop watcher
+    let _ = watcher.join();
+
+    let success = if timed_out || cancelled {
         false
     } else {
         match child.wait() {
@@ -252,9 +330,10 @@ fn run_pty_blocking(
         }
     };
     let _ = tx.send(PtyMsg::Exit {
-        success: success && !timed_out,
+        success: success && !timed_out && !cancelled,
         timed_out,
+        cancelled,
     });
-    // Hold master until child is fully reaped.
     drop(pair.master);
+    child_pid.store(0, Ordering::SeqCst);
 }
