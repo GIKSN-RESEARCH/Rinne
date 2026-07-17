@@ -319,6 +319,20 @@ fn format_worker_event(ev: &WorkerEvent) -> Option<String> {
             }
         }
         WorkerEvent::ToolUse(s) => humanize_tool_label(s).map(|d| progress("tool", d)),
+        WorkerEvent::SessionOpened {
+            worker,
+            model,
+            backend,
+        } => {
+            let m = model
+                .as_deref()
+                .map(|m| format!(":{m}"))
+                .unwrap_or_default();
+            Some(progress(
+                "stage",
+                &format!("{worker}{m} [{backend}]"),
+            ))
+        }
         WorkerEvent::Raw(_) | WorkerEvent::Token(_) | WorkerEvent::Thinking(_) | WorkerEvent::Done => {
             None
         }
