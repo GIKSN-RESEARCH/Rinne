@@ -8,15 +8,14 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
-
 use rinne_core::worker::{
-    AuthMode, Capability, LatencyProfile, McpServerSpec, McpTransportKind, QuotaModel, Transport,
-    Usage, WorkerDescriptor, WorkerEvent, WorkerFamily,
+    AuthMode, Capability, LatencyProfile, McpServerSpec, QuotaModel, Transport, Usage,
+    WorkerDescriptor, WorkerEvent, WorkerFamily,
 };
-use rinne_core::{Result, RinneError};
+use rinne_core::Result;
 
 use super::common::{HarnessAdapter, ParsedHarness, Provision};
+use super::mcp_util;
 use crate::transport::subprocess::SubprocessOutput;
 
 /// Construct a Claude Code harness worker.
@@ -26,6 +25,8 @@ pub fn worker() -> HarnessAdapter {
         program: "claude".to_string(),
         build_args,
         plan_args: Some(plan_args),
+        // Interactive TUI: no -p / stream-json — full Claude Code UI in Terminal.
+        interactive_args: Some(interactive_args),
         parse,
         line_mapper,
         prompt_via_stdin: false,
@@ -43,6 +44,18 @@ fn plan_args(prompt: &str, model: Option<&str>) -> Vec<String> {
         args.push("--model".into());
         args.push(m.into());
     }
+    args
+}
+
+/// Full Claude Code interactive UI (no print/stream-json). Initial message = prompt.
+fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(m) = model {
+        args.push("--model".into());
+        args.push(m.into());
+    }
+    // Positional prompt starts the interactive session with this user message.
+    args.push(prompt.into());
     args
 }
 
@@ -237,103 +250,9 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Provision a node's MCP servers into a `claude` invocation (`MCP_SKILLS.md`
-/// §6). Writes a `.mcp.json`-shaped config and returns `--mcp-config <path>`
-/// `--strict-mcp-config` (only our servers) and `--allowedTools mcp__<server>…`
-/// (pre-approve the tools for the non-interactive `-p` run).
-///
-/// Secrets stay off disk: a token is written as a `${VAR}` reference and the
-/// real value is set on the subprocess environment, which Claude expands.
+/// Provision a node's MCP servers into a `claude` invocation (`MCP_SKILLS.md` §6).
 fn provision(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
-    let mut mcp_servers = Map::new();
-    let mut env = Vec::new();
-    let mut allowed = Vec::new();
-
-    for (i, s) in servers.iter().enumerate() {
-        allowed.push(format!("mcp__{}", s.name));
-        let mut entry = Map::new();
-        match s.transport {
-            McpTransportKind::Stdio => {
-                entry.insert("command".into(), json!(s.command.clone().unwrap_or_default()));
-                entry.insert("args".into(), json!(s.args));
-                let mut env_map = Map::new();
-                for (k, v) in &s.env {
-                    env_map.insert(k.clone(), json!(v));
-                }
-                if let Some(token) = &s.token {
-                    // The server reads its token from its auth env var; reference
-                    // it through a host env var so the value never lands in the file.
-                    if let Some(var) = s.stdio_auth_env().or_else(|| s.token_env.clone()) {
-                        let host_var = host_env_var(i, &s.name);
-                        env_map.insert(var, json!(format!("${{{host_var}}}")));
-                        env.push((host_var, token.clone()));
-                    }
-                }
-                if !env_map.is_empty() {
-                    entry.insert("env".into(), Value::Object(env_map));
-                }
-            }
-            McpTransportKind::Http => {
-                entry.insert("type".into(), json!("http"));
-                entry.insert("url".into(), json!(s.url.clone().unwrap_or_default()));
-                let mut headers = Map::new();
-                for (k, v) in &s.headers {
-                    headers.insert(k.clone(), json!(v));
-                }
-                if let Some(token) = &s.token {
-                    // The configured auth header (bearer by default, or a custom
-                    // API-key header), with the token via env expansion.
-                    let (header, prefix) = s.http_auth();
-                    let host_var = host_env_var(i, &s.name);
-                    headers.insert(header, json!(format!("{prefix}${{{host_var}}}")));
-                    env.push((host_var, token.clone()));
-                }
-                if !headers.is_empty() {
-                    entry.insert("headers".into(), Value::Object(headers));
-                }
-            }
-        }
-        mcp_servers.insert(s.name.clone(), Value::Object(entry));
-    }
-
-    let config = json!({ "mcpServers": Value::Object(mcp_servers) });
-    std::fs::create_dir_all(scratch)
-        .map_err(|e| RinneError::Worker(format!("could not create MCP scratch dir: {e}")))?;
-    let path = scratch.join(format!("mcp-{}-{}.json", std::process::id(), unique_suffix()));
-    std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap_or_default())
-        .map_err(|e| RinneError::Worker(format!("could not write MCP config: {e}")))?;
-
-    let args = vec![
-        "--mcp-config".to_string(),
-        path.display().to_string(),
-        "--strict-mcp-config".to_string(),
-        "--allowedTools".to_string(),
-        allowed.join(","),
-    ];
-    Ok(Provision {
-        args,
-        env,
-        cleanup: Some(path),
-    })
-}
-
-/// A host environment variable name to carry a server's token to the subprocess.
-/// The index keeps the name unique even when two server names differ only by
-/// punctuation (e.g. `fs.x` and `fs-x` both sanitize to `FS_X`).
-fn host_env_var(index: usize, server: &str) -> String {
-    let up: String = server
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
-        .collect();
-    format!("RINNE_MCP_{index}_{up}_TOKEN")
-}
-
-/// A process-unique suffix for the scratch config filename (no `rand` dep).
-fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+    mcp_util::provision_claude_style(servers, scratch)
 }
 
 /// Find the last top-level JSON object in mixed output (some CLIs prepend logs).
@@ -359,6 +278,7 @@ pub(crate) fn last_json_object(s: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rinne_core::worker::McpTransportKind;
 
     fn out(stdout: &str) -> SubprocessOutput {
         SubprocessOutput {
