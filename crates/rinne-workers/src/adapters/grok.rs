@@ -21,11 +21,14 @@ pub fn worker() -> HarnessAdapter {
         descriptor: descriptor(),
         program: "grok".to_string(),
         build_args,
-        plan_args: None,
+        plan_args: Some(plan_args),
+        // Interactive Grok Build TUI: positional prompt, no -p / streaming-json.
+        interactive_args: Some(interactive_args),
         parse,
         line_mapper,
         prompt_via_stdin: false,
         default_timeout: Duration::from_secs(600),
+        // Grok manages MCP via `grok mcp`; no portable headless provision flag yet.
         provisioner: None,
     }
 }
@@ -74,6 +77,43 @@ fn build_args(prompt: &str, model: Option<&str>) -> Vec<String> {
         args.push("-m".into());
         args.push(m.into());
     }
+    args
+}
+
+/// Lean planner: plain single-turn without streaming-json (more robust for short plans).
+fn plan_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "-p".into(),
+        prompt.into(),
+        "--output-format".into(),
+        "plain".into(),
+        "--no-plan".into(),
+        "--always-approve".into(),
+    ];
+    if let Some(m) = model {
+        args.push("-m".into());
+        args.push(m.into());
+    }
+    args
+}
+
+/// Full Grok Build interactive UI (`grok "prompt"`), not headless `-p` JSON dump.
+///
+/// Keep the argv close to what a human would type so the product TUI behaves
+/// normally. Auto-approve + no-plan so Stage sessions are not stuck on prompts.
+/// Prefer `--fullscreen` for the alt-screen product chrome.
+fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--fullscreen".into(),
+        "--always-approve".into(),
+        "--no-plan".into(),
+    ];
+    if let Some(m) = model {
+        args.push("-m".into());
+        args.push(m.into());
+    }
+    // Positional PROMPT → interactive session with initial message (see grok --help).
+    args.push(prompt.into());
     args
 }
 
@@ -158,8 +198,7 @@ fn parse(out: &SubprocessOutput) -> ParsedHarness {
     }
 }
 
-/// Stream text tokens and tool uses live; suppress reasoning tokens and the end
-/// marker. Text tokens are coalesced into one growing line by the interface.
+/// Stream text tokens, thinking, and tool uses live for Stage / TUI.
 fn line_mapper(line: &str) -> Vec<WorkerEvent> {
     let line = line.trim();
     if line.is_empty() {
@@ -174,12 +213,31 @@ fn line_mapper(line: &str) -> Vec<WorkerEvent> {
             .and_then(|d| d.as_str())
             .map(|d| vec![WorkerEvent::Token(d.to_string())])
             .unwrap_or_default(),
-        Some("tool_use") | Some("tool") => {
-            let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-            let input = v.get("input").cloned().unwrap_or(serde_json::Value::Null);
+        Some("thought") | Some("thinking") | Some("reasoning") => v
+            .get("data")
+            .and_then(|d| d.as_str())
+            .map(|d| vec![WorkerEvent::Thinking(d.to_string())])
+            .unwrap_or_default(),
+        Some("tool_use") | Some("tool") | Some("tool_call") => {
+            let name = v
+                .get("name")
+                .or_else(|| v.get("tool"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("tool");
+            let input = v
+                .get("input")
+                .or_else(|| v.get("arguments"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             vec![tool_event(name, &input)]
         }
-        // thought, end, system: not shown.
+        Some("error") => v
+            .get("data")
+            .or_else(|| v.get("message"))
+            .and_then(|d| d.as_str())
+            .map(|d| vec![WorkerEvent::Message(format!("error: {d}"))])
+            .unwrap_or_default(),
+        // end, system: not shown.
         _ => Vec::new(),
     }
 }
