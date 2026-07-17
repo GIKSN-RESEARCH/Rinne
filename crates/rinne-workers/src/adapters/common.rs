@@ -61,6 +61,100 @@ impl ParsedHarness {
 /// optional model selection.
 pub type ArgsBuilder = fn(prompt: &str, model: Option<&str>) -> Vec<String>;
 
+/// Default interactive argv: model flag (if any) + prompt as a positional arg.
+/// Used when an adapter has no custom `interactive_args` (opens product TUI).
+pub fn default_interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(m) = model {
+        args.push("--model".into());
+        args.push(m.into());
+    }
+    args.push(prompt.into());
+    args
+}
+
+/// Write a large prompt under the workspace blackboard so we can pass
+/// `--prompt-file` instead of blowing ARG_MAX / shell quoting.
+fn prompt_file_for(workspace: &Path, prompt: &str) -> std::io::Result<PathBuf> {
+    let dir = workspace
+        .join(rinne_core::BLACKBOARD_DIR)
+        .join("stage-prompts");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!(
+        "prompt-{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&path, prompt)?;
+    Ok(path)
+}
+
+/// Grok single-turn via `--prompt-file` (avoids embedding multi-KB plans in argv).
+fn grok_prompt_file_args(path: &Path, model: Option<&str>, lean: bool) -> Vec<String> {
+    let mut args = vec![
+        "--prompt-file".into(),
+        path.display().to_string(),
+        "--output-format".into(),
+        if lean {
+            "plain".into()
+        } else {
+            // Visible Stage plain is human-readable in Terminal; streaming-json
+            // is for pure headless parse paths.
+            "plain".into()
+        },
+        "--no-plan".into(),
+        "--always-approve".into(),
+    ];
+    if let Some(m) = model {
+        args.push("-m".into());
+        args.push(m.into());
+    }
+    args
+}
+
+/// Stage interactive bundle: full task on disk + result path + short kickoff
+/// so the product TUI opens cleanly (no multi-KB argv) and Rinne can still
+/// recover the deliverable without tee'ing the TTY.
+fn stage_task_bundle(
+    workspace: &Path,
+    full_prompt: &str,
+    is_planner: bool,
+) -> std::io::Result<(String, PathBuf)> {
+    let dir = workspace
+        .join(rinne_core::BLACKBOARD_DIR)
+        .join("stage-prompts");
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let task_path = dir.join(format!("task-{stamp}.md"));
+    let result_path = dir.join(format!("result-{stamp}.txt"));
+    // Ensure result does not exist yet (poll for create + stable size).
+    let _ = std::fs::remove_file(&result_path);
+    std::fs::write(&task_path, full_prompt)?;
+
+    let deliverable = if is_planner {
+        "the final planning deliverable: a single JSON object (the DAG plan) with no markdown fence unless required"
+    } else {
+        "your complete final answer / report for this task"
+    };
+
+    // Keep kickoff short — long multi-line kicks fight TUI layout on first paint.
+    let kickoff = format!(
+        "Rinne Stage: complete the task in {task}. \
+         Use tools freely. When done, write {deliverable} to {result} (UTF-8, overwrite OK), then exit. \
+         No clarifying questions — work autonomously.",
+        task = task_path.display(),
+        result = result_path.display(),
+        deliverable = deliverable,
+    );
+
+    Ok((kickoff, result_path))
+}
+
 /// Defensive parser for harnesses that emit a single JSON result object: probe
 /// common result fields, falling back to raw stdout on any surprise
 /// (`CONTEXT.md` §21). Suitable for not-yet-pinned beta CLIs.
@@ -120,6 +214,10 @@ pub struct HarnessAdapter {
     /// versions than parsing a streaming format). `None` → planning reuses
     /// `build_args` and the normal parser unchanged.
     pub plan_args: Option<ArgsBuilder>,
+    /// Args for a **real interactive harness TUI** in an external Terminal window.
+    /// Must NOT use headless flags (`-p`, `--output-format json`, `exec --json`, …)
+    /// so the full product UI is visible. `None` → default: `[prompt]` (+ model if any).
+    pub interactive_args: Option<ArgsBuilder>,
     pub parse: OutputParser,
     pub line_mapper: LineMapper,
     /// Whether the prompt is piped via stdin (vs. passed as an argument).
@@ -185,6 +283,7 @@ impl Worker for HarnessAdapter {
         // output (e.g. a CLI version that rejects the streaming flags). Planning
         // starts lean so a work flag can't make the planner exit non-zero.
         let mut lean = matches!(request.role, Role::Planner) && has_lean;
+        let is_planner = matches!(request.role, Role::Planner);
 
         // Provision the node's MCP servers into this harness once, up front
         // (`MCP_SKILLS.md` §6). A provisioner failure is non-fatal: narrate it and
@@ -193,21 +292,96 @@ impl Worker for HarnessAdapter {
 
         // Retry transient failures (spawn errors, timeouts) once before giving
         // up — beta CLIs are flaky (`CONTEXT.md` §21). A cancelled run is not
-        // retried.
+        // retried. Visible sessions are NOT retried on timeout (that just opens
+        // a second broken Terminal window).
         const MAX_ATTEMPTS: u32 = 2;
         let mut attempt = 0;
         let out = loop {
             attempt += 1;
-            let builder = if lean { self.plan_args.unwrap() } else { self.build_args };
-            let mapper = if lean { subprocess::raw_lines } else { self.line_mapper };
-            let (mut args, stdin) = if self.prompt_via_stdin {
+            // Visible Stage = real Terminal.app with the **product harness UI**
+            // (Grok Build, Claude Code, …). Capture goes through a result file
+            // so we never tee/script the TTY (that caused mouse-protocol garbage).
+            // Opt out of the TUI with RINNE_HARNESS_INTERACTIVE_TUI=0 (single-turn
+            // plain text in Terminal instead).
+            let mut visible = request.constraints.visible_stage;
+            let interactive_env = std::env::var("RINNE_HARNESS_INTERACTIVE_TUI")
+                .map(|v| v.to_ascii_lowercase())
+                .unwrap_or_default();
+            let force_plain = matches!(interactive_env.as_str(), "0" | "false" | "no" | "off");
+            let want_interactive_tui = visible
+                && !force_plain
+                && self.interactive_args.is_some();
+
+            let builder = if want_interactive_tui {
+                self.interactive_args.unwrap_or(default_interactive_args)
+            } else if lean {
+                self.plan_args.unwrap()
+            } else {
+                self.build_args
+            };
+            let mapper = if want_interactive_tui {
+                // TUI has no useful line stream; Stage events come from SessionOpened.
+                subprocess::raw_lines
+            } else if lean || visible {
+                subprocess::raw_lines
+            } else {
+                self.line_mapper
+            };
+
+            // Interactive Stage: short kickoff prompt + full task on disk +
+            // result file for the deliverable (plan JSON, report, etc.).
+            let mut result_file: Option<PathBuf> = None;
+            let (mut args, stdin) = if want_interactive_tui {
+                match stage_task_bundle(&request.workspace, &prompt, is_planner) {
+                    Ok((kickoff, result_path)) => {
+                        result_file = Some(result_path);
+                        (builder(&kickoff, model), None)
+                    }
+                    Err(e) => {
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "could not write Stage task files ({e}) — falling back to plain single-turn"
+                            )),
+                        );
+                        // Fall through to plain builders below.
+                        if lean {
+                            if self.program == "grok" && prompt.len() > 1500 {
+                                match prompt_file_for(&request.workspace, &prompt) {
+                                    Ok(path) => (grok_prompt_file_args(&path, model, true), None),
+                                    Err(_) => (builder(&prompt, model), None),
+                                }
+                            } else {
+                                (self.plan_args.unwrap()(&prompt, model), None)
+                            }
+                        } else if self.prompt_via_stdin {
+                            ((self.build_args)("", model), Some(prompt.clone()))
+                        } else {
+                            ((self.build_args)(&prompt, model), None)
+                        }
+                    }
+                }
+            } else if self.program == "grok" && prompt.len() > 1500 {
+                let pf = prompt_file_for(&request.workspace, &prompt);
+                match pf {
+                    Ok(path) => (grok_prompt_file_args(&path, model, lean), None),
+                    Err(_) if self.prompt_via_stdin => (builder("", model), Some(prompt.clone())),
+                    Err(_) => (builder(&prompt, model), None),
+                }
+            } else if self.prompt_via_stdin {
                 (builder("", model), Some(prompt.clone()))
             } else {
                 (builder(&prompt, model), None)
             };
+            // If interactive setup failed we may have cleared want visually but
+            // still set result_file only on success — OK.
+            let interactive_active = want_interactive_tui && result_file.is_some();
+
             // Append the MCP flags on the rich work invocation (not the lean
             // planner path, which neither needs tools nor accepts the flags).
-            if !lean {
+            // Skip for interactive visible sessions — MCP provision flags are
+            // often headless-oriented; interactive harnesses use their own MCP.
+            if !lean && !visible {
                 args.extend(provision.args.iter().cloned());
             }
             let spec = SubprocessSpec {
@@ -217,8 +391,34 @@ impl Worker for HarnessAdapter {
                 stdin,
                 timeout: Some(timeout),
                 env: provision.env.clone(),
+                result_file: result_file.clone(),
             };
-            let visible = request.constraints.visible_stage;
+            // Cap concurrent Terminal windows; overflow → headless.
+            let visible_slot = if visible {
+                match crate::session_gate::try_acquire_visible() {
+                    Some(slot) => Some(slot),
+                    None => {
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "Harness Stage: max concurrent terminal windows reached — \
+                                 running {} headless",
+                                self.descriptor.name
+                            )),
+                        );
+                        visible = false;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let role_tag = match request.role {
+                Role::Planner => "planner",
+                Role::Generator => "generator",
+                Role::Evaluator => "evaluator",
+                _ => "worker",
+            };
             if attempt == 1 {
                 let model = model.map(|m| m.to_string());
                 emit(
@@ -227,9 +427,13 @@ impl Worker for HarnessAdapter {
                         worker: self.descriptor.name.clone(),
                         model,
                         backend: if visible {
-                            "pty".into()
+                            if interactive_active {
+                                format!("external-terminal/interactive/{role_tag}")
+                            } else {
+                                format!("external-terminal/single-turn/{role_tag}")
+                            }
                         } else {
-                            "headless".into()
+                            format!("headless/{role_tag}")
                         },
                     },
                 );
@@ -237,32 +441,96 @@ impl Worker for HarnessAdapter {
                     emit(
                         &events,
                         WorkerEvent::Message(format!(
-                            "Harness Stage: opening {} under PTY (native agent session)",
-                            self.descriptor.name
+                            "▶ {} · {} · {}",
+                            role_tag,
+                            self.descriptor.name,
+                            if interactive_active {
+                                "product UI"
+                            } else {
+                                "single-turn"
+                            }
                         )),
                     );
                 }
             }
             let run_result = if visible {
-                match crate::transport::pty::run(spec.clone(), &events, &cancel, mapper).await {
+                use crate::transport::external_terminal::{self, TerminalMode};
+                let mode = if interactive_active {
+                    TerminalMode::Interactive
+                } else {
+                    TerminalMode::Capture
+                };
+                // Real Terminal window. Prefer system Terminal; on failure try
+                // embedded PTY, then in-process headless as last resort.
+                match external_terminal::run_with_mode(
+                    spec.clone(),
+                    &events,
+                    &cancel,
+                    mapper,
+                    mode,
+                )
+                .await
+                {
                     Ok(out) => Ok(out),
                     Err(e) => {
                         emit(
                             &events,
                             WorkerEvent::Message(format!(
-                                "PTY stage failed ({e}) — falling back to headless subprocess"
+                                "could not open system Terminal ({e}) — trying embedded PTY"
                             )),
                         );
-                        subprocess::run(spec, &events, &cancel, mapper).await
+                        match crate::transport::pty::run(spec.clone(), &events, &cancel, mapper)
+                            .await
+                        {
+                            Ok(out) => Ok(out),
+                            Err(e2) => {
+                                emit(
+                                    &events,
+                                    WorkerEvent::Message(format!(
+                                        "PTY session failed ({e2}) — headless fallback"
+                                    )),
+                                );
+                                let hb = if lean {
+                                    self.plan_args.unwrap_or(self.build_args)
+                                } else {
+                                    self.build_args
+                                };
+                                let (mut hargs, hstdin) = if self.prompt_via_stdin {
+                                    (hb("", model), Some(prompt.clone()))
+                                } else {
+                                    (hb(&prompt, model), None)
+                                };
+                                if !lean {
+                                    hargs.extend(provision.args.iter().cloned());
+                                }
+                                let hspec = SubprocessSpec {
+                                    program: self.program.clone(),
+                                    args: hargs,
+                                    workspace: request.workspace.clone(),
+                                    stdin: hstdin,
+                                    timeout: Some(timeout),
+                                    env: provision.env.clone(),
+                                    result_file: None,
+                                };
+                                subprocess::run(hspec, &events, &cancel, mapper).await
+                            }
+                        }
                     }
                 }
             } else {
                 subprocess::run(spec, &events, &cancel, mapper).await
             };
+            drop(visible_slot);
             match run_result {
                 Ok(out) => {
                     let timed_out = matches!(out.status, ExecStatus::TimedOut);
-                    if timed_out && attempt < MAX_ATTEMPTS && !cancel.is_cancelled() {
+                    // Never re-open another Terminal window on timeout — that is
+                    // what produced the double grok/claude Stage spam.
+                    if timed_out
+                        && !visible
+                        && attempt < MAX_ATTEMPTS
+                        && !cancel.is_cancelled()
+                    {
                         emit(&events, WorkerEvent::Message(format!(
                             "{} timed out — retrying ({attempt}/{MAX_ATTEMPTS})",
                             self.program
@@ -301,9 +569,9 @@ impl Worker for HarnessAdapter {
         if let Some(path) = &provision.cleanup {
             let _ = std::fs::remove_file(path);
         }
-        // The lean invocation yields plain text (the answer / JSON DAG, possibly
-        // fenced); take full stdout and let the caller's tolerant parser read it.
-        let parsed = if lean {
+        // Lean planner + interactive Stage deliverables are plain text / JSON
+        // written to a result file (not NDJSON streams). Take stdout as-is.
+        let parsed = if lean || request.constraints.visible_stage {
             ParsedHarness::raw(&out.stdout)
         } else {
             (self.parse)(&out)
@@ -526,6 +794,7 @@ mod tests {
             program: "test".into(),
             build_args: |_, _| vec![],
             plan_args: None,
+            interactive_args: None,
             parse: parse_raw,
             line_mapper: crate::transport::subprocess::raw_lines,
             prompt_via_stdin: false,
