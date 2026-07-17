@@ -220,6 +220,13 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         };
         spans.push(Span::styled(summary, Style::default().fg(Color::DarkGray)));
     }
+    if app.stage.is_active() {
+        let n = app.stage.sessions.len();
+        spans.push(Span::styled(
+            format!("  · stage×{n}"),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
     if app.run_tokens > 0 {
         spans.push(Span::styled(
             format!(
@@ -344,6 +351,16 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
             return;
         }
     }
+    // Harness Stage: multi-pane harness transcripts while a run is active
+    // (and briefly after, until /clear). Prefer Stage over the compact agents flow.
+    if app.picker.is_none()
+        && app.completion.is_none()
+        && app.stage.is_active()
+        && (app.running || !app.stage.sessions.is_empty())
+    {
+        draw_stage(f, area, app);
+        return;
+    }
     if app.picker.is_none() && app.completion.is_none() && app.running && !app.nodes.is_empty() {
         let spin = SPINNER[app.spinner % SPINNER.len()];
         // Pre-wrap the focused stream (answer preferred, else thinking),
@@ -443,6 +460,119 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
             .map(|l| Line::from(Span::styled(format!(" {l}"), style)))
             .collect();
         f.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+/// Draw the Harness Stage grid: up to 3 panes (one per session), focused pane
+/// highlighted. Layout is horizontal when width allows, else stacked vertical.
+fn draw_stage(f: &mut Frame, area: Rect, app: &App) {
+    use super::stage::StageStatus;
+
+    let n = app.stage.sessions.len().min(3);
+    if n == 0 {
+        return;
+    }
+    // Prefer the focused session and neighbors so >3 sessions stay usable.
+    let focus = app.stage.focus.min(app.stage.sessions.len() - 1);
+    let mut indices: Vec<usize> = Vec::new();
+    if app.stage.sessions.len() <= 3 {
+        indices.extend(0..app.stage.sessions.len());
+    } else {
+        // Window of 3 around focus
+        let start = focus.saturating_sub(1).min(app.stage.sessions.len() - 3);
+        indices.extend(start..start + 3);
+    }
+
+    let horizontal = area.width >= 90 && indices.len() > 1;
+    let panes: Vec<Rect> = if horizontal {
+        let constraints: Vec<Constraint> = indices.iter().map(|_| Constraint::Ratio(1, indices.len() as u32)).collect();
+        Layout::horizontal(constraints).split(area).to_vec()
+    } else {
+        let constraints: Vec<Constraint> = indices.iter().map(|_| Constraint::Ratio(1, indices.len() as u32)).collect();
+        Layout::vertical(constraints).split(area).to_vec()
+    };
+
+    for (slot, &si) in indices.iter().enumerate() {
+        let Some(session) = app.stage.sessions.get(si) else {
+            continue;
+        };
+        let pane = panes.get(slot).copied().unwrap_or(area);
+        let focused = si == focus;
+        let border = if focused {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let status_color = match session.status {
+            StageStatus::Running => Color::Cyan,
+            StageStatus::Succeeded => Color::Green,
+            StageStatus::Failed => Color::Red,
+            StageStatus::Cancelled => Color::Yellow,
+        };
+        let title = format!(
+            " {} · {} ",
+            session.title(),
+            session.status.label()
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if focused {
+                BorderType::Thick
+            } else {
+                BorderType::Plain
+            })
+            .border_style(border)
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(if focused {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+        let inner = block.inner(pane);
+        f.render_widget(block, pane);
+
+        let body_h = inner.height as usize;
+        let window = session.window(body_h.max(1));
+        let lines: Vec<Line> = if window.is_empty() {
+            vec![Line::from(Span::styled(
+                if session.status == StageStatus::Running {
+                    " watching harness… (output streams here when the agent writes)"
+                } else {
+                    " (no output captured)"
+                },
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ))]
+        } else {
+            window
+                .iter()
+                .map(|l| {
+                    let trunc = if l.chars().count() > (inner.width as usize).saturating_sub(1) {
+                        let take = (inner.width as usize).saturating_sub(2);
+                        format!("{}…", l.chars().take(take).collect::<String>())
+                    } else {
+                        l.clone()
+                    };
+                    // Highlight section headers and success markers in the Stage log.
+                    let style = if trunc.starts_with("──") {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else if trunc.starts_with('✓') || trunc.starts_with("▶ ") {
+                        Style::default().fg(Color::Green)
+                    } else if trunc.starts_with("opening ") {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    Line::from(Span::styled(format!(" {trunc}"), style))
+                })
+                .collect()
+        };
+        f.render_widget(Paragraph::new(lines), inner);
     }
 }
 
