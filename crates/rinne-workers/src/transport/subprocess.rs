@@ -37,6 +37,10 @@ pub struct SubprocessSpec {
     /// environment. Carries MCP provisioning tokens so they reach a harness's
     /// servers without ever being written to a config file (`MCP_SKILLS.md` §6).
     pub env: Vec<(String, String)>,
+    /// When set (Stage interactive TUI), Rinne treats a stable write to this
+    /// path as the harness deliverable — so we can open the real product UI
+    /// without relying on tee'd stdout (which destroys the TUI).
+    pub result_file: Option<PathBuf>,
 }
 
 /// The captured result of a subprocess run.
