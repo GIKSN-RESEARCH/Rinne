@@ -155,25 +155,57 @@ impl Conductor {
         self.plan(input).await
     }
 
-    /// One planning attempt: API backend at `model`, then harness fallbacks.
+    /// One planning attempt: API backend at `model` (unless `backend = harness`),
+    /// then harness fallbacks in preference order (claude auth fail → next).
     async fn run_once(&self, system: &str, user: &str, model: &str) -> Result<Plan> {
         let mut last_err: Option<RinneError> = None;
 
-        if let Ok(Some(api)) = resolve_openai_model(&self.config, model) {
-            match self.try_backend(&api, system, user).await {
-                Ok(plan) => return Ok(plan),
-                Err(e) => {
-                    tracing::warn!("conductor api `{model}` failed: {e}");
-                    last_err = Some(e);
+        // When the user configures conductor backend = harness, never burn an
+        // API key planner first — go straight to the harness chain (grok/… ).
+        let skip_api = matches!(
+            self.config.backend,
+            rinne_config::model::ConductorBackend::Harness
+        );
+
+        if !skip_api {
+            if let Ok(Some(api)) = resolve_openai_model(&self.config, model) {
+                match self.try_backend(&api, system, user).await {
+                    Ok(plan) => return Ok(plan),
+                    Err(e) => {
+                        tracing::warn!("conductor api `{model}` failed: {e}");
+                        last_err = Some(e);
+                    }
                 }
             }
         }
 
         for backend in &self.backends {
+            self.narrate(format!(
+                "trying conductor backend `{}`…",
+                backend.name()
+            ));
             match self.try_backend(backend.as_ref(), system, user).await {
-                Ok(plan) => return Ok(plan),
+                Ok(plan) => {
+                    self.narrate(format!("conductor `{}` produced a plan", backend.name()));
+                    return Ok(plan);
+                }
                 Err(e) => {
-                    tracing::warn!("conductor backend `{}` failed: {e}", backend.name());
+                    // Auth / login failures: fall through immediately (do not stall).
+                    let msg = e.to_string();
+                    if is_harness_auth_failure(&msg) {
+                        self.narrate(format!(
+                            "conductor `{}` not usable ({}); trying next backend",
+                            backend.name(),
+                            short_err(&msg)
+                        ));
+                    } else {
+                        tracing::warn!("conductor backend `{}` failed: {e}", backend.name());
+                        self.narrate(format!(
+                            "conductor `{}` failed; trying next — {}",
+                            backend.name(),
+                            short_err(&msg)
+                        ));
+                    }
                     last_err = Some(e);
                 }
             }
@@ -221,6 +253,26 @@ impl Conductor {
 
 fn is_parse_failure(err: &RinneError) -> bool {
     matches!(err, RinneError::Plan(_))
+}
+
+fn is_harness_auth_failure(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("not logged in")
+        || m.contains("please run /login")
+        || m.contains("please run login")
+        || m.contains("unauthorized")
+        || m.contains("authentication")
+        || m.contains("auth required")
+        || m.contains("not authenticated")
+}
+
+fn short_err(msg: &str) -> String {
+    let one = msg.lines().next().unwrap_or(msg).trim();
+    if one.chars().count() > 160 {
+        one.chars().take(160).collect::<String>() + "…"
+    } else {
+        one.to_string()
+    }
 }
 
 /// Normalize a freshly-parsed plan: Rinne owns budgets (via config), so a
