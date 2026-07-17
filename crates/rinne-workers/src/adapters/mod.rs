@@ -13,6 +13,7 @@ pub mod common;
 pub mod cursor;
 pub mod discover;
 pub mod grok;
+pub mod mcp_util;
 pub mod opencode;
 pub mod openai_api;
 
