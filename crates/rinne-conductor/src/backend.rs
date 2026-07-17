@@ -15,10 +15,18 @@ use tokio_util::sync::CancellationToken;
 
 use rinne_config::model::{ConductorBackend, ConductorConfig};
 use rinne_core::worker::{
-    Constraints, ContextPacket, ExecStatus, ExecuteRequest, Role, Worker,
+    Constraints, ContextPacket, EventSink, ExecStatus, ExecuteRequest, Role, Worker, WorkerEvent,
 };
 use rinne_core::{Result, RinneError};
 use rinne_workers::transport::http::{ChatMessage, ChatRequest, OpenAiClient};
+
+/// Whether Stage visibility is requested (set by CLI/GUI via env).
+fn stage_visible_from_env() -> bool {
+    matches!(
+        std::env::var("RINNE_HARNESS_STAGE_VISIBLE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
 
 /// A backend that completes a planning prompt and returns the raw model text.
 #[async_trait]
@@ -80,14 +88,29 @@ impl PlanBackend for OpenAiBackend {
 
 /// A harness worker pressed into service as the conductor — the §7 fallback when
 /// no API backend is configured ("the user's cheapest installed harness").
+///
+/// When Stage is visible, this opens the same PTY/session path as generator
+/// nodes so the planner harness is leveraged and shown on the Stage (`plan.md`).
 pub struct HarnessBackend {
     worker: Arc<dyn Worker>,
     workspace: PathBuf,
+    /// Optional sink so SessionOpened / tool events reach the Stage UI.
+    events: Option<EventSink>,
 }
 
 impl HarnessBackend {
     pub fn new(worker: Arc<dyn Worker>, workspace: PathBuf) -> Self {
-        Self { worker, workspace }
+        Self {
+            worker,
+            workspace,
+            events: None,
+        }
+    }
+
+    /// Forward harness worker events (Stage opens, messages, tools) to the UI.
+    pub fn with_events(mut self, events: EventSink) -> Self {
+        self.events = Some(events);
+        self
     }
 }
 
@@ -98,23 +121,63 @@ impl PlanBackend for HarnessBackend {
     }
 
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
+        let visible = stage_visible_from_env();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Remap SessionOpened so Stage can key the pane as `conductor` (planner).
+        let forward = self.events.clone();
+        let worker_name = self.worker.descriptor().name.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                if let Some(sink) = &forward {
+                    let ev = match ev {
+                        WorkerEvent::SessionOpened {
+                            worker,
+                            model,
+                            backend,
+                        } => WorkerEvent::SessionOpened {
+                            worker: format!("{worker} (conductor)"),
+                            model,
+                            backend,
+                        },
+                        other => other,
+                    };
+                    let _ = sink.send(ev);
+                } else if matches!(ev, WorkerEvent::SessionOpened { .. }) {
+                    tracing::info!(worker = %worker_name, "conductor harness session opened");
+                }
+            }
+        });
+        // Prefer a stronger model from the harness ladder when available.
+        let model = self
+            .worker
+            .descriptor()
+            .models
+            .last()
+            .cloned()
+            .or_else(|| self.worker.descriptor().models.first().cloned());
+        // Single-turn planner in Terminal (when Stage is on). Needs enough time
+        // for a real plan — 90s was killing grok mid-run and falling through.
+        // Auth failures still fail-fast via non-zero exit / login text below.
         let request = ExecuteRequest {
             role: Role::Planner,
             instruction: format!("{system}\n\n{user}"),
             context: ContextPacket::default(),
             workspace: self.workspace.clone(),
             constraints: Constraints {
-                timeout_secs: Some(180),
+                timeout_secs: Some(if visible { 600 } else { 300 }),
+                visible_stage: visible,
+                model,
                 ..Default::default()
             },
             tools: Vec::new(),
             mcp_servers: Vec::new(),
         };
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
         let result = self
             .worker
             .execute(request, tx, CancellationToken::new())
             .await?;
+        let _ = forwarder.await;
         if !matches!(result.status, ExecStatus::Success) {
             // Surface the worker's own output (stdout + stderr) so the failure is
             // diagnosable — "exited 1" alone hides why (auth, a rejected flag…).
@@ -122,7 +185,8 @@ impl PlanBackend for HarnessBackend {
             let snippet = tail(detail, 800);
             let hint = if snippet.is_empty() {
                 format!(
-                    "no output — check `{0}` works standalone and is logged in (run `{0} -p hi`)",
+                    "no output — check `{0}` works standalone and is logged in \
+                     (run `{0} --prompt-file /tmp/p.txt` or `{0} -p hi`)",
                     self.name()
                 )
             } else {
@@ -132,6 +196,19 @@ impl PlanBackend for HarnessBackend {
                 "harness conductor `{}` failed: {:?}\n{hint}",
                 self.name(),
                 result.status
+            )));
+        }
+        // Auth failure sometimes exits 0 with a login message — treat as failure.
+        let low = result.result.to_ascii_lowercase();
+        let transcript_low = result.transcript.to_ascii_lowercase();
+        if low.contains("not logged in")
+            || low.contains("please run /login")
+            || transcript_low.contains("not logged in")
+            || transcript_low.contains("please run /login")
+        {
+            return Err(RinneError::Conductor(format!(
+                "harness conductor `{}` not logged in — trying next backend",
+                self.name()
             )));
         }
         Ok(result.result)
