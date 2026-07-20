@@ -678,6 +678,16 @@ fn oauth_expires_at_past(oauth: &serde_json::Value) -> bool {
 }
 
 fn read_claude_credentials_raw() -> Option<String> {
+    // Opt out of credential-store reads. A freshly built binary is not in the
+    // Keychain item's ACL, so macOS prompts for a password on every rebuild —
+    // unusable in test and CI runs. Set NO_KEYCHAIN_RINNE=1 to skip.
+    //
+    // Deliberately not `RINNE_`-prefixed: figment maps every `RINNE_*` var onto
+    // a config key, so that prefix would be parsed as one and fail validation.
+    if std::env::var_os("NO_KEYCHAIN_RINNE").is_some() {
+        return None;
+    }
+
     // macOS Keychain (Claude Code's documented store on macOS).
     if cfg!(target_os = "macos") {
         if let Ok(out) = Command::new("security")
