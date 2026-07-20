@@ -57,20 +57,12 @@ xAI's grok-build (`github.com/xai-org/grok-build`, Rust + ratatui 0.29 — the s
 version Rinne pins) solved this exact problem in `crates/codegen/xai-grok-pager/src/
 views/dashboard/`: a session roster plus a "peek" fidelity pane.
 
-**Licensing — binding constraint.** grok-build is Apache-2.0; Rinne is MIT. We lift
-**design, constants, algorithms and behavioural rules** (facts and ideas, freely
-usable) and **write our own implementation**. No verbatim source is copied. Where a
-constant or algorithm is taken, the Rinne source comments cite the origin file as
-prior art without reproducing its code.
-
-Two findings that overrode earlier drafts of this design:
-
 **(a) grok-build deliberately does not use `vt100` or `tui-term`.** It renders child
-PTY output through a custom line-model VTE sink built on the `vte` crate
-(`render/terminal_output.rs`), described there as: *"Unlike a screen/grid emulator it
-keeps an unbounded, fully-styled transcript that maps onto the pager's line model."*
-It also yields a plain-text channel for copy and search. `portable-pty` is present in
-grok-build but only for ssh wrapping, tests and benchmarks — not rendering.
+PTY output through a custom line-model VTE sink built on the `vte` crate, keeping an
+unbounded styled transcript that maps onto its line model rather than emulating a
+screen grid — and yielding a plain-text channel for copy and search as a side effect.
+`portable-pty` is present in grok-build but only for ssh wrapping, tests and
+benchmarks, not rendering.
 
 This suits Rinne better than a grid emulator: it preserves the existing line/scroll
 model, needs no fixed per-session viewport, and removes the need for a
@@ -80,11 +72,46 @@ model, needs no fixed per-session viewport, and removes the need for a
 output rendered as a transcript, not as a faithful screen. This is the deliberate
 choice; see §9 for the escape hatch and §11 for the verification gate.
 
-**(b) Background sessions signal, they never steal focus.** From
-`views/dashboard/render.rs:88`: when a permission request fires on a non-focused
-agent, the dashboard *does not* open a modal — the row flips to a blinking marker and
-the user presses a key to attend to it. For a multi-harness Stage this is the single
-most important behavioural rule, and Rinne currently has no answer for it.
+**(b) Background sessions signal, they never steal focus.** When a permission request
+fires on a non-focused agent, grok-build's dashboard does *not* open a modal — the row
+flips to a blinking marker and the user presses a key to attend to it. For a
+multi-harness Stage this is the single most important behavioural rule, and Rinne
+currently has no answer for it.
+
+### 4.1 Provenance and licensing
+
+grok-build is **Apache-2.0**; Rinne is **MIT**. This design takes ideas, not code.
+
+**What was taken** — none of it copyrightable expression:
+
+- Numeric constants (rail width, breakpoints, tick divisors, caps)
+- Glyph choices (`▏` U+258F for selection; braille vs dot spinners)
+- Behavioural rules ("wave = running, frozen = blocked, dim = done";
+  "background sessions signal, never steal focus"; "Esc cascades")
+- The architectural conclusion that a line-model VTE sink beats a grid emulator for a
+  line/scroll UI — most usefully, the knowledge that they tried the alternative
+- Layout *policy* (floor for the list, fraction cap, shrink-to-content)
+
+**What was not taken:** any source, function body, doc comment, or close paraphrase.
+
+**Process rule, binding on implementation.** Implement from this document and from
+upstream crate documentation (`vte`, `ratatui`). Do **not** work with grok-build
+source open. The risk is not deliberate copying — it is structural paraphrase, where
+an open reference produces the same decomposition and ordering with renamed
+identifiers. This document exists as the intermediary precisely so that cannot happen.
+Any local clone of grok-build used for research should be deleted before
+implementation begins.
+
+**No attribution in source.** Prior-art discussion belongs here, in the design
+document, where it is honest context for a reader. Rinne source comments should
+describe what the code does, not cite grok-build — a citation trail implies derivation
+while providing none of the compliance that actual derivation would require.
+
+Reviewed 2026-07-21: assessed as low risk and not requiring legal review, on the basis
+that Apache-2.0 is permissive (worst case is an attribution obligation, not
+relicensing), that Rinne is public and MIT, and that what was taken is factual rather
+than expressive. **Revisit if Rinne ever vendors, bundles or redistributes grok-build
+code** — that is a materially different question from reading it for design research.
 
 ---
 
@@ -172,8 +199,8 @@ with a precise signal; the heuristic is the floor, not the ceiling.
 
 New pure module `crates/rinne-cli/src/tui/stage_layout.rs`. Geometry is computed once
 per frame into a struct consumed by both rendering and (future) hit-testing so the two
-cannot drift — grok-build applies this discipline to its timeline rail
-(`views/timeline.rs:5`) and it is the reason its geometry stayed correct.
+cannot drift. Recomputing geometry separately in each path is how rail UIs develop
+click targets that no longer match what is drawn.
 
 ```rust
 pub struct StageLayout {
@@ -286,8 +313,7 @@ Fallback `|` where the terminal lacks the glyph.
 **Status glyphs:** `◆` filled (needs input / attention), `◇` hollow (idle), `✔`
 success, `✗` failure. Rail and header use the same vocabulary.
 
-**Three accent states in one column** — the core idiom, from grok-build
-(`entry_renderer.rs:802`):
+**Three accent states in one column** — the core idiom:
 
 | State | Rendering | Reads as |
 |---|---|---|
@@ -321,8 +347,9 @@ can read the rail at a glance.
 | `PgUp` / `PgDn` | Scroll selected session's transcript |
 | `Esc` | Cascade: unzoom, then clear selection, then exit Stage focus |
 
-`Esc` as a cascade rather than a single action follows grok-build
-(`actions/defaults.rs:1061`) and avoids the common failure of one key doing too much.
+`Esc` as a cascade rather than a single action avoids the common failure of one key
+doing too much — the user should never lose a zoomed view when they meant to clear a
+selection.
 
 ### 5.6 Performance
 
@@ -338,7 +365,8 @@ pub struct Presenter {
 }
 ```
 
-Three stacked mechanisms, per grok-build's `Presenter` (`app/event_loop.rs:314`):
+Three stacked mechanisms, each necessary — dropping any one reintroduces a distinct
+failure (redundant frames, tty back-pressure stalls, unbounded redraw under streaming):
 
 1. **Dirty coalescing** — N state changes collapse into one draw.
 2. **In-flight gating** — never issue a frame while the previous is still queued.
