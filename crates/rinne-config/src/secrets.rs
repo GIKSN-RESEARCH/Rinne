@@ -15,6 +15,13 @@ const SERVICE: &str = "rinne";
 /// Read a provider's key pool from the keychain (a JSON array; tolerates a bare
 /// legacy single-key string).
 fn read_keys(provider: &str) -> Vec<String> {
+    // See `limits::read_claude_credentials_raw` — a freshly built binary is not
+    // in the Keychain item's ACL, so macOS blocks on a password prompt. Skipping
+    // the read yields "no key", which every caller already handles.
+    if std::env::var_os("NO_KEYCHAIN_RINNE").is_some() {
+        return Vec::new();
+    }
+
     let entry = match keyring::Entry::new(SERVICE, provider) {
         Ok(e) => e,
         Err(e) => {
