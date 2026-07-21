@@ -14,7 +14,7 @@ use rinne_core::worker::{
 };
 use rinne_core::Result;
 
-use super::common::{HarnessAdapter, ParsedHarness, Provision};
+use super::common::{approvals_are_auto, HarnessAdapter, ParsedHarness, Provision};
 use super::mcp_util;
 use crate::transport::subprocess::SubprocessOutput;
 
@@ -53,6 +53,13 @@ fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
     if let Some(m) = model {
         args.push("--model".into());
         args.push(m.into());
+    }
+    // Nobody is watching a Stage session, so a permission prompt just burns the
+    // node's whole timeout. `auto` keeps Claude Code's own judgement in play
+    // rather than bypassing checks outright.
+    if approvals_are_auto() {
+        args.push("--permission-mode".into());
+        args.push("auto".into());
     }
     // Positional prompt starts the interactive session with this user message.
     args.push(prompt.into());
@@ -298,6 +305,35 @@ pub(crate) fn last_json_object(s: &str) -> Option<serde_json::Value> {
 mod tests {
     use super::*;
     use rinne_core::worker::McpTransportKind;
+
+    #[test]
+    fn interactive_session_runs_in_auto_permission_mode() {
+        // A Stage session nobody is watching stops on Claude Code's permission
+        // prompt and burns its whole timeout, so approvals must be passed.
+        let _guard = super::super::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+        let args = interactive_args("do the task", Some("haiku"));
+        let i = args
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .unwrap_or_else(|| panic!("no --permission-mode in {args:?}"));
+        assert_eq!(args[i + 1], "auto", "{args:?}");
+        // The prompt must stay the trailing positional argument.
+        assert_eq!(args.last().unwrap(), "do the task", "{args:?}");
+    }
+
+    #[test]
+    fn human_approvals_leave_the_permission_prompt_alone() {
+        let _guard = super::super::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("RINNE_HARNESS_APPROVALS", "human");
+        let args = interactive_args("do the task", None);
+        assert!(!args.iter().any(|a| a == "--permission-mode"), "{args:?}");
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+    }
 
     fn out(stdout: &str) -> SubprocessOutput {
         SubprocessOutput {

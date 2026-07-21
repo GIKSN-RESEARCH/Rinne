@@ -14,7 +14,7 @@ use rinne_conductor::{
     load_user_exemplars, resolve_openai, Conductor, ConductorInput, HarnessBackend, PlanBackend,
 };
 // EventSink used when wiring harness conductor → Stage.
-use rinne_config::model::{ConductorBackend, ConductorConfig, PreferFamily};
+use rinne_config::model::{ConductorBackend, ConductorConfig, HarnessApprovals, PreferFamily};
 use rinne_config::probe::WorkerFamily;
 use rinne_config::Config;
 use rinne_core::worker::Capability;
@@ -633,10 +633,19 @@ pub fn apply_harness_stage_env(config: &Config, interactive: bool) {
         "RINNE_HARNESS_STAGE_MAX",
         config.harness_stage.max_sessions.to_string(),
     );
+    // Read by the adapters' interactive argv builders — without this the
+    // approvals setting is inert and every visible session stops on its
+    // harness's permission prompt.
+    let approvals = match config.harness_stage.approvals {
+        HarnessApprovals::Auto => "auto",
+        HarnessApprovals::Human => "human",
+    };
+    std::env::set_var("RINNE_HARNESS_APPROVALS", approvals);
     tracing::info!(
         mode = mode.as_str(),
         visible,
         interactive,
+        approvals,
         max = config.harness_stage.max_sessions,
         "harness stage"
     );

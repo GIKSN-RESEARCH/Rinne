@@ -61,6 +61,24 @@ impl ParsedHarness {
 /// optional model selection.
 pub type ArgsBuilder = fn(prompt: &str, model: Option<&str>) -> Vec<String>;
 
+/// Serializes tests that mutate process-global harness env vars. Shared across
+/// adapter modules — `cargo test` runs them on one thread pool, so a per-module
+/// lock would not actually exclude them from each other.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Whether harness sessions should pass their non-interactive approval flags.
+///
+/// Set from `[harness_stage].approvals` via `RINNE_HARNESS_APPROVALS`
+/// (`crates/rinne-cli/src/runner.rs::apply_harness_stage_env`). Defaults to
+/// auto, matching the config default: a Stage session nobody is watching
+/// blocks forever on a permission prompt otherwise.
+pub fn approvals_are_auto() -> bool {
+    std::env::var("RINNE_HARNESS_APPROVALS")
+        .map(|v| !v.eq_ignore_ascii_case("human"))
+        .unwrap_or(true)
+}
+
 /// Default interactive argv: model flag (if any) + prompt as a positional arg.
 /// Used when an adapter has no custom `interactive_args` (opens product TUI).
 pub fn default_interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
@@ -731,6 +749,21 @@ mod tests {
     use super::*;
     use rinne_core::worker::{Constraints, ContextPacket};
     use std::path::PathBuf;
+
+    #[test]
+    fn approvals_default_to_auto_and_human_opts_out() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+        assert!(
+            approvals_are_auto(),
+            "[harness_stage].approvals defaults to auto, so an unset env must match"
+        );
+        std::env::set_var("RINNE_HARNESS_APPROVALS", "human");
+        assert!(!approvals_are_auto());
+        std::env::set_var("RINNE_HARNESS_APPROVALS", "auto");
+        assert!(approvals_are_auto());
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+    }
 
     fn req(skill_text: &str) -> ExecuteRequest {
         ExecuteRequest {

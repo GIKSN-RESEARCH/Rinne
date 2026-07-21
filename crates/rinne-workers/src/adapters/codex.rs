@@ -14,7 +14,7 @@ use rinne_core::worker::{
 };
 use rinne_core::Result;
 
-use super::common::{HarnessAdapter, ParsedHarness, Provision};
+use super::common::{approvals_are_auto, HarnessAdapter, ParsedHarness, Provision};
 use super::mcp_util;
 use crate::transport::subprocess::SubprocessOutput;
 
@@ -97,6 +97,12 @@ fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
     if let Some(m) = model {
         args.push("--model".into());
         args.push(m.into());
+    }
+    // Nobody is watching a Stage session, so an approval prompt burns the
+    // node's whole timeout. Matches `--full-auto` on the headless `exec` path.
+    if approvals_are_auto() {
+        args.push("--ask-for-approval".into());
+        args.push("never".into());
     }
     args.push(prompt.into());
     args
