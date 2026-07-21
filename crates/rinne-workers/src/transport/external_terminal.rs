@@ -34,6 +34,9 @@ use rinne_core::{Result, RinneError};
 use super::subprocess::{LineMapper, SubprocessOutput, SubprocessSpec};
 
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+/// Prefix the launcher writes its own status lines with, so they can be told
+/// apart from harness output in the shared log (see `is_terminal_noise`).
+const LAUNCHER_MARKER: &str = "rinne-launcher:";
 const POLL: Duration = Duration::from_millis(100);
 /// How long a result file must stay the same size before we accept it.
 const RESULT_STABLE: Duration = Duration::from_millis(1200);
@@ -266,16 +269,13 @@ pub async fn run_with_mode(
         .and_then(|s| s.trim().parse::<i32>().ok());
 
     let status = terminal_status.unwrap_or_else(|| {
-        if got_result_file && !captured.trim().is_empty() {
-            ExecStatus::Success
-        } else {
-            match exit_code {
-                Some(0) => ExecStatus::Success,
-                Some(c) => ExecStatus::Failed(format!("exited {c}")),
-                None if cancel.is_cancelled() => ExecStatus::Cancelled,
-                None => ExecStatus::Failed("harness terminal closed without exit code".into()),
-            }
-        }
+        resolve_status(
+            spec.result_file.is_some(),
+            got_result_file,
+            captured.trim().is_empty(),
+            exit_code,
+            cancel.is_cancelled(),
+        )
     });
 
     // Final guarantee: multi-strategy close with retries (never leave orphans).
@@ -533,7 +533,7 @@ fn write_launcher(
     script.push_str("  set_stage_title\n");
     script.push_str(&format!("  echo \"$ec\" > {exit_q}\n"));
     script.push_str(&format!(
-        "  echo \"rinne-launcher: harness exit $ec\" >> {log_q} 2>/dev/null || true\n"
+        "  echo \"{LAUNCHER_MARKER} harness exit $ec\" >> {log_q} 2>/dev/null || true\n"
     ));
     // Multiple close attempts from inside the session (most reliable).
     script.push_str("  close_window\n");
@@ -1177,10 +1177,48 @@ fn flush_line(
     }
 }
 
+/// Decide a session's terminal status from what the launcher left behind.
+///
+/// `wanted_result` means the kickoff told the harness to write its deliverable
+/// to a result file, so that file — not the exit code — is the real signal.
+fn resolve_status(
+    wanted_result: bool,
+    got_result_file: bool,
+    captured_empty: bool,
+    exit_code: Option<i32>,
+    cancelled: bool,
+) -> ExecStatus {
+    if got_result_file && !captured_empty {
+        return ExecStatus::Success;
+    }
+    match exit_code {
+        Some(c) if c != 0 => return ExecStatus::Failed(format!("exited {c}")),
+        None if cancelled => return ExecStatus::Cancelled,
+        _ => {}
+    }
+    // Exit 0 but no deliverable: the user closed the window, or the harness
+    // never did the work. Trusting the exit code here silently drops the node's
+    // output and marks it succeeded.
+    if wanted_result {
+        return ExecStatus::Failed(
+            "harness produced no deliverable — result file was never written".into(),
+        );
+    }
+    match exit_code {
+        Some(_) => ExecStatus::Success,
+        None => ExecStatus::Failed("harness terminal closed without exit code".into()),
+    }
+}
+
 fn is_terminal_noise(line: &str) -> bool {
     let t = line.trim();
     if t.is_empty() {
         return false;
+    }
+    // Rinne's own launcher bookkeeping shares the log the Stage tails. It is
+    // not harness output and must never stand in for the deliverable.
+    if t.starts_with(LAUNCHER_MARKER) {
+        return true;
     }
     // SGR mouse reports: digits/semicolons ending in M/m, often concatenated.
     if t.len() >= 4
@@ -1220,6 +1258,49 @@ fn unique_suffix() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_deliverable_fails_even_when_the_harness_exits_clean() {
+        // An interactive kickoff tells the harness to write its deliverable to
+        // a result file. Exiting 0 without one means the user closed the window
+        // or the harness never did the work — the node contributed nothing and
+        // must not be reported as succeeded.
+        let status = resolve_status(true, false, true, Some(0), false);
+        assert!(
+            matches!(status, ExecStatus::Failed(_)),
+            "expected Failed, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn a_produced_deliverable_succeeds() {
+        assert!(matches!(
+            resolve_status(true, true, false, Some(0), false),
+            ExecStatus::Success
+        ));
+    }
+
+    #[test]
+    fn capture_sessions_still_succeed_on_a_clean_exit() {
+        // No result file was ever demanded, so the exit code is the only signal.
+        assert!(matches!(
+            resolve_status(false, false, false, Some(0), false),
+            ExecStatus::Success
+        ));
+    }
+
+    #[test]
+    fn launcher_bookkeeping_is_not_harness_output() {
+        // The launcher writes its own exit marker into the same log the Stage
+        // tails, so without filtering it is shown as harness output and can end
+        // up standing in for the deliverable.
+        assert!(is_terminal_noise("rinne-launcher: harness exit 0"));
+        assert!(is_terminal_noise("  rinne-launcher: harness exit 143  "));
+        assert!(!is_terminal_noise("editing src/main.rs"));
+        assert!(!is_terminal_noise(
+            "the launcher script is described in rinne-launcher docs"
+        ));
+    }
 
     #[test]
     fn sh_quote_handles_spaces_and_quotes() {
