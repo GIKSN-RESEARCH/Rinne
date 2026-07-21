@@ -325,8 +325,11 @@ pub async fn oneshot_json(goal: &str, no_graph: bool) -> Result<serde_json::Valu
         build_conductor(&config, &registry, cwd.clone())?.with_context(template.clone()),
     );
 
+    // Read before save_plan overwrites the prior plan, so a follow-up prompt
+    // ("do it for me") is planned against what the last run actually produced.
     let input = ConductorInput {
         goal: goal.to_string(),
+        digest: last_run_digest(&bb),
         ..template
     };
     let plan = conductor.plan(&input).await?;
@@ -457,6 +460,7 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
     let input = ConductorInput {
         goal: goal.to_string(),
         structure,
+        digest: last_run_digest(blackboard),
         ..template
     };
 
@@ -502,6 +506,52 @@ fn prefer_label(p: PreferFamily) -> &'static str {
 /// the worker pool, the tool/skill catalog, the family preference, and budgets.
 /// Captured on the conductor via `with_context` so replans stay pool- and
 /// catalog-aware, and spread into each `plan()` call's input.
+/// How much of the previous deliverable is worth showing the planner. Enough to
+/// resolve "do it for me"; not so much that planning re-reads a whole report.
+const DIGEST_MAX_CHARS: usize = 1_200;
+
+/// A digest of the previous run, so a follow-up prompt is not planned in a
+/// vacuum. Without it "do it for me" reached the planner as that bare string
+/// and became a "too vague, ask the user" node.
+///
+/// Returns `None` when there is nothing useful to carry — a first prompt in a
+/// fresh workspace plans on the goal alone, as before.
+fn previous_run_digest(prev_goal: &str, deliverable: Option<&str>) -> Option<String> {
+    let goal = prev_goal.trim();
+    if goal.is_empty() {
+        return None;
+    }
+    let mut s = format!("Previous request in this session: {goal}");
+    if let Some(text) = deliverable.map(str::trim).filter(|t| !t.is_empty()) {
+        s.push_str("\n\nWhat it produced:\n");
+        if text.chars().count() > DIGEST_MAX_CHARS {
+            let head: String = text.chars().take(DIGEST_MAX_CHARS).collect();
+            s.push_str(&head);
+            s.push('…');
+        } else {
+            s.push_str(text);
+        }
+    }
+    s.push_str(
+        "\n\nIf the new request refers back to this (\"do it\", \"now fix it\", \"continue\"), \
+         plan it as the follow-up work rather than asking the user to restate the task.",
+    );
+    Some(s)
+}
+
+/// Read the previous run's goal and deliverable from the blackboard, if any.
+/// Must be called before the new plan overwrites `plan.json`.
+fn last_run_digest(bb: &Blackboard) -> Option<String> {
+    let plan = bb.load_plan().ok()?;
+    let deliverable = plan
+        .nodes
+        .iter()
+        .rev()
+        .flat_map(|n| n.outputs.iter())
+        .find_map(|out| bb.read_artifact(out).ok());
+    previous_run_digest(&plan.goal, deliverable.as_deref())
+}
+
 pub fn plan_template(
     config: &Config,
     registry: &WorkerRegistry,
@@ -1009,6 +1059,39 @@ fn print_report(report: &RunReport) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_followup_prompt_carries_the_previous_goal_and_deliverable() {
+        // "do it for me" reached the planner with no memory of what "it" was,
+        // so the plan became "Execute user's task" / "too vague".
+        let d = previous_run_digest(
+            "separate formatting from this PR",
+            Some("Commit 1178089 is a pure rustfmt commit; the rest are functional."),
+        )
+        .expect("a completed previous run must produce a digest");
+        assert!(d.contains("separate formatting from this PR"), "{d}");
+        assert!(d.contains("1178089"), "{d}");
+    }
+
+    #[test]
+    fn a_long_deliverable_is_truncated() {
+        let long = "x".repeat(DIGEST_MAX_CHARS * 3);
+        let d = previous_run_digest("g", Some(&long)).unwrap();
+        assert!(
+            d.len() < DIGEST_MAX_CHARS * 2,
+            "digest not bounded: {}",
+            d.len()
+        );
+        assert!(d.contains('…'), "truncation must be visible: {d}");
+    }
+
+    #[test]
+    fn no_previous_goal_means_no_digest() {
+        assert!(previous_run_digest("", Some("x")).is_none());
+        assert!(previous_run_digest("   ", None).is_none());
+    }
+
     use super::*;
     use rinne_core::dag::EvaluatorKind;
     use rinne_core::HumanSession;
