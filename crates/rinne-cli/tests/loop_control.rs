@@ -832,3 +832,59 @@ async fn evaluator_kind_override_parks_as_human() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// Steering a `checkpoint: before` gate must release it.
+///
+/// Regression: `Steer` set the node back to Pending but never wrote the gate's
+/// `ckpt_ok:` meta, which the gate re-checks on the next pass — so the node
+/// parked again, forever. A plan whose node asks the user a question was then
+/// unrecoverable: answering it (steer) could not release the gate, and the only
+/// escape (`/approve`) just ran the node that asks the question.
+#[tokio::test]
+async fn steering_a_before_checkpoint_releases_the_gate() {
+    let ws = temp_ws("ckpt-steer");
+    let bb = Blackboard::open(&ws).unwrap();
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "goal": "do it for me",
+        "nodes": [
+            {"id":"n1","role":"generator","instruction":"ask the user what they meant",
+             "needs":["code-edit"],"checkpoint":"before"}
+        ]
+    }))
+    .unwrap();
+    bb.save_plan(&plan).unwrap();
+
+    let mut reg = WorkerRegistry::new();
+    reg.register(Arc::new(MockWorker::success("gen", "done")) as Arc<dyn Worker>);
+
+    let mut engine = Engine::new(&bb, plan.clone(), &reg, opts(3));
+    let first = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
+    assert!(matches!(first.stop_reason, StopReason::NeedsHuman { .. }));
+
+    // The user answers the question instead of blindly approving.
+    let mut engine2 = Engine::new(&bb, plan, &reg, opts(3));
+    let second = engine2
+        .run(
+            CancellationToken::new(),
+            None,
+            Some(ResumeInput {
+                node: None,
+                decision: HumanDecision::Steer(
+                    "separate the rustfmt commit into its own PR".into(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !matches!(second.stop_reason, StopReason::NeedsHuman { .. }),
+        "steering re-parked at the same gate instead of releasing it: {:?}",
+        second.stop_reason
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

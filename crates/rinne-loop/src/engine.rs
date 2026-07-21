@@ -960,6 +960,13 @@ impl<'a> Engine<'a> {
                     ))?;
                     return Ok(None);
                 }
+                // Answering a checkpoint's question is consent to proceed. The
+                // gate re-checks this meta on the next pass, so without it the
+                // node parks again and steering can never release the gate —
+                // leaving a "tell me what you meant" node unanswerable.
+                if kind == "checkpoint" {
+                    state.set_meta(&ckpt_key(&parked), "ok")?;
+                }
                 // The user's words become the critique that flows into the loop.
                 self.blackboard.write_artifact("eval-human.md", &text)?;
                 tracker.critiques.insert(target.clone(), text);
