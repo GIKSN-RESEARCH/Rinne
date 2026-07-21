@@ -766,6 +766,32 @@ end tell"#,
     }
 }
 
+/// True if `bin` is found on `PATH` (honours `PATHEXT` on Windows).
+/// Used by non-macOS terminal selection; compiled everywhere so unit tests cover it.
+fn which(bin: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_string())
+            .split(';')
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &exts {
+            let candidate = dir.join(format!("{bin}{ext}"));
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(not(target_os = "macos"))]
 fn run_detached(program: &str, args: &[&str]) -> Result<()> {
     StdCommand::new(program)
@@ -1464,6 +1490,16 @@ mod tests {
         assert_eq!(parse_pgrep("\n  \nnot-a-pid\n7\n"), vec![7]);
         // A zero or negative pid would signal a process group; never emit one.
         assert_eq!(parse_pgrep("0\n-1\n9"), vec![9]);
+    }
+
+    #[test]
+    fn which_finds_a_real_binary_and_rejects_garbage() {
+        // `sh` is on PATH on every Unix CI image; Windows release jobs use PATHEXT.
+        #[cfg(unix)]
+        assert!(which("sh"), "sh should be on PATH");
+        #[cfg(windows)]
+        assert!(which("cmd"), "cmd should be on PATH");
+        assert!(!which("rinne-definitely-not-a-binary-xyzzy"));
     }
 
     #[test]
