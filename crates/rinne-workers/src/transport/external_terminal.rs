@@ -663,7 +663,8 @@ fn open_system_terminal(
 
     #[cfg(target_os = "macos")]
     {
-        if prefer == "iterm" || prefer == "iterm2" || which("iTerm") || app_exists("iTerm") {
+        let iterm_installed = which("iTerm") || app_exists("iTerm");
+        if choose_macos_terminal(&prefer, iterm_installed) == MacTerminal::ITerm {
             return open_iterm(&script, &cwd, stage_tag, win_path);
         }
         // Prefer osascript so we can capture the window id for forced close.
@@ -1213,6 +1214,30 @@ fn flush_line(
     }
 }
 
+/// Which macOS terminal app hosts a Stage session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacTerminal {
+    /// Terminal.app — the system terminal, and the fallback for anything unknown.
+    Apple,
+    ITerm,
+}
+
+/// Pick the terminal app for a Stage session.
+///
+/// `prefer` comes from `RINNE_EXTERNAL_TERMINAL`. An explicit value always
+/// wins: merely having iTerm installed must not override the user asking for
+/// Terminal.app, or the escape hatch is unusable on machines with both.
+fn choose_macos_terminal(prefer: &str, iterm_installed: bool) -> MacTerminal {
+    match prefer.trim().to_ascii_lowercase().as_str() {
+        "iterm" | "iterm2" => MacTerminal::ITerm,
+        "terminal" | "terminal.app" | "apple" => MacTerminal::Apple,
+        // No preference: keep using iTerm when it is present, since that is
+        // usually the terminal such a user actually works in.
+        "" if iterm_installed => MacTerminal::ITerm,
+        _ => MacTerminal::Apple,
+    }
+}
+
 /// Direct children of `pid`, as reported by `pgrep -P`. Empty on any failure —
 /// callers still signal the launcher itself, so a missing `pgrep` degrades to
 /// the previous behaviour rather than breaking teardown.
@@ -1366,6 +1391,30 @@ mod tests {
             "a child must be signalled before its parent"
         );
         assert_eq!(got.len(), 3, "{got:?}");
+    }
+
+    #[test]
+    fn an_explicit_terminal_preference_beats_an_installed_iterm() {
+        // Having iTerm installed must not override an explicit choice, or the
+        // RINNE_EXTERNAL_TERMINAL escape hatch cannot select Terminal.app.
+        assert_eq!(choose_macos_terminal("terminal", true), MacTerminal::Apple);
+        assert_eq!(
+            choose_macos_terminal("terminal.app", true),
+            MacTerminal::Apple
+        );
+        assert_eq!(choose_macos_terminal("iterm", true), MacTerminal::ITerm);
+        assert_eq!(choose_macos_terminal("iterm2", false), MacTerminal::ITerm);
+    }
+
+    #[test]
+    fn with_no_preference_iterm_is_used_only_when_installed() {
+        assert_eq!(choose_macos_terminal("", true), MacTerminal::ITerm);
+        assert_eq!(choose_macos_terminal("", false), MacTerminal::Apple);
+    }
+
+    #[test]
+    fn an_unrecognised_preference_falls_back_to_terminal_app() {
+        assert_eq!(choose_macos_terminal("wezterm", true), MacTerminal::Apple);
     }
 
     #[test]
