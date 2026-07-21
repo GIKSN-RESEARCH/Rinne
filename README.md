@@ -4,7 +4,7 @@
 
 ![Rinne driving a cross-harness refactor: the conductor plans a generator→evaluator DAG, claude-code refactors, codex verifies and loops back with a critique until every test is green.](assets/rinne-demo.gif)
 
-## Crates Version - 0.1.8
+## Crates Version - 0.1.9
 
 ## Install
 
@@ -313,7 +313,7 @@ release, verifies its `.sha256`, and installs `rinne` to `~/.local/bin`. Re-run
 to upgrade. Overrides via env var:
 
 - `RINNE_INSTALL_DIR` — install location (default `~/.local/bin`)
-- `RINNE_VERSION` — pin a specific tag, e.g. `v0.1.8` (default: latest)
+- `RINNE_VERSION` — pin a specific tag, e.g. `v0.1.9` (default: latest)
 
 Windows is not covered by the script — use the prebuilt `.zip` below or build
 from source. Linux arm64 has no prebuilt binary yet; build from source or
