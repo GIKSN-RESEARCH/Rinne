@@ -42,6 +42,9 @@ const POLL: Duration = Duration::from_millis(100);
 const RESULT_STABLE: Duration = Duration::from_millis(1200);
 /// After SIGTERM, wait this long for a clean EXIT trap before SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(4);
+/// How often the launcher's watchdog checks that Rinne is still alive. Bounds
+/// how long a harness can outlive a hard-killed Rinne.
+const WATCHDOG_POLL_SECS: u64 = 2;
 
 /// How the launcher should treat the child process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,6 +532,10 @@ fn write_launcher(
 
     script.push_str("on_exit() {\n");
     script.push_str("  ec=$?\n");
+    // Started later; `set -u` means it must be referenced defensively.
+    script.push_str(
+        "  [ -n \"${RINNE_WATCHDOG:-}\" ] && kill \"$RINNE_WATCHDOG\" 2>/dev/null || true\n",
+    );
     script.push_str("  reset_tty\n");
     script.push_str("  set_stage_title\n");
     script.push_str(&format!("  echo \"$ec\" > {exit_q}\n"));
@@ -545,6 +552,23 @@ fn write_launcher(
     script.push_str("trap 'exit 130' INT\n");
 
     script.push_str(&format!("echo $$ > {pid_q}\n"));
+
+    // Parent-death watchdog. Rinne can exit without running any cleanup (panic,
+    // SIGKILL, closed laptop), which used to leave the harness running against
+    // the user's subscription with the Terminal window still open. Poll the
+    // Rinne pid and, once it is gone, signal only *children* — killing this
+    // shell directly would skip `on_exit` and leave mouse tracking enabled.
+    script.push_str(&format!(
+        "RINNE_PID={}\n\
+         (\n\
+         \x20 while kill -0 \"$RINNE_PID\" 2>/dev/null; do sleep {}; done\n\
+         \x20 pkill -TERM -P $$ 2>/dev/null || true\n\
+         ) &\n\
+         RINNE_WATCHDOG=$!\n",
+        std::process::id(),
+        WATCHDOG_POLL_SECS
+    ));
+
     // Record tty early so Rinne can close the window even if the trap is skipped.
     script.push_str("TTY_NAME=$(tty 2>/dev/null | sed 's|^/dev/||' || true)\n");
     script.push_str(&format!(
@@ -1342,6 +1366,63 @@ mod tests {
             "a child must be signalled before its parent"
         );
         assert_eq!(got.len(), 3, "{got:?}");
+    }
+
+    #[test]
+    fn launcher_reaps_the_harness_when_rinne_dies() {
+        let dir = std::env::temp_dir().join(format!("rinne-ext-wd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.command");
+        let spec = SubprocessSpec {
+            program: "claude".into(),
+            args: vec!["hello".into()],
+            workspace: dir.clone(),
+            stdin: None,
+            timeout: None,
+            env: vec![],
+            result_file: Some(dir.join("result.txt")),
+        };
+        write_launcher(
+            &script,
+            &spec,
+            &dir.join("h.log"),
+            &dir.join("e.code"),
+            &dir.join("w.pid"),
+            &dir.join("tty.name"),
+            "rinne-stage-wd-tag",
+            TerminalMode::Interactive,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+
+        // Rinne can be SIGKILLed, so nothing in-process can clean up. The
+        // launcher must watch Rinne's pid itself and reap the harness.
+        assert!(
+            body.contains(&format!("RINNE_PID={}", std::process::id())),
+            "launcher must know the Rinne pid that spawned it"
+        );
+        assert!(
+            body.contains("kill -0 \"$RINNE_PID\""),
+            "launcher must poll that pid for liveness"
+        );
+        // Bash keeps only one EXIT trap, so the watchdog must be torn down from
+        // inside on_exit rather than by installing a second one — a second
+        // `trap ... EXIT` would silently replace the TTY reset.
+        assert_eq!(
+            body.lines()
+                .filter(|l| l.starts_with("trap ") && l.ends_with(" EXIT"))
+                .count(),
+            1,
+            "exactly one EXIT trap, or on_exit is silently replaced: {body}"
+        );
+        // It must kill only its children: killing itself would skip on_exit and
+        // leave mouse tracking enabled (prior failure #3).
+        assert!(
+            body.contains("pkill -TERM -P $$"),
+            "watchdog must signal children so on_exit still resets the TTY"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
