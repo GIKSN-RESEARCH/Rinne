@@ -137,7 +137,11 @@ mod tests {
 
     #[test]
     fn name_falls_back_to_folder() {
-        let s = Skill::parse_md("just a body, no frontmatter", PathBuf::from("/x"), "myskill");
+        let s = Skill::parse_md(
+            "just a body, no frontmatter",
+            PathBuf::from("/x"),
+            "myskill",
+        );
         assert_eq!(s.name, "myskill");
         assert_eq!(s.body, "just a body, no frontmatter");
         assert!(s.description.is_empty());

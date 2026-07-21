@@ -156,7 +156,10 @@ mod tests {
 
         let installed = install(&src, Scope::Project, &project).unwrap();
         assert_eq!(installed.name, "pdf-forms");
-        assert!(installed.dir.join("helper.py").is_file(), "bundled script copied");
+        assert!(
+            installed.dir.join("helper.py").is_file(),
+            "bundled script copied"
+        );
 
         let found = discover(&project);
         assert!(found.iter().any(|s| s.name == "pdf-forms"));
@@ -194,7 +197,11 @@ mod tests {
         write_skill(&dir.join("real"), "real", "a real skill");
 
         let names: Vec<String> = discover(&project).into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["real"], "only the folder with a SKILL.md is a skill");
+        assert_eq!(
+            names,
+            vec!["real"],
+            "only the folder with a SKILL.md is a skill"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }

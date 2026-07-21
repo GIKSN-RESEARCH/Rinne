@@ -58,7 +58,9 @@ pub fn fde_facts(graph: &dyn CodeGraph, cluster: &Cluster) -> FdeFacts {
         std::collections::HashMap::new();
 
     for sym in &cluster.symbols {
-        let Some(nb) = graph.neighborhood(&sym.name) else { continue };
+        let Some(nb) = graph.neighborhood(&sym.name) else {
+            continue;
+        };
         // Callers coming from OUTSIDE the cluster define the change surface.
         let external: Vec<&SymbolRef> = nb
             .callers
@@ -86,10 +88,19 @@ pub fn fde_facts(graph: &dyn CodeGraph, cluster: &Cluster) -> FdeFacts {
         *inbound_by_file.entry(sym.file.clone()).or_default() += nb.callers.len();
     }
 
-    entry_points.sort_by(|a, b| b.external_callers.cmp(&a.external_callers).then_with(|| a.name.cmp(&b.name)));
-    blast_radius.sort_by(|a, b| b.caller_count.cmp(&a.caller_count).then_with(|| a.name.cmp(&b.name)));
+    entry_points.sort_by(|a, b| {
+        b.external_callers
+            .cmp(&a.external_callers)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    blast_radius.sort_by(|a, b| {
+        b.caller_count
+            .cmp(&a.caller_count)
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
-    let mut symbols_by_file: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut symbols_by_file: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
     for s in &cluster.symbols {
         *symbols_by_file.entry(s.file.as_str()).or_default() += 1;
     }
@@ -102,9 +113,18 @@ pub fn fde_facts(graph: &dyn CodeGraph, cluster: &Cluster) -> FdeFacts {
             inbound: inbound_by_file.get(f).copied().unwrap_or(0),
         })
         .collect();
-    ranked_files.sort_by(|a, b| b.inbound.cmp(&a.inbound).then_with(|| b.symbols.cmp(&a.symbols)).then_with(|| a.file.cmp(&b.file)));
+    ranked_files.sort_by(|a, b| {
+        b.inbound
+            .cmp(&a.inbound)
+            .then_with(|| b.symbols.cmp(&a.symbols))
+            .then_with(|| a.file.cmp(&b.file))
+    });
 
-    FdeFacts { entry_points, ranked_files, blast_radius }
+    FdeFacts {
+        entry_points,
+        ranked_files,
+        blast_radius,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,8 +150,12 @@ pub fn cluster_branches(workspace: &Path, cluster: &Cluster) -> Vec<RuleSite> {
     const MAX_SITES: usize = 40;
     let mut out: Vec<RuleSite> = Vec::new();
     for file in &cluster.files {
-        let Some(lang) = rinne_types::skip::source_lang(file) else { continue };
-        let Ok(src) = std::fs::read_to_string(workspace.join(file)) else { continue };
+        let Some(lang) = rinne_types::skip::source_lang(file) else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(workspace.join(file)) else {
+            continue;
+        };
         for b in extract_branches(lang, &src) {
             out.push(RuleSite {
                 file: file.clone(),
@@ -159,26 +183,61 @@ mod tests {
             match s {
                 // `public_api` is called by two symbols OUTSIDE the cluster.
                 "public_api" => Some(Neighborhood {
-                    definition: SymbolRef { name: "public_api".into(), file: "api.rs".into(), line: 1, end_line: 5 },
+                    definition: SymbolRef {
+                        name: "public_api".into(),
+                        file: "api.rs".into(),
+                        line: 1,
+                        end_line: 5,
+                    },
                     callers: vec![
-                        SymbolRef { name: "route_a".into(), file: "web.rs".into(), line: 2, end_line: 2 },
-                        SymbolRef { name: "route_b".into(), file: "web.rs".into(), line: 9, end_line: 9 },
+                        SymbolRef {
+                            name: "route_a".into(),
+                            file: "web.rs".into(),
+                            line: 2,
+                            end_line: 2,
+                        },
+                        SymbolRef {
+                            name: "route_b".into(),
+                            file: "web.rs".into(),
+                            line: 9,
+                            end_line: 9,
+                        },
                     ],
-                    callees: vec![
-                        SymbolRef { name: "helper".into(), file: "api.rs".into(), line: 7, end_line: 7 },
-                    ],
-                    imports: vec![], stale: false,
+                    callees: vec![SymbolRef {
+                        name: "helper".into(),
+                        file: "api.rs".into(),
+                        line: 7,
+                        end_line: 7,
+                    }],
+                    imports: vec![],
+                    stale: false,
                 }),
                 "helper" => Some(Neighborhood {
-                    definition: SymbolRef { name: "helper".into(), file: "api.rs".into(), line: 7, end_line: 7 },
-                    callers: vec![SymbolRef { name: "public_api".into(), file: "api.rs".into(), line: 1, end_line: 5 }],
-                    callees: vec![], imports: vec![], stale: false,
+                    definition: SymbolRef {
+                        name: "helper".into(),
+                        file: "api.rs".into(),
+                        line: 7,
+                        end_line: 7,
+                    },
+                    callers: vec![SymbolRef {
+                        name: "public_api".into(),
+                        file: "api.rs".into(),
+                        line: 1,
+                        end_line: 5,
+                    }],
+                    callees: vec![],
+                    imports: vec![],
+                    stale: false,
                 }),
                 _ => None,
             }
         }
-        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> { None }
-        fn symbol_names(&self) -> Vec<String> { vec!["public_api".into(), "helper".into()] }
+        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> {
+            None
+        }
+        fn symbol_names(&self) -> Vec<String> {
+            vec!["public_api".into(), "helper".into()]
+        }
     }
 
     fn cluster() -> Cluster {
@@ -186,8 +245,20 @@ mod tests {
             topic: "api".into(),
             seeds: vec!["public_api".into()],
             symbols: vec![
-                ClusterSymbol { name: "public_api".into(), file: "api.rs".into(), line: 1, end_line: 5, kind: "symbol".into() },
-                ClusterSymbol { name: "helper".into(), file: "api.rs".into(), line: 7, end_line: 7, kind: "symbol".into() },
+                ClusterSymbol {
+                    name: "public_api".into(),
+                    file: "api.rs".into(),
+                    line: 1,
+                    end_line: 5,
+                    kind: "symbol".into(),
+                },
+                ClusterSymbol {
+                    name: "helper".into(),
+                    file: "api.rs".into(),
+                    line: 7,
+                    end_line: 7,
+                    kind: "symbol".into(),
+                },
             ],
             files: vec!["api.rs".into()],
         }
@@ -198,9 +269,15 @@ mod tests {
         let facts = fde_facts(&G, &cluster());
         // `public_api` has 2 external callers (route_a, route_b in web.rs), not in cluster.
         // `helper` is only called by public_api (inside the cluster) → not an entry point.
-        assert_eq!(facts.entry_points.first().map(|e| e.name.as_str()), Some("public_api"));
+        assert_eq!(
+            facts.entry_points.first().map(|e| e.name.as_str()),
+            Some("public_api")
+        );
         assert_eq!(facts.entry_points[0].external_callers, 2);
-        assert!(!facts.entry_points.iter().any(|e| e.name == "helper"), "internal helper is not an entry");
+        assert!(
+            !facts.entry_points.iter().any(|e| e.name == "helper"),
+            "internal helper is not an entry"
+        );
     }
 
     /// Mocks the shape `cluster_from_seeds` actually produces: the seed's
@@ -213,28 +290,54 @@ mod tests {
         fn neighborhood(&self, s: &str) -> Option<Neighborhood> {
             match s {
                 "seed_fn" => Some(Neighborhood {
-                    definition: SymbolRef { name: "seed_fn".into(), file: "core.rs".into(), line: 1, end_line: 3 },
-                    callers: vec![
-                        SymbolRef { name: "caller_in_cluster".into(), file: "core.rs".into(), line: 10, end_line: 12 },
-                    ],
-                    callees: vec![], imports: vec![], stale: false,
+                    definition: SymbolRef {
+                        name: "seed_fn".into(),
+                        file: "core.rs".into(),
+                        line: 1,
+                        end_line: 3,
+                    },
+                    callers: vec![SymbolRef {
+                        name: "caller_in_cluster".into(),
+                        file: "core.rs".into(),
+                        line: 10,
+                        end_line: 12,
+                    }],
+                    callees: vec![],
+                    imports: vec![],
+                    stale: false,
                 }),
                 "caller_in_cluster" => Some(Neighborhood {
-                    definition: SymbolRef { name: "caller_in_cluster".into(), file: "core.rs".into(), line: 10, end_line: 12 },
+                    definition: SymbolRef {
+                        name: "caller_in_cluster".into(),
+                        file: "core.rs".into(),
+                        line: 10,
+                        end_line: 12,
+                    },
                     // Called from outside the cluster — this is the real boundary.
-                    callers: vec![
-                        SymbolRef { name: "outside_caller".into(), file: "web.rs".into(), line: 4, end_line: 4 },
-                    ],
-                    callees: vec![
-                        SymbolRef { name: "seed_fn".into(), file: "core.rs".into(), line: 1, end_line: 3 },
-                    ],
-                    imports: vec![], stale: false,
+                    callers: vec![SymbolRef {
+                        name: "outside_caller".into(),
+                        file: "web.rs".into(),
+                        line: 4,
+                        end_line: 4,
+                    }],
+                    callees: vec![SymbolRef {
+                        name: "seed_fn".into(),
+                        file: "core.rs".into(),
+                        line: 1,
+                        end_line: 3,
+                    }],
+                    imports: vec![],
+                    stale: false,
                 }),
                 _ => None,
             }
         }
-        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> { None }
-        fn symbol_names(&self) -> Vec<String> { vec!["seed_fn".into(), "caller_in_cluster".into()] }
+        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> {
+            None
+        }
+        fn symbol_names(&self) -> Vec<String> {
+            vec!["seed_fn".into(), "caller_in_cluster".into()]
+        }
     }
 
     #[test]
@@ -245,8 +348,20 @@ mod tests {
             topic: "seed_fn".into(),
             seeds: vec!["seed_fn".into()],
             symbols: vec![
-                ClusterSymbol { name: "seed_fn".into(), file: "core.rs".into(), line: 1, end_line: 3, kind: "symbol".into() },
-                ClusterSymbol { name: "caller_in_cluster".into(), file: "core.rs".into(), line: 10, end_line: 12, kind: "symbol".into() },
+                ClusterSymbol {
+                    name: "seed_fn".into(),
+                    file: "core.rs".into(),
+                    line: 1,
+                    end_line: 3,
+                    kind: "symbol".into(),
+                },
+                ClusterSymbol {
+                    name: "caller_in_cluster".into(),
+                    file: "core.rs".into(),
+                    line: 10,
+                    end_line: 12,
+                    kind: "symbol".into(),
+                },
             ],
             files: vec!["core.rs".into()],
         };
@@ -260,7 +375,10 @@ mod tests {
         // `caller_in_cluster` has a caller from OUTSIDE the cluster → it IS
         // the real inbound-boundary entry point.
         assert!(
-            facts.entry_points.iter().any(|e| e.name == "caller_in_cluster"),
+            facts
+                .entry_points
+                .iter()
+                .any(|e| e.name == "caller_in_cluster"),
             "in-cluster caller with an external caller must be the entry point: {:?}",
             facts.entry_points
         );
@@ -269,7 +387,11 @@ mod tests {
     #[test]
     fn blast_radius_counts_external_callers_and_files() {
         let facts = fde_facts(&G, &cluster());
-        let api = facts.blast_radius.iter().find(|i| i.name == "public_api").unwrap();
+        let api = facts
+            .blast_radius
+            .iter()
+            .find(|i| i.name == "public_api")
+            .unwrap();
         assert_eq!(api.caller_count, 2);
         assert_eq!(api.caller_files, 1, "both callers live in web.rs");
     }
@@ -287,12 +409,20 @@ mod tests {
         let cluster = Cluster {
             topic: "gate".into(),
             seeds: vec!["gate".into()],
-            symbols: vec![ClusterSymbol { name: "gate".into(), file: "gate.rs".into(), line: 1, end_line: 5, kind: "symbol".into() }],
+            symbols: vec![ClusterSymbol {
+                name: "gate".into(),
+                file: "gate.rs".into(),
+                line: 1,
+                end_line: 5,
+                kind: "symbol".into(),
+            }],
             files: vec!["gate.rs".into()],
         };
         let sites = cluster_branches(Path::new(&dir), &cluster);
         assert!(
-            sites.iter().any(|s| s.file == "gate.rs" && s.condition.contains("enterprise")),
+            sites
+                .iter()
+                .any(|s| s.file == "gate.rs" && s.condition.contains("enterprise")),
             "rule condition surfaced with file: {sites:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);

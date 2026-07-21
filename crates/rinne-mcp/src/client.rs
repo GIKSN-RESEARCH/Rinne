@@ -100,9 +100,12 @@ impl McpClient {
 
     /// List the tools this server exposes (`tools/list`).
     pub async fn list_tools(&mut self) -> Result<Vec<Tool>> {
-        let res = timeout(self.request_timeout, self.transport.request("tools/list", json!({})))
-            .await
-            .map_err(|_| mcp("tools/list timed out"))??;
+        let res = timeout(
+            self.request_timeout,
+            self.transport.request("tools/list", json!({})),
+        )
+        .await
+        .map_err(|_| mcp("tools/list timed out"))??;
         let tools = res
             .get("tools")
             .and_then(|t| t.as_array())
@@ -116,8 +119,10 @@ impl McpClient {
     pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
         timeout(
             self.request_timeout,
-            self.transport
-                .request("tools/call", json!({ "name": name, "arguments": arguments })),
+            self.transport.request(
+                "tools/call",
+                json!({ "name": name, "arguments": arguments }),
+            ),
         )
         .await
         .map_err(|_| mcp(format!("tool `{name}` timed out")))?

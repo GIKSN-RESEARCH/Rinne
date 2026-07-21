@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use rinne_core::worker::{
-    ContextPacket, Constraints, ExecuteRequest, Role, ToolExecutor, ToolSpec, Worker, WorkerEvent,
+    Constraints, ContextPacket, ExecuteRequest, Role, ToolExecutor, ToolSpec, Worker, WorkerEvent,
 };
 use rinne_workers::adapters::openai_api::OpenAiWorker;
 
@@ -32,7 +32,10 @@ impl ToolExecutor for StubExecutor {
         id: &str,
         arguments: serde_json::Value,
     ) -> std::result::Result<String, String> {
-        self.calls.lock().unwrap().push((id.to_string(), arguments.clone()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((id.to_string(), arguments.clone()));
         Ok(format!("echoed: {arguments}"))
     }
 }
@@ -51,7 +54,11 @@ fn read_request(stream: &mut std::net::TcpStream) -> String {
         if let Some(header_end) = text.find("\r\n\r\n") {
             let content_len = text
                 .lines()
-                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                })
                 .unwrap_or(0);
             if buf.len() >= header_end + 4 + content_len {
                 break;
@@ -108,7 +115,9 @@ async fn api_worker_runs_the_tool_loop() {
     });
 
     let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let executor: Arc<dyn ToolExecutor> = Arc::new(StubExecutor { calls: calls.clone() });
+    let executor: Arc<dyn ToolExecutor> = Arc::new(StubExecutor {
+        calls: calls.clone(),
+    });
     let worker = OpenAiWorker::new(
         "mock",
         &format!("http://127.0.0.1:{port}/v1"),
@@ -134,7 +143,10 @@ async fn api_worker_runs_the_tool_loop() {
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WorkerEvent>();
-    let result = worker.execute(request, tx, CancellationToken::new()).await.unwrap();
+    let result = worker
+        .execute(request, tx, CancellationToken::new())
+        .await
+        .unwrap();
     server.join().unwrap();
 
     // The model's final answer is returned.

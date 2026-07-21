@@ -1,8 +1,8 @@
 //! `rinne doctor --routing` report assembly.
 
 use rinne_config::model::{ConductorConfig, RoutingConfig};
-use rinne_core::worker::WorkerDescriptor;
 use rinne_core::pool;
+use rinne_core::worker::WorkerDescriptor;
 
 use crate::conductor_eligible::{filter_eligible_ladder, is_conductor_eligible};
 use crate::tier_exemplars::{self, LoadedExemplar};
@@ -20,7 +20,8 @@ pub fn format_routing_report(
 
     out.push_str("PLANNER RUNGS (conductor-eligible only)\n");
     let raw = conductor.planner_ladder();
-    let filtered = filter_eligible_ladder(&raw, conductor.only_eligible_models, &conductor.allowlist);
+    let filtered =
+        filter_eligible_ladder(&raw, conductor.only_eligible_models, &conductor.allowlist);
     for (i, m) in raw.iter().enumerate() {
         let eligible = is_conductor_eligible(m, &conductor.allowlist);
         let in_ladder = filtered.iter().any(|x| x == m);
@@ -65,7 +66,10 @@ pub fn format_routing_report(
         out.push_str(&format!("  {label}: {n} exemplars\n"));
     }
     if !user_exemplars.is_empty() {
-        out.push_str(&format!("  project: {} custom exemplar(s)\n", user_exemplars.len()));
+        out.push_str(&format!(
+            "  project: {} custom exemplar(s)\n",
+            user_exemplars.len()
+        ));
     } else if let Some(p) = &routing.exemplars_file {
         out.push_str(&format!("  project: none (optional {p})\n"));
     }

@@ -355,15 +355,18 @@ mod tests {
         path.push(format!("rinne-write2-{}.toml", std::process::id()));
         std::fs::write(&path, "[conductor]\nbackend = \"groq\"\n").unwrap();
 
-        write_api_provider_to(&path, "openai", "OPENAI_API_KEY", "https://api.openai.com/v1", &[])
-            .unwrap();
+        write_api_provider_to(
+            &path,
+            "openai",
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1",
+            &[],
+        )
+        .unwrap();
 
         let cfg: Config = crate::load::load_layered(Some(&path), None, false).unwrap();
         // Pre-existing setting survives the edit.
-        assert_eq!(
-            cfg.conductor.backend,
-            crate::model::ConductorBackend::Groq
-        );
+        assert_eq!(cfg.conductor.backend, crate::model::ConductorBackend::Groq);
         assert!(cfg.backends.api.providers.contains_key("openai"));
 
         let _ = std::fs::remove_file(&path);

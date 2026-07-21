@@ -14,7 +14,7 @@ use rinne_core::worker::{
 };
 use rinne_core::Result;
 
-use super::common::{HarnessAdapter, ParsedHarness, Provision};
+use super::common::{approvals_are_auto, HarnessAdapter, ParsedHarness, Provision};
 use super::mcp_util;
 use crate::transport::subprocess::SubprocessOutput;
 
@@ -54,12 +54,10 @@ fn descriptor() -> WorkerDescriptor {
         latency: LatencyProfile::Medium,
         transport: Transport::SubprocessJson,
         // Discover fills live ladder; cheap→strong defaults for ChatGPT/Codex.
-        models: vec![
-            "gpt-5-mini".into(),
-            "gpt-5".into(),
-            "o4-mini".into(),
-            "o3".into(),
-        ],
+        // Keep this list to models a ChatGPT-account login can actually run —
+        // Codex rejects o-series with HTTP 400 there, which fails the node
+        // rather than degrading, so an unusable rung is worse than a short ladder.
+        models: vec!["gpt-5-mini".into(), "gpt-5".into(), "o4-mini".into()],
     }
 }
 
@@ -99,6 +97,17 @@ fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
     if let Some(m) = model {
         args.push("--model".into());
         args.push(m.into());
+    }
+    // Nobody is watching a Stage session, so an approval prompt burns the
+    // node's whole timeout. `--ask-for-approval never` alone is only half of
+    // `--full-auto`: the sandbox still defaults to read-only in a workspace the
+    // user has not trusted, and with approvals off the model cannot escalate —
+    // every edit is rejected and the node burns its budget failing silently.
+    if approvals_are_auto() {
+        args.push("--ask-for-approval".into());
+        args.push("never".into());
+        args.push("--sandbox".into());
+        args.push("workspace-write".into());
     }
     args.push(prompt.into());
     args
@@ -202,10 +211,7 @@ fn parse(out: &SubprocessOutput) -> ParsedHarness {
             result: plain,
             session_id: None,
             usage: Usage::default(),
-            is_error: !matches!(
-                out.status,
-                rinne_core::worker::ExecStatus::Success
-            ),
+            is_error: !matches!(out.status, rinne_core::worker::ExecStatus::Success),
         }
     }
 }
@@ -400,6 +406,19 @@ fn provision(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
 mod tests {
     use super::*;
     use rinne_core::worker::ExecStatus;
+
+    #[test]
+    fn default_ladder_only_holds_models_a_chatgpt_account_can_run() {
+        // Codex signed in with a ChatGPT account rejects o-series models with
+        // "The 'o3' model is not supported when using Codex with a ChatGPT
+        // account" (HTTP 400), so routing to that rung fails the whole node.
+        let models = descriptor().models;
+        assert!(
+            !models.iter().any(|m| m == "o3"),
+            "o3 is not runnable on a ChatGPT account: {models:?}"
+        );
+        assert!(models.iter().any(|m| m == "gpt-5"), "{models:?}");
+    }
 
     fn out(stdout: &str) -> SubprocessOutput {
         SubprocessOutput {

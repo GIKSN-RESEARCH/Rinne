@@ -30,7 +30,10 @@ fn api(name: &str) -> OpenAiWorker {
 
 #[test]
 fn api_worker_serves_tools_only_with_an_executor() {
-    assert!(!api("plain").serves_mcp_tools(), "no executor wired → no tools");
+    assert!(
+        !api("plain").serves_mcp_tools(),
+        "no executor wired → no tools"
+    );
     let wired = api("wired").with_tool_executor(Arc::new(NoopExecutor));
     assert!(wired.serves_mcp_tools(), "executor wired → serves tools");
 }

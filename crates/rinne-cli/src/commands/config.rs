@@ -77,11 +77,18 @@ pub fn show_lines(cwd: &Path) -> Result<Vec<String>> {
         None => out.push("  global   (no home directory found)".to_string()),
     }
     let project = paths::project_config_file(cwd);
-    out.push(format!("  project  {}  {}", existence(&project), project.display()));
+    out.push(format!(
+        "  project  {}  {}",
+        existence(&project),
+        project.display()
+    ));
     out.push("  env      RINNE_* environment variables".to_string());
     out.push(String::new());
     out.push("Edit: /config conductor <backend> [model] [--key <token>] · /config prefer <harness|api|balanced>".to_string());
-    out.push("      /config set <key> <val> · /config init (scaffold file) · /config edit (open it)".to_string());
+    out.push(
+        "      /config set <key> <val> · /config init (scaffold file) · /config edit (open it)"
+            .to_string(),
+    );
     out.push("      add --project to scope a change to this repo (default is global).".to_string());
     Ok(out)
 }
@@ -237,10 +244,14 @@ fn set_current_conductor_key(cwd: &Path, token: &str) -> Vec<String> {
     match rinne_conductor::conductor_credential(&config.conductor) {
         Some((provider, env)) => match rinne_config::secrets::store_api_key(&provider, token) {
             Ok(()) => vec![
-                format!("✔ token for conductor `{provider}` stored in your OS keychain (set once)."),
+                format!(
+                    "✔ token for conductor `{provider}` stored in your OS keychain (set once)."
+                ),
                 format!("  resolved automatically now; no need to export {env}."),
             ],
-            Err(e) => vec![format!("⚠ keychain unavailable ({e}); export {env}=<token> instead.")],
+            Err(e) => vec![format!(
+                "⚠ keychain unavailable ({e}); export {env}=<token> instead."
+            )],
         },
         None => vec!["· the current conductor backend needs no API key.".to_string()],
     }
@@ -254,7 +265,11 @@ fn init_file(scope: Scope, cwd: &Path) -> Vec<String> {
     };
     if path.exists() {
         return vec![
-            format!("· {} config already exists: {}", scope.label(), path.display()),
+            format!(
+                "· {} config already exists: {}",
+                scope.label(),
+                path.display()
+            ),
             "  open it to hand-edit, or use /config set <key> <val>.".to_string(),
         ];
     }
@@ -265,9 +280,14 @@ fn init_file(scope: Scope, cwd: &Path) -> Vec<String> {
     }
     match std::fs::write(&path, TEMPLATE) {
         Ok(()) => vec![
-            format!("✔ wrote a commented config template ({}): {}", scope.label(), path.display()),
+            format!(
+                "✔ wrote a commented config template ({}): {}",
+                scope.label(),
+                path.display()
+            ),
             "  edit it in any editor — uncomment and change what you need.".to_string(),
-            "  secrets never go here: API tokens use /connect or /config ... --key (OS keychain).".to_string(),
+            "  secrets never go here: API tokens use /connect or /config ... --key (OS keychain)."
+                .to_string(),
         ],
         Err(e) => vec![format!("✗ could not write {}: {e}", path.display())],
     }
@@ -277,14 +297,26 @@ fn init_file(scope: Scope, cwd: &Path) -> Vec<String> {
 /// to completion (safe from the shell); otherwise a GUI/`open` handoff is used
 /// so it never fights the inline TUI.
 pub fn open_in_editor(path: &Path, block: bool) {
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).ok();
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok();
     let result = match editor {
-        Some(ed) if block => std::process::Command::new(ed).arg(path).status().map(|_| ()),
+        Some(ed) if block => std::process::Command::new(ed)
+            .arg(path)
+            .status()
+            .map(|_| ()),
         Some(ed) => std::process::Command::new(ed).arg(path).spawn().map(|_| ()),
         None => {
             // No $EDITOR: hand off to the OS default opener (non-blocking GUI).
-            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-            std::process::Command::new(opener).arg(path).spawn().map(|_| ())
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            std::process::Command::new(opener)
+                .arg(path)
+                .spawn()
+                .map(|_| ())
         }
     };
     let _ = result; // best-effort; the path was already reported to the user
@@ -326,7 +358,10 @@ fn apply_unset(scope: Scope, cwd: &Path, key: &str) -> Vec<String> {
             format!("✔ removed {key} ({})", scope.label()),
             format!("  wrote {}", path.display()),
         ],
-        Ok(false) => vec![format!("· {key} was not set in the {} file — nothing to remove", scope.label())],
+        Ok(false) => vec![format!(
+            "· {key} was not set in the {} file — nothing to remove",
+            scope.label()
+        )],
         Err(e) => vec![format!("✗ {key}: {e}")],
     }
 }
@@ -338,7 +373,11 @@ fn path_lines(cwd: &Path) -> Vec<String> {
         None => out.push("global   (no home directory found)".to_string()),
     }
     let project = paths::project_config_file(cwd);
-    out.push(format!("project  {}  {}", existence(&project), project.display()));
+    out.push(format!(
+        "project  {}  {}",
+        existence(&project),
+        project.display()
+    ));
     out
 }
 
@@ -421,11 +460,21 @@ mod tests {
     fn conductor_set_writes_project_file() {
         let dir = tmp("conductor");
         let out = edit_lines("conductor groq llama-3.3-70b --project", &dir);
-        assert!(out.iter().any(|l| l.contains("conductor.backend = groq")), "{out:?}");
-        assert!(out.iter().any(|l| l.contains("conductor.model = llama-3.3-70b")), "{out:?}");
+        assert!(
+            out.iter().any(|l| l.contains("conductor.backend = groq")),
+            "{out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|l| l.contains("conductor.model = llama-3.3-70b")),
+            "{out:?}"
+        );
 
         let cfg = rinne_config::load(&dir).unwrap();
-        assert_eq!(cfg.conductor.backend, rinne_config::model::ConductorBackend::Groq);
+        assert_eq!(
+            cfg.conductor.backend,
+            rinne_config::model::ConductorBackend::Groq
+        );
         assert_eq!(cfg.conductor.model, "llama-3.3-70b");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -456,8 +505,14 @@ mod tests {
         edit_lines("role evaluator openrouter --project", &dir);
         edit_lines("model claude-code sonnet --project", &dir);
         let cfg = rinne_config::load(&dir).unwrap();
-        assert_eq!(cfg.preferences.roles.get("evaluator").map(String::as_str), Some("openrouter"));
-        assert_eq!(cfg.models.by_worker.get("claude-code").map(String::as_str), Some("sonnet"));
+        assert_eq!(
+            cfg.preferences.roles.get("evaluator").map(String::as_str),
+            Some("openrouter")
+        );
+        assert_eq!(
+            cfg.models.by_worker.get("claude-code").map(String::as_str),
+            Some("sonnet")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -469,7 +524,10 @@ mod tests {
         let bad = edit_lines("prefer sideways --project", &dir);
         assert!(bad.iter().any(|l| l.starts_with("✗")), "{bad:?}");
         let cfg = rinne_config::load(&dir).unwrap();
-        assert_eq!(cfg.preferences.prefer, rinne_config::model::PreferFamily::Api);
+        assert_eq!(
+            cfg.preferences.prefer,
+            rinne_config::model::PreferFamily::Api
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -483,10 +541,16 @@ mod tests {
         // and not perturbed by the developer's machine-level config.
         let project_file = rinne_config::paths::project_config_file(&dir);
         let cfg = rinne_config::load::load_layered(None, Some(&project_file), false).unwrap();
-        assert_eq!(cfg.conductor.backend, rinne_config::model::ConductorBackend::Cloudflare);
+        assert_eq!(
+            cfg.conductor.backend,
+            rinne_config::model::ConductorBackend::Cloudflare
+        );
         // Re-running reports it already exists rather than clobbering.
         let again = edit_lines("init --project", &dir);
-        assert!(again.iter().any(|l| l.contains("already exists")), "{again:?}");
+        assert!(
+            again.iter().any(|l| l.contains("already exists")),
+            "{again:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -6,7 +6,10 @@ use rinne_mcp::McpClient;
 #[tokio::test]
 async fn stdio_connect_to_missing_binary_errors() {
     let r = McpClient::connect_stdio("rinne-no-such-binary-xyz-123", &[], &[]).await;
-    assert!(r.is_err(), "spawning a missing binary must surface an error");
+    assert!(
+        r.is_err(),
+        "spawning a missing binary must surface an error"
+    );
 }
 
 #[tokio::test]

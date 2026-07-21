@@ -378,7 +378,10 @@ impl OpenAiClient {
     /// so the result doubles as a price-ordered tier ladder.
     pub async fn list_models(&self) -> Result<Vec<DiscoveredModel>> {
         let url = format!("{}/models", self.base_url);
-        let mut builder = self.http.get(&url).timeout(std::time::Duration::from_secs(30));
+        let mut builder = self
+            .http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(30));
         if let Some(key) = &self.api_key {
             builder = builder.bearer_auth(key);
         }
@@ -389,7 +392,9 @@ impl OpenAiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(RinneError::Worker(format!("GET /models HTTP {status}: {text}")));
+            return Err(RinneError::Worker(format!(
+                "GET /models HTTP {status}: {text}"
+            )));
         }
         let v: serde_json::Value = resp
             .json()
@@ -631,7 +636,8 @@ pub fn normalize_base_url(raw: &str) -> String {
 /// Parse a JSON value that may be a number or a numeric string into `f64`
 /// (OpenRouter reports prices as strings like `"0.0000001"`).
 fn to_f64(v: &serde_json::Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 #[cfg(test)]
@@ -643,9 +649,18 @@ mod tests {
         let base = "https://openrouter.ai/api/v1";
         assert_eq!(normalize_base_url(base), base);
         assert_eq!(normalize_base_url("https://openrouter.ai/api/v1/"), base);
-        assert_eq!(normalize_base_url("https://openrouter.ai/api/v1/chat/completions"), base);
-        assert_eq!(normalize_base_url("https://openrouter.ai/api/v1/responses"), base);
-        assert_eq!(normalize_base_url("  https://openrouter.ai/api/v1/models  "), base);
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1/chat/completions"),
+            base
+        );
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1/responses"),
+            base
+        );
+        assert_eq!(
+            normalize_base_url("  https://openrouter.ai/api/v1/models  "),
+            base
+        );
     }
 
     #[test]
@@ -669,17 +684,23 @@ mod tests {
         assert!(v.get("content").is_none(), "empty content is skipped");
         assert_eq!(v["tool_calls"][0]["id"], "call_1");
         assert_eq!(v["tool_calls"][0]["type"], "function");
-        assert_eq!(v["tool_calls"][0]["function"]["name"], "github.search_issues");
+        assert_eq!(
+            v["tool_calls"][0]["function"]["name"],
+            "github.search_issues"
+        );
     }
 
     #[test]
     fn tool_result_message_carries_call_id() {
         let v = serde_json::to_value(ChatMessage::tool_result("call_1", "42 issues")).unwrap();
-        assert_eq!(v, serde_json::json!({
-            "role": "tool",
-            "content": "42 issues",
-            "tool_call_id": "call_1",
-        }));
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "role": "tool",
+                "content": "42 issues",
+                "tool_call_id": "call_1",
+            })
+        );
     }
 
     #[test]
@@ -690,8 +711,7 @@ mod tests {
                  "function": {"name": "fs.read", "arguments": "{\"path\":\"a\"}"}}
             ]
         });
-        let calls: Vec<ToolCall> =
-            serde_json::from_value(message["tool_calls"].clone()).unwrap();
+        let calls: Vec<ToolCall> = serde_json::from_value(message["tool_calls"].clone()).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "fs.read");
         assert_eq!(calls[0].id, "c1");

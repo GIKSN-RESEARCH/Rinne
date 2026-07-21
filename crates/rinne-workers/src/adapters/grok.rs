@@ -13,7 +13,7 @@ use rinne_core::worker::{
     WorkerEvent, WorkerFamily,
 };
 
-use super::common::{HarnessAdapter, ParsedHarness};
+use super::common::{approvals_are_auto, HarnessAdapter, ParsedHarness};
 use crate::transport::subprocess::SubprocessOutput;
 
 pub fn worker() -> HarnessAdapter {
@@ -100,14 +100,18 @@ fn plan_args(prompt: &str, model: Option<&str>) -> Vec<String> {
 /// Full Grok Build interactive UI (`grok "prompt"`), not headless `-p` JSON dump.
 ///
 /// Keep the argv close to what a human would type so the product TUI behaves
-/// normally. Auto-approve + no-plan so Stage sessions are not stuck on prompts.
+/// normally. Auto-approve (unless approvals are `human`) + no-plan so Stage
+/// sessions are not stuck on prompts.
 /// Prefer `--fullscreen` for the alt-screen product chrome.
 fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
-    let mut args = vec![
-        "--fullscreen".into(),
-        "--always-approve".into(),
-        "--no-plan".into(),
-    ];
+    let mut args: Vec<String> = vec!["--fullscreen".into()];
+    // `[harness_stage].approvals = "human"` must reach every adapter, not just
+    // the two that had a flag wired: an unattended Stage node auto-approves,
+    // but a user who asked to be consulted still gets grok's own prompts.
+    if approvals_are_auto() {
+        args.push("--always-approve".into());
+    }
+    args.push("--no-plan".into());
     if let Some(m) = model {
         args.push("-m".into());
         args.push(m.into());
@@ -274,7 +278,13 @@ mod tests {
 }
 
 fn tool_event(name: &str, input: &serde_json::Value) -> WorkerEvent {
-    let s = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| {
+        input
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     match name {
         "Read" => WorkerEvent::Reading(s("file_path")),
         "Write" => WorkerEvent::Editing(format!("writing {}", s("file_path"))),

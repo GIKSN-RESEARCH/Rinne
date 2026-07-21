@@ -19,16 +19,26 @@ pub fn forget_lines(provider: &str) -> Vec<String> {
     let _ = rinne_config::secrets::delete_api_key(provider);
 
     if had {
-        out.push(format!("✔ removed `{provider}`'s key from your OS keychain — it's forgotten."));
+        out.push(format!(
+            "✔ removed `{provider}`'s key from your OS keychain — it's forgotten."
+        ));
     } else {
-        out.push(format!("No keychain key stored for `{provider}` (nothing to remove)."));
+        out.push(format!(
+            "No keychain key stored for `{provider}` (nothing to remove)."
+        ));
     }
 
     // Forgetting the keychain copy doesn't unset an environment variable, so say
     // so if one is still providing the key.
     let key_env = rinne_config::load_cwd()
         .ok()
-        .and_then(|c| c.backends.api.providers.get(provider).map(|p| p.key_env.clone()))
+        .and_then(|c| {
+            c.backends
+                .api
+                .providers
+                .get(provider)
+                .map(|p| p.key_env.clone())
+        })
         .or_else(|| {
             rinne_config::known::known_api_provider(provider).map(|k| k.key_env.to_string())
         });

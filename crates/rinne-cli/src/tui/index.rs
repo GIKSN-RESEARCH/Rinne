@@ -70,7 +70,10 @@ fn scan(root: &Path) -> Vec<String> {
 /// Start a `notify` watcher that sends `()` on every filesystem change, so the
 /// TUI can debounce-refresh the index. Returns the watcher (which must be kept
 /// alive) or `None` if watching could not be set up.
-pub fn watch(root: &Path, tx: tokio::sync::mpsc::UnboundedSender<()>) -> Option<notify::RecommendedWatcher> {
+pub fn watch(
+    root: &Path,
+    tx: tokio::sync::mpsc::UnboundedSender<()>,
+) -> Option<notify::RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if res.is_ok() {
             let _ = tx.send(());

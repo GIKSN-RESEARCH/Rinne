@@ -35,7 +35,11 @@ pub fn migrate_graph_if_stale(conn: &Connection) -> rusqlite::Result<()> {
     ))?;
 
     let stored: Option<i64> = conn
-        .query_row(&format!("SELECT version FROM {VERSION_TABLE} LIMIT 1"), [], |r| r.get(0))
+        .query_row(
+            &format!("SELECT version FROM {VERSION_TABLE} LIMIT 1"),
+            [],
+            |r| r.get(0),
+        )
         .ok();
 
     if stored == Some(GRAPH_SCHEMA_VERSION) {
@@ -161,7 +165,9 @@ mod tests {
         assert_eq!(sibling, "keep-me", "non-graph tables must survive the wipe");
 
         let ver: i64 = conn
-            .query_row(&format!("SELECT version FROM {VERSION_TABLE}"), [], |r| r.get(0))
+            .query_row(&format!("SELECT version FROM {VERSION_TABLE}"), [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(ver, GRAPH_SCHEMA_VERSION, "version stamped to current");
     }

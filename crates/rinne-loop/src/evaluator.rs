@@ -42,7 +42,10 @@ impl Evaluator for ToolEvaluator {
         if passed {
             Ok(Gate::Pass)
         } else {
-            Ok(Gate::Fail { critique: output, policy })
+            Ok(Gate::Fail {
+                critique: output,
+                policy,
+            })
         }
     }
 }
@@ -62,7 +65,10 @@ impl Evaluator for AiEvaluator {
         };
         // A model can explicitly call for a replan ("wrong approach").
         if review.to_uppercase().contains("VERDICT: REPLAN") {
-            return Ok(Gate::Fail { critique: review, policy: OnFail::Replan });
+            return Ok(Gate::Fail {
+                critique: review,
+                policy: OnFail::Replan,
+            });
         }
         let verdict = parse_ai_verdict(&review);
         if verdict.passed {

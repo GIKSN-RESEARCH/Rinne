@@ -1,0 +1,5 @@
+[env]
+# A freshly built binary is not in the Keychain item's ACL, so macOS prompts for
+# a password on every rebuild. Skip credential-store reads for local cargo runs;
+# `rinne` installed normally still reads them.
+NO_KEYCHAIN_RINNE = "1"

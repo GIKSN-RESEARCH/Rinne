@@ -34,11 +34,17 @@ use rinne_core::{Result, RinneError};
 use super::subprocess::{LineMapper, SubprocessOutput, SubprocessSpec};
 
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+/// Prefix the launcher writes its own status lines with, so they can be told
+/// apart from harness output in the shared log (see `is_terminal_noise`).
+const LAUNCHER_MARKER: &str = "rinne-launcher:";
 const POLL: Duration = Duration::from_millis(100);
 /// How long a result file must stay the same size before we accept it.
 const RESULT_STABLE: Duration = Duration::from_millis(1200);
 /// After SIGTERM, wait this long for a clean EXIT trap before SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(4);
+/// How often the launcher's watchdog checks that Rinne is still alive. Bounds
+/// how long a harness can outlive a hard-killed Rinne.
+const WATCHDOG_POLL_SECS: u64 = 2;
 
 /// How the launcher should treat the child process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,9 +84,8 @@ pub async fn run_with_mode(
     // matching or Automation permissions fail on the first try.
     let stage_tag = format!("rinne-stage-{}-{}", std::process::id(), suffix);
     let scratch = std::env::temp_dir().join(&stage_tag);
-    std::fs::create_dir_all(&scratch).map_err(|e| {
-        RinneError::Worker(format!("external terminal scratch dir: {e}"))
-    })?;
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| RinneError::Worker(format!("external terminal scratch dir: {e}")))?;
 
     let log_path = scratch.join("harness.log");
     let exit_path = scratch.join("exit.code");
@@ -109,12 +114,8 @@ pub async fn run_with_mode(
     emit(
         events,
         WorkerEvent::Message(match mode {
-            TerminalMode::Capture => {
-                "opening single-turn harness in system Terminal…".into()
-            }
-            TerminalMode::Interactive => {
-                "opening harness product UI in system Terminal…".into()
-            }
+            TerminalMode::Capture => "opening single-turn harness in system Terminal…".into(),
+            TerminalMode::Interactive => "opening harness product UI in system Terminal…".into(),
         }),
     );
 
@@ -160,8 +161,7 @@ pub async fn run_with_mode(
                     stream_result_to_stage(events, &partial, &mut stage_lines_emitted);
                 }
             }
-            if let Some(text) = stable_result(rf, &mut last_result_size, &mut result_stable_since)
-            {
+            if let Some(text) = stable_result(rf, &mut last_result_size, &mut result_stable_since) {
                 captured = text;
                 got_result_file = true;
                 // Finish streaming any remaining lines into Stage.
@@ -204,13 +204,7 @@ pub async fn run_with_mode(
 
         if exit_path.exists() {
             if !line_buf.is_empty() {
-                flush_line(
-                    &mut line_buf,
-                    &mut captured,
-                    &mut truncated,
-                    mapper,
-                    events,
-                );
+                flush_line(&mut line_buf, &mut captured, &mut truncated, mapper, events);
             }
             if let Some(ref rf) = spec.result_file {
                 if let Ok(text) = std::fs::read_to_string(rf) {
@@ -251,13 +245,7 @@ pub async fn run_with_mode(
                         }
                     }
                     if !line_buf.is_empty() {
-                        flush_line(
-                            &mut line_buf,
-                            &mut captured,
-                            &mut truncated,
-                            mapper,
-                            events,
-                        );
+                        flush_line(&mut line_buf, &mut captured, &mut truncated, mapper, events);
                     }
                 }
             }
@@ -284,16 +272,13 @@ pub async fn run_with_mode(
         .and_then(|s| s.trim().parse::<i32>().ok());
 
     let status = terminal_status.unwrap_or_else(|| {
-        if got_result_file && !captured.trim().is_empty() {
-            ExecStatus::Success
-        } else {
-            match exit_code {
-                Some(0) => ExecStatus::Success,
-                Some(c) => ExecStatus::Failed(format!("exited {c}")),
-                None if cancel.is_cancelled() => ExecStatus::Cancelled,
-                None => ExecStatus::Failed("harness terminal closed without exit code".into()),
-            }
-        }
+        resolve_status(
+            spec.result_file.is_some(),
+            got_result_file,
+            captured.trim().is_empty(),
+            exit_code,
+            cancel.is_cancelled(),
+        )
     });
 
     // Final guarantee: multi-strategy close with retries (never leave orphans).
@@ -330,10 +315,7 @@ fn stream_result_to_stage(events: &EventSink, text: &str, emitted: &mut usize) {
         return;
     }
     if *emitted == 0 {
-        emit(
-            events,
-            WorkerEvent::Message("── harness output ──".into()),
-        );
+        emit(events, WorkerEvent::Message("── harness output ──".into()));
     }
     while *emitted < lines.len() && *emitted < MAX_STAGE_LINES {
         let line = lines[*emitted];
@@ -398,12 +380,7 @@ fn looks_like_single_turn(spec: &SubprocessSpec) -> bool {
     spec.args.iter().any(|a| {
         matches!(
             a.as_str(),
-            "-p" | "--print"
-                | "--single"
-                | "--output-format"
-                | "--prompt-file"
-                | "exec"
-                | "run"
+            "-p" | "--print" | "--single" | "--output-format" | "--prompt-file" | "exec" | "run"
         ) || a.starts_with("--output-format=")
             || a.starts_with("--prompt-file=")
     })
@@ -439,10 +416,7 @@ fn write_launcher(
     script.push_str("export TERM=\"${TERM:-xterm-256color}\"\n");
     script.push_str("export COLORTERM=\"${COLORTERM:-truecolor}\"\n");
     script.push_str("export DISABLE_AUTO_UPDATE=true\n");
-    script.push_str(&format!(
-        "export RINNE_STAGE_TAG={}\n",
-        sh_quote(stage_tag)
-    ));
+    script.push_str(&format!("export RINNE_STAGE_TAG={}\n", sh_quote(stage_tag)));
 
     for (k, v) in &spec.env {
         script.push_str(&format!("export {}={}\n", k, sh_quote(v)));
@@ -453,6 +427,13 @@ fn write_launcher(
     let log_q = sh_quote(&log_path.display().to_string());
     let tty_q = sh_quote(&tty_path.display().to_string());
     let tag_q = sh_quote(stage_tag);
+    // Where the watchdog parks its current `sleep` pid so `on_exit` can reap it.
+    let sleep_pid_q = sh_quote(
+        &pid_path
+            .with_file_name("watchdog-sleep.pid")
+            .display()
+            .to_string(),
+    );
 
     // ── TTY reset (start + end) — critical for mouse-tracking cleanup ─────
     script.push_str("reset_tty() {\n");
@@ -474,110 +455,71 @@ fn write_launcher(
     script.push_str("  printf '\\033]2;%s\\007' \"$TAG\" 2>/dev/null || true\n");
     script.push_str("}\n");
 
-    // Close THIS window — try every strategy so nothing is left open.
-    script.push_str("close_window() {\n");
-    script.push_str("  TTY_NAME=$(tty 2>/dev/null | sed 's|^/dev/||' || true)\n");
-    script.push_str(&format!("  TAG={tag_q}\n"));
-    script.push_str(&format!(
-        "  [ -n \"${{TTY_NAME:-}}\" ] && echo \"$TTY_NAME\" > {tty_q} 2>/dev/null || true\n"
-    ));
-    script.push_str("  if [ \"$(uname -s 2>/dev/null)\" != Darwin ]; then\n");
-    // Linux: try wmctrl/xdotool by window title.
-    script.push_str("    if command -v wmctrl >/dev/null 2>&1; then\n");
-    script.push_str("      wmctrl -c \"$TAG\" 2>/dev/null || true\n");
-    script.push_str("    fi\n");
-    script.push_str("    if command -v xdotool >/dev/null 2>&1; then\n");
-    script.push_str(
-        "      xdotool search --name \"$TAG\" windowclose %@ 2>/dev/null || true\n",
-    );
-    script.push_str("    fi\n");
-    script.push_str("    return 0\n");
-    script.push_str("  fi\n");
-    // --- macOS Terminal.app: by tty ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"Terminal\"\n");
-    script.push_str("  repeat with w in windows\n");
-    script.push_str("    try\n");
-    script.push_str("      set t to tty of selected tab of w\n");
-    script.push_str("      if t is \"$TTY_NAME\" or t is \"/dev/$TTY_NAME\" then\n");
-    script.push_str("        close w saving no\n");
-    script.push_str("      end if\n");
-    script.push_str("    end try\n");
-    script.push_str("  end repeat\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    // --- macOS Terminal.app: by unique title tag (reliable fallback) ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"Terminal\"\n");
-    script.push_str("  set wins to windows whose name contains \"$TAG\"\n");
-    script.push_str("  repeat with w in wins\n");
-    script.push_str("    try\n");
-    script.push_str("      close w saving no\n");
-    script.push_str("    end try\n");
-    script.push_str("  end repeat\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    // --- iTerm2: by tty + by name ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"iTerm\"\n");
-    script.push_str("  repeat with w in windows\n");
-    script.push_str("    repeat with t in tabs of w\n");
-    script.push_str("      repeat with s in sessions of t\n");
-    script.push_str("        try\n");
-    script.push_str("          set st to tty of s\n");
-    script.push_str("          set nm to name of s\n");
-    script.push_str(
-        "          if st contains \"$TTY_NAME\" or nm contains \"$TAG\" then\n",
-    );
-    script.push_str("            close s\n");
-    script.push_str("          end if\n");
-    script.push_str("        end try\n");
-    script.push_str("      end repeat\n");
-    script.push_str("    end repeat\n");
-    script.push_str("  end repeat\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    // --- System Events: Cmd+W if front window title matches (last resort) ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"System Events\"\n");
-    script.push_str("  if exists process \"Terminal\" then\n");
-    script.push_str("    tell process \"Terminal\"\n");
-    script.push_str("      repeat with w in windows\n");
-    script.push_str("        try\n");
-    script.push_str("          if name of w contains \"$TAG\" then\n");
-    script.push_str("            set frontmost to true\n");
-    script.push_str("            perform action \"AXRaise\" of w\n");
-    script.push_str("            keystroke \"w\" using command down\n");
-    script.push_str("            delay 0.15\n");
-    script.push_str("            -- dismiss \"do you want to terminate\" if any\n");
-    script.push_str("            keystroke return\n");
-    script.push_str("          end if\n");
-    script.push_str("        end try\n");
-    script.push_str("      end repeat\n");
-    script.push_str("    end tell\n");
-    script.push_str("  end if\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    script.push_str("}\n");
+    // NOTE: the launcher deliberately does not close its own window. AppleScript
+    // run from inside the session makes Terminal.app prompt "Closing this window
+    // will terminate the running processes: bash, osascript" on every session.
+    // Rinne closes the window from outside via `ensure_stage_window_closed`,
+    // once the launcher has exited and nothing is left running in it.
 
     script.push_str("on_exit() {\n");
     script.push_str("  ec=$?\n");
+    // Started later; `set -u` means it must be referenced defensively.
+    //
+    // Kill the watchdog's inner `sleep` too, not just the subshell: SIGTERM to
+    // a non-interactive bash does not forward to or reap its foreground child,
+    // so the `sleep` would outlive the launcher for up to WATCHDOG_POLL_SECS.
+    // Rinne closes the window within one 100ms poll of seeing `exit.code`, so
+    // that orphan is exactly what makes Terminal.app ask "terminate the running
+    // processes?" — the prompt this design removes.
+    script.push_str(&format!(
+        "  if [ -n \"${{RINNE_WATCHDOG:-}}\" ]; then\n\
+         \x20   kill \"$RINNE_WATCHDOG\" 2>/dev/null || true\n\
+         \x20   kill \"$(cat {} 2>/dev/null)\" 2>/dev/null || true\n\
+         \x20   wait \"$RINNE_WATCHDOG\" 2>/dev/null || true\n\
+         \x20 fi\n",
+        sleep_pid_q
+    ));
     script.push_str("  reset_tty\n");
     script.push_str("  set_stage_title\n");
     script.push_str(&format!("  echo \"$ec\" > {exit_q}\n"));
     script.push_str(&format!(
-        "  echo \"rinne-launcher: harness exit $ec\" >> {log_q} 2>/dev/null || true\n"
+        "  echo \"{LAUNCHER_MARKER} harness exit $ec\" >> {log_q} 2>/dev/null || true\n"
     ));
-    // Multiple close attempts from inside the session (most reliable).
-    script.push_str("  close_window\n");
-    script.push_str("  sleep 0.2\n");
-    script.push_str("  close_window\n");
+    // Exiting is all this shell should do: once it is gone the window holds no
+    // running processes, so Rinne can close it silently from outside.
     script.push_str("}\n");
     script.push_str("trap on_exit EXIT\n");
     script.push_str("trap 'exit 143' TERM\n");
     script.push_str("trap 'exit 130' INT\n");
 
     script.push_str(&format!("echo $$ > {pid_q}\n"));
+
+    // Parent-death watchdog. Rinne can exit without running any cleanup (panic,
+    // SIGKILL, closed laptop), which used to leave the harness running against
+    // the user's subscription with the Terminal window still open. Poll the
+    // Rinne pid and, once it is gone, signal only *children* — killing this
+    // shell directly would skip `on_exit` and leave mouse tracking enabled.
+    //
+    // The subshell's stdio is detached from the tty: an orphaned `sleep` still
+    // holding this window's terminal is what makes Terminal.app ask "terminate
+    // the running processes?" when Rinne closes the window. It records the
+    // `sleep`'s pid so `on_exit` can reap that too — SIGTERM to the subshell
+    // alone does not forward to its foreground child. No `set -m`: job control
+    // here caused pgid races (see `interactive_launcher_resets_tty_…`).
+    script.push_str(&format!(
+        "RINNE_PID={}\n\
+         (\n\
+         \x20 while kill -0 \"$RINNE_PID\" 2>/dev/null; do\n\
+         \x20   sleep {} & echo $! > {}; wait $!\n\
+         \x20 done\n\
+         \x20 pkill -TERM -P $$ 2>/dev/null || true\n\
+         ) </dev/null >/dev/null 2>&1 &\n\
+         RINNE_WATCHDOG=$!\n",
+        std::process::id(),
+        WATCHDOG_POLL_SECS,
+        sleep_pid_q
+    ));
+
     // Record tty early so Rinne can close the window even if the trap is skipped.
     script.push_str("TTY_NAME=$(tty 2>/dev/null | sed 's|^/dev/||' || true)\n");
     script.push_str(&format!(
@@ -634,19 +576,15 @@ fn write_launcher(
                     log_q
                 ));
             } else {
-                script.push_str(&format!(
-                    "\"${{cmd[@]}}\" 2>&1 | tee -a {}\n",
-                    log_q
-                ));
+                script.push_str(&format!("\"${{cmd[@]}}\" 2>&1 | tee -a {}\n", log_q));
             }
             script.push_str("ec=${PIPESTATUS[0]}\n");
             script.push_str("exit \"$ec\"\n");
         }
     }
 
-    std::fs::write(script_path, script).map_err(|e| {
-        RinneError::Worker(format!("write terminal launcher: {e}"))
-    })?;
+    std::fs::write(script_path, script)
+        .map_err(|e| RinneError::Worker(format!("write terminal launcher: {e}")))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -654,9 +592,8 @@ fn write_launcher(
             .map_err(|e| RinneError::Worker(format!("stat launcher: {e}")))?
             .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(script_path, perms).map_err(|e| {
-            RinneError::Worker(format!("chmod launcher: {e}"))
-        })?;
+        std::fs::set_permissions(script_path, perms)
+            .map_err(|e| RinneError::Worker(format!("chmod launcher: {e}")))?;
     }
     Ok(())
 }
@@ -677,7 +614,10 @@ fn open_system_terminal(
 
     #[cfg(target_os = "macos")]
     {
-        if prefer == "iterm" || prefer == "iterm2" || which("iTerm") || app_exists("iTerm") {
+        // No installed-check: an explicit `RINNE_EXTERNAL_TERMINAL=iterm` is
+        // honoured either way (see `choose_macos_terminal`), so probing for the
+        // app only cost a `which` fork per window open.
+        if choose_macos_terminal(&prefer) == MacTerminal::ITerm {
             return open_iterm(&script, &cwd, stage_tag, win_path);
         }
         // Prefer osascript so we can capture the window id for forced close.
@@ -826,26 +766,6 @@ end tell"#,
     }
 }
 
-#[cfg(target_os = "macos")]
-fn app_exists(name: &str) -> bool {
-    Path::new(&format!("/Applications/{name}.app")).exists()
-        || Path::new(&format!(
-            "{}/Applications/{name}.app",
-            std::env::var("HOME").unwrap_or_default()
-        ))
-        .exists()
-}
-
-fn which(bin: &str) -> bool {
-    StdCommand::new("which")
-        .arg(bin)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 #[cfg(not(target_os = "macos"))]
 fn run_detached(program: &str, args: &[&str]) -> Result<()> {
     StdCommand::new(program)
@@ -858,11 +778,7 @@ fn run_detached(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_file(
-    path: &Path,
-    cancel: &CancellationToken,
-    deadline: Instant,
-) -> Result<()> {
+async fn wait_for_file(path: &Path, cancel: &CancellationToken, deadline: Instant) -> Result<()> {
     loop {
         if cancel.is_cancelled() {
             return Err(RinneError::Worker(
@@ -1106,10 +1022,7 @@ end tell
             ));
         }
         checks.push_str(r#"return "no""#);
-        let output = StdCommand::new("osascript")
-            .arg("-e")
-            .arg(&checks)
-            .output();
+        let output = StdCommand::new("osascript").arg("-e").arg(&checks).output();
         if let Ok(out) = output {
             let s = String::from_utf8_lossy(&out.stdout);
             return s.contains("yes");
@@ -1149,38 +1062,49 @@ async fn soft_stop(pid_path: &Path, exit_path: &Path) {
     #[cfg(unix)]
     {
         unsafe {
-            // TERM the process only (not -pgid): launcher is a simple bash
-            // script without set -m; children are in the same group by default
-            // on macOS Terminal so we also signal the group gently.
+            // Leaves first. The launcher is bash blocked on the foreground
+            // harness, so its TERM trap cannot run until that harness exits —
+            // signalling bash alone is a no-op until it is too late. Killing
+            // the harness lets bash resume into `on_exit`, which resets mouse
+            // tracking and closes the window (prior failure #3 skipped that).
+            //
+            // The group is deliberately not signalled: the launcher shares the
+            // login shell's process group, so `kill(-pid)` targets a group that
+            // does not exist, and signalling the real group would hit the user's
+            // own shell.
+            for child in descendants_deepest_first(pid, &live_child_pids) {
+                libc::kill(child, libc::SIGTERM);
+            }
             libc::kill(pid, libc::SIGTERM);
-            libc::kill(-pid, libc::SIGTERM);
         }
 
         let deadline = Instant::now() + TERM_GRACE;
         while Instant::now() < deadline {
-            if exit_path.exists() {
-                return;
-            }
-            // Process gone?
+            // Wait for the launcher to actually be gone, not merely for its
+            // exit file: `on_exit` writes that file and then keeps running for
+            // a moment. Closing the window while the shell is still alive is
+            // what makes Terminal.app ask to terminate running processes.
             #[cfg(unix)]
             {
                 let alive = unsafe { libc::kill(pid, 0) == 0 };
-                if !alive && exit_path.exists() {
-                    return;
-                }
                 if !alive {
-                    // Write a synthetic exit if trap did not run (hard crash).
-                    let _ = std::fs::write(exit_path, b"143");
+                    if !exit_path.exists() {
+                        // Trap did not run (hard crash) — synthesize an exit.
+                        let _ = std::fs::write(exit_path, b"143");
+                    }
                     return;
                 }
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        // Last resort.
+        // Last resort — again leaves first, so nothing is left reparented to
+        // init still holding the Terminal window open.
         unsafe {
+            for child in descendants_deepest_first(pid, &live_child_pids) {
+                libc::kill(child, libc::SIGKILL);
+            }
             libc::kill(pid, libc::SIGKILL);
-            libc::kill(-pid, libc::SIGKILL);
         }
         if !exit_path.exists() {
             let _ = std::fs::write(exit_path, b"137");
@@ -1222,10 +1146,117 @@ fn flush_line(
     }
 }
 
+/// Which macOS terminal app hosts a Stage session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacTerminal {
+    /// Terminal.app — the system terminal, and the fallback for anything unknown.
+    Apple,
+    ITerm,
+}
+
+/// Pick the terminal app for a Stage session.
+///
+/// `prefer` comes from `RINNE_EXTERNAL_TERMINAL`. Terminal.app is the default,
+/// matching the "opening … in system Terminal" narration; iTerm is opt-in even
+/// when installed. An explicit preference always wins, so having iTerm present
+/// can never override a user asking for Terminal.app.
+fn choose_macos_terminal(prefer: &str) -> MacTerminal {
+    match prefer.trim().to_ascii_lowercase().as_str() {
+        "iterm" | "iterm2" => MacTerminal::ITerm,
+        _ => MacTerminal::Apple,
+    }
+}
+
+/// Direct children of `pid`, as reported by `pgrep -P`. Empty on any failure —
+/// callers still signal the launcher itself, so a missing `pgrep` degrades to
+/// the previous behaviour rather than breaking teardown.
+fn live_child_pids(pid: i32) -> Vec<i32> {
+    let Ok(out) = StdCommand::new("pgrep")
+        .arg("-P")
+        .arg(pid.to_string())
+        .output()
+    else {
+        return Vec::new();
+    };
+    parse_pgrep(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Split `pgrep` output into PIDs, ignoring blank or malformed lines.
+fn parse_pgrep(stdout: &str) -> Vec<i32> {
+    stdout
+        .lines()
+        .filter_map(|l| l.trim().parse::<i32>().ok())
+        .filter(|p| *p > 0)
+        .collect()
+}
+
+/// Every descendant of `root`, deepest first, excluding `root` itself.
+///
+/// Signalling the launcher directly cannot work: bash defers its TERM trap
+/// until the foreground harness exits, so the trap that resets the TTY never
+/// runs. Killing the leaves instead lets the harness exit, bash resume, and
+/// `on_exit` reset mouse tracking before the window closes — which is what
+/// prior failure #3 (`kill -9` on the process group) skipped.
+fn descendants_deepest_first(root: i32, children_of: &dyn Fn(i32) -> Vec<i32>) -> Vec<i32> {
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut queue = std::collections::VecDeque::from([root]);
+    // Breadth-first yields shallow→deep; reversing gives leaves first.
+    let mut order: Vec<i32> = Vec::new();
+    while let Some(pid) = queue.pop_front() {
+        for child in children_of(pid) {
+            // PID reuse can make the walk cyclic; `seen` bounds it.
+            if child > 0 && seen.insert(child) {
+                order.push(child);
+                queue.push_back(child);
+            }
+        }
+    }
+    order.reverse();
+    order
+}
+
+/// Decide a session's terminal status from what the launcher left behind.
+///
+/// `wanted_result` means the kickoff told the harness to write its deliverable
+/// to a result file, so that file — not the exit code — is the real signal.
+fn resolve_status(
+    wanted_result: bool,
+    got_result_file: bool,
+    captured_empty: bool,
+    exit_code: Option<i32>,
+    cancelled: bool,
+) -> ExecStatus {
+    if got_result_file && !captured_empty {
+        return ExecStatus::Success;
+    }
+    match exit_code {
+        Some(c) if c != 0 => return ExecStatus::Failed(format!("exited {c}")),
+        None if cancelled => return ExecStatus::Cancelled,
+        _ => {}
+    }
+    // Exit 0 but no deliverable: the user closed the window, or the harness
+    // never did the work. Trusting the exit code here silently drops the node's
+    // output and marks it succeeded.
+    if wanted_result {
+        return ExecStatus::Failed(
+            "harness produced no deliverable — result file was never written".into(),
+        );
+    }
+    match exit_code {
+        Some(_) => ExecStatus::Success,
+        None => ExecStatus::Failed("harness terminal closed without exit code".into()),
+    }
+}
+
 fn is_terminal_noise(line: &str) -> bool {
     let t = line.trim();
     if t.is_empty() {
         return false;
+    }
+    // Rinne's own launcher bookkeeping shares the log the Stage tails. It is
+    // not harness output and must never stand in for the deliverable.
+    if t.starts_with(LAUNCHER_MARKER) {
+        return true;
     }
     // SGR mouse reports: digits/semicolons ending in M/m, often concatenated.
     if t.len() >= 4
@@ -1265,6 +1296,232 @@ fn unique_suffix() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree<'a>(edges: &'a [(i32, &'a [i32])]) -> impl Fn(i32) -> Vec<i32> + 'a {
+        move |pid| {
+            edges
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map(|(_, kids)| kids.to_vec())
+                .unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn descendants_are_returned_leaves_before_parents() {
+        // launcher(10) → harness(20) → tool(30), plus a sibling(21).
+        let f = tree(&[(10, &[20, 21]), (20, &[30])]);
+        let got = descendants_deepest_first(10, &f);
+
+        assert!(!got.contains(&10), "root must not be signalled: {got:?}");
+        let pos = |p: i32| got.iter().position(|x| *x == p).unwrap();
+        assert!(
+            pos(30) < pos(20),
+            "a child must be signalled before its parent"
+        );
+        assert_eq!(got.len(), 3, "{got:?}");
+    }
+
+    #[test]
+    fn an_explicit_terminal_preference_beats_an_installed_iterm() {
+        // Having iTerm installed must not override an explicit choice, or the
+        // RINNE_EXTERNAL_TERMINAL escape hatch cannot select Terminal.app.
+        assert_eq!(choose_macos_terminal("terminal"), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal("terminal.app"), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal("iterm"), MacTerminal::ITerm);
+        assert_eq!(choose_macos_terminal("iterm2"), MacTerminal::ITerm);
+    }
+
+    #[test]
+    fn with_no_preference_the_system_terminal_is_used() {
+        // Rinne's own narration promises the "system Terminal"; defaulting to
+        // whatever else happens to be installed contradicts it.
+        assert_eq!(choose_macos_terminal(""), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal("   "), MacTerminal::Apple);
+    }
+
+    #[test]
+    fn an_unrecognised_preference_falls_back_to_terminal_app() {
+        assert_eq!(choose_macos_terminal("wezterm"), MacTerminal::Apple);
+    }
+
+    #[test]
+    fn launcher_never_closes_its_own_window_from_inside() {
+        let dir = std::env::temp_dir().join(format!("rinne-ext-noclose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.command");
+        let spec = SubprocessSpec {
+            program: "claude".into(),
+            args: vec!["hello".into()],
+            workspace: dir.clone(),
+            stdin: None,
+            timeout: None,
+            env: vec![],
+            result_file: Some(dir.join("result.txt")),
+        };
+        write_launcher(
+            &script,
+            &spec,
+            &dir.join("h.log"),
+            &dir.join("e.code"),
+            &dir.join("w.pid"),
+            &dir.join("tty.name"),
+            "rinne-stage-noclose-tag",
+            TerminalMode::Interactive,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+
+        // Closing the window from a process *inside* it makes Terminal.app ask
+        // "Closing this window will terminate the running processes: bash,
+        // osascript" on every session. Rinne closes the window from outside,
+        // after the launcher has exited, where nothing is left running.
+        assert!(
+            !body.contains("osascript"),
+            "launcher must not run AppleScript inside its own window: {body}"
+        );
+        assert!(
+            !body.contains("close_window"),
+            "window closing belongs to Rinne, not the launcher: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launcher_reaps_the_harness_when_rinne_dies() {
+        let dir = std::env::temp_dir().join(format!("rinne-ext-wd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.command");
+        let spec = SubprocessSpec {
+            program: "claude".into(),
+            args: vec!["hello".into()],
+            workspace: dir.clone(),
+            stdin: None,
+            timeout: None,
+            env: vec![],
+            result_file: Some(dir.join("result.txt")),
+        };
+        write_launcher(
+            &script,
+            &spec,
+            &dir.join("h.log"),
+            &dir.join("e.code"),
+            &dir.join("w.pid"),
+            &dir.join("tty.name"),
+            "rinne-stage-wd-tag",
+            TerminalMode::Interactive,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+
+        // Rinne can be SIGKILLed, so nothing in-process can clean up. The
+        // launcher must watch Rinne's pid itself and reap the harness.
+        assert!(
+            body.contains(&format!("RINNE_PID={}", std::process::id())),
+            "launcher must know the Rinne pid that spawned it"
+        );
+        assert!(
+            body.contains("kill -0 \"$RINNE_PID\""),
+            "launcher must poll that pid for liveness"
+        );
+        // Bash keeps only one EXIT trap, so the watchdog must be torn down from
+        // inside on_exit rather than by installing a second one — a second
+        // `trap ... EXIT` would silently replace the TTY reset.
+        assert_eq!(
+            body.lines()
+                .filter(|l| l.starts_with("trap ") && l.ends_with(" EXIT"))
+                .count(),
+            1,
+            "exactly one EXIT trap, or on_exit is silently replaced: {body}"
+        );
+        // It must kill only its children: killing itself would skip on_exit and
+        // leave mouse tracking enabled (prior failure #3).
+        assert!(
+            body.contains("pkill -TERM -P $$"),
+            "watchdog must signal children so on_exit still resets the TTY"
+        );
+        // The watchdog's own `sleep` must not be left on this window's tty:
+        // killing the subshell does not reap its foreground child, and an
+        // orphan holding the terminal is what makes Terminal.app ask
+        // "terminate the running processes?" when Rinne closes the window.
+        assert!(
+            body.contains("watchdog-sleep.pid"),
+            "watchdog must record its sleep pid so on_exit can reap it: {body}"
+        );
+        assert!(
+            body.contains("</dev/null >/dev/null 2>&1 &"),
+            "watchdog stdio must be detached from the window's tty: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pgrep_output_parses_and_ignores_junk() {
+        assert_eq!(parse_pgrep("120\n131\n"), vec![120, 131]);
+        assert_eq!(parse_pgrep(""), Vec::<i32>::new());
+        assert_eq!(parse_pgrep("\n  \nnot-a-pid\n7\n"), vec![7]);
+        // A zero or negative pid would signal a process group; never emit one.
+        assert_eq!(parse_pgrep("0\n-1\n9"), vec![9]);
+    }
+
+    #[test]
+    fn descendants_of_a_leaf_is_empty() {
+        let f = tree(&[]);
+        assert!(descendants_deepest_first(99, &f).is_empty());
+    }
+
+    #[test]
+    fn descendants_terminates_on_a_cycle() {
+        // PID reuse can produce a cycle; the walk must not hang or repeat.
+        let f = tree(&[(1, &[2]), (2, &[1])]);
+        let got = descendants_deepest_first(1, &f);
+        assert_eq!(got, vec![2], "{got:?}");
+    }
+
+    #[test]
+    fn a_missing_deliverable_fails_even_when_the_harness_exits_clean() {
+        // An interactive kickoff tells the harness to write its deliverable to
+        // a result file. Exiting 0 without one means the user closed the window
+        // or the harness never did the work — the node contributed nothing and
+        // must not be reported as succeeded.
+        let status = resolve_status(true, false, true, Some(0), false);
+        assert!(
+            matches!(status, ExecStatus::Failed(_)),
+            "expected Failed, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn a_produced_deliverable_succeeds() {
+        assert!(matches!(
+            resolve_status(true, true, false, Some(0), false),
+            ExecStatus::Success
+        ));
+    }
+
+    #[test]
+    fn capture_sessions_still_succeed_on_a_clean_exit() {
+        // No result file was ever demanded, so the exit code is the only signal.
+        assert!(matches!(
+            resolve_status(false, false, false, Some(0), false),
+            ExecStatus::Success
+        ));
+    }
+
+    #[test]
+    fn launcher_bookkeeping_is_not_harness_output() {
+        // The launcher writes its own exit marker into the same log the Stage
+        // tails, so without filtering it is shown as harness output and can end
+        // up standing in for the deliverable.
+        assert!(is_terminal_noise("rinne-launcher: harness exit 0"));
+        assert!(is_terminal_noise("  rinne-launcher: harness exit 143  "));
+        assert!(!is_terminal_noise("editing src/main.rs"));
+        assert!(!is_terminal_noise(
+            "the launcher script is described in rinne-launcher docs"
+        ));
+    }
 
     #[test]
     fn sh_quote_handles_spaces_and_quotes() {
@@ -1311,8 +1568,10 @@ mod tests {
         let body = std::fs::read_to_string(&script).unwrap();
         assert!(body.contains("reset_tty"), "must reset mouse tracking");
         assert!(body.contains("1000l"), "must disable mouse mode 1000");
-        assert!(body.contains("close_window"), "must close Terminal on exit");
-        assert!(body.contains("set_stage_title"), "must title window for close-by-name");
+        assert!(
+            body.contains("set_stage_title"),
+            "must title window for close-by-name"
+        );
         assert!(body.contains("rinne-stage-test-tag"));
         assert!(body.contains("trap on_exit EXIT"));
         assert!(!body.contains("script -q"), "must not use script(1)");
@@ -1358,7 +1617,6 @@ mod tests {
         let body = std::fs::read_to_string(&script).unwrap();
         assert!(body.contains("tee"));
         assert!(!body.contains("script -q"));
-        assert!(body.contains("close_window"));
         assert!(body.contains("rinne-stage-cap-tag"));
         let _ = std::fs::remove_dir_all(&dir);
     }

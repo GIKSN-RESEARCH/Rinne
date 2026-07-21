@@ -87,7 +87,12 @@ impl Transport for StdioTransport {
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
-        let req = Request { jsonrpc: "2.0", id, method, params };
+        let req = Request {
+            jsonrpc: "2.0",
+            id,
+            method,
+            params,
+        };
         let line = serde_json::to_string(&req).map_err(RinneError::Json)?;
         self.write_line(&line).await?;
 
@@ -121,7 +126,11 @@ impl Transport for StdioTransport {
     }
 
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
-        let note = Notification { jsonrpc: "2.0", method, params };
+        let note = Notification {
+            jsonrpc: "2.0",
+            method,
+            params,
+        };
         let line = serde_json::to_string(&note).map_err(RinneError::Json)?;
         self.write_line(&line).await
     }
@@ -190,7 +199,8 @@ impl Transport for HttpTransport {
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
-        let body = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let body =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let resp = self.post(&body).await?;
         let status = resp.status();
         let ct = resp

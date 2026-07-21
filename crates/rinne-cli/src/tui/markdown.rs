@@ -141,7 +141,11 @@ impl Renderer {
             } else {
                 true
             };
-            self.words.push(Word { text: piece.to_string(), style, space_before });
+            self.words.push(Word {
+                text: piece.to_string(),
+                style,
+                space_before,
+            });
             first = false;
         }
         // A trailing space (or an all-whitespace event) means the next word needs
@@ -167,7 +171,11 @@ impl Renderer {
                 } else {
                     let style = self.inline_style().fg(Color::LightCyan);
                     let space_before = !self.words.is_empty() && self.need_space;
-                    self.words.push(Word { text: t.to_string(), style, space_before });
+                    self.words.push(Word {
+                        text: t.to_string(),
+                        style,
+                        space_before,
+                    });
                     self.need_space = false;
                 }
             }
@@ -334,7 +342,10 @@ impl Renderer {
         }
         let quote_prefix = self.quote > 0;
         let lead_w = left + marker.as_deref().map(UnicodeWidthStr::width).unwrap_or(0);
-        let avail = self.width.saturating_sub(lead_w + if quote_prefix { 2 } else { 0 }).max(8);
+        let avail = self
+            .width
+            .saturating_sub(lead_w + if quote_prefix { 2 } else { 0 })
+            .max(8);
 
         // Greedy wrap words to `avail`, honoring each word's leading space.
         let mut lines: Vec<Vec<Word>> = vec![Vec::new()];
@@ -369,7 +380,10 @@ impl Renderer {
             }
             if i == 0 {
                 if let Some(m) = &marker {
-                    spans.push(Span::styled(m.clone(), Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        m.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
             }
             for (j, w) in words.into_iter().enumerate() {
@@ -471,7 +485,9 @@ impl Renderer {
                         _ => (0, padn),
                     };
                     let cell_style = if is_head {
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
@@ -492,10 +508,12 @@ impl Renderer {
 
 fn heading_style(level: HeadingLevel) -> Style {
     match level {
-        HeadingLevel::H1 | HeadingLevel::H2 => {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        }
-        _ => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        HeadingLevel::H1 | HeadingLevel::H2 => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
@@ -554,7 +572,12 @@ mod tests {
     fn text_of(lines: &[Line]) -> String {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -564,7 +587,10 @@ mod tests {
         let out = render("## Hello **world**", 80);
         let t = text_of(&out);
         assert!(t.contains("Hello world"), "{t:?}");
-        assert!(!t.contains('#') && !t.contains('*'), "raw markup leaked: {t:?}");
+        assert!(
+            !t.contains('#') && !t.contains('*'),
+            "raw markup leaked: {t:?}"
+        );
     }
 
     #[test]
@@ -579,8 +605,14 @@ mod tests {
         let md = "| Aspect | Detail |\n|---|---|\n| Purpose | Host content |\n| Tech | Next.js |";
         let out = render(md, 80);
         let t = text_of(&out);
-        assert!(t.contains('┌') && t.contains('│') && t.contains('└'), "no box: {t:?}");
-        assert!(t.contains("Aspect") && t.contains("Purpose") && t.contains("Next.js"), "{t:?}");
+        assert!(
+            t.contains('┌') && t.contains('│') && t.contains('└'),
+            "no box: {t:?}"
+        );
+        assert!(
+            t.contains("Aspect") && t.contains("Purpose") && t.contains("Next.js"),
+            "{t:?}"
+        );
         assert!(!t.contains("---"), "raw separator leaked: {t:?}");
     }
 
@@ -590,7 +622,11 @@ mod tests {
         let width = 40;
         let out = render(md, width);
         for l in &out {
-            let w: usize = l.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let w: usize = l
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             assert!(w <= width, "line exceeds width {width}: {w}");
         }
     }

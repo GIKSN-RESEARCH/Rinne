@@ -149,8 +149,16 @@ async fn live_catalog(
     config: &rinne_config::Config,
     provider: &str,
 ) -> Result<Vec<rinne_workers::transport::http::DiscoveredModel>, String> {
-    if config.backends.harness.enabled.iter().any(|h| h == provider) {
-        return Err(format!("`{provider}` is a harness CLI — no remote model catalog."));
+    if config
+        .backends
+        .harness
+        .enabled
+        .iter()
+        .any(|h| h == provider)
+    {
+        return Err(format!(
+            "`{provider}` is a harness CLI — no remote model catalog."
+        ));
     }
 
     // Cloudflare: never hit /ai/v1/models — it always 405s.
@@ -164,9 +172,7 @@ async fn live_catalog(
         Err(e) => {
             let msg = e.to_string();
             // Some CF-shaped base_urls are registered under a custom name.
-            if msg.contains("405")
-                && (base.contains("cloudflare.com") || base.contains("/ai/v1"))
-            {
+            if msg.contains("405") && (base.contains("cloudflare.com") || base.contains("/ai/v1")) {
                 if let Ok(cf) = cloudflare_catalog(config).await {
                     return Ok(cf);
                 }
@@ -223,8 +229,7 @@ async fn cloudflare_catalog(
                 .to_string()
         })?;
 
-    match rinne_workers::transport::http::list_cloudflare_workers_ai_models(&account_id, &key)
-        .await
+    match rinne_workers::transport::http::list_cloudflare_workers_ai_models(&account_id, &key).await
     {
         Ok(models) if !models.is_empty() => Ok(models),
         Ok(_) => Ok(rinne_workers::transport::http::cloudflare_text_model_fallback()),
@@ -261,7 +266,8 @@ pub async fn overview_lines() -> Vec<String> {
     let map = collect_worker_models().await;
     if map.is_empty() {
         return vec![
-            "no workers available — `rinne doctor` to see why, or `/connect` to add one.".to_string(),
+            "no workers available — `rinne doctor` to see why, or `/connect` to add one."
+                .to_string(),
         ];
     }
     let mut out = vec![format!("{} worker(s) available:", map.len())];
@@ -331,17 +337,16 @@ async fn harness_ladder_lines(config: &rinne_config::Config, harness: &str) -> V
             for m in l {
                 out.push(format!("  • {m}"));
             }
-            out.push(format!("set a default: `rinne config set models.{harness} <model>`"));
+            out.push(format!(
+                "set a default: `rinne config set models.{harness} <model>`"
+            ));
             out
         }
         _ => {
             // Fall back to configured pin if the adapter exposes no ladder.
             if let Some(m) = config.models.by_worker.get(harness) {
                 if !m.is_empty() {
-                    return vec![
-                        format!("`{harness}` configured model:"),
-                        format!("  • {m}"),
-                    ];
+                    return vec![format!("`{harness}` configured model:"), format!("  • {m}")];
                 }
             }
             vec![format!(
@@ -361,7 +366,13 @@ pub async fn list_lines(provider: &str) -> Vec<String> {
     };
 
     // A harness has no HTTP catalog — show its model ladder from the registry.
-    if config.backends.harness.enabled.iter().any(|h| h == provider) {
+    if config
+        .backends
+        .harness
+        .enabled
+        .iter()
+        .any(|h| h == provider)
+    {
         return harness_ladder_lines(&config, provider).await;
     }
 
@@ -429,7 +440,9 @@ pub async fn list_lines(provider: &str) -> Vec<String> {
                 let mut out = format_configured_api_models(provider, &configured);
                 out.insert(
                     0,
-                    format!("live catalog unavailable for `{provider}` — using configured model(s):"),
+                    format!(
+                        "live catalog unavailable for `{provider}` — using configured model(s):"
+                    ),
                 );
                 return out;
             }
@@ -521,7 +534,10 @@ fn resolve_endpoint(config: &rinne_config::Config, name: &str) -> Result<(String
             .clone()
             .ok_or_else(|| format!("`{name}` has no base_url set in config."))?;
         let key = rinne_config::secrets::resolve_api_key(name, &p.key_env).ok_or_else(|| {
-            format!("no key for `{name}` — `rinne connect {name} <key>` or export {}.", p.key_env)
+            format!(
+                "no key for `{name}` — `rinne connect {name} <key>` or export {}.",
+                p.key_env
+            )
         })?;
         return Ok((base, key));
     }
@@ -533,7 +549,9 @@ fn resolve_endpoint(config: &rinne_config::Config, name: &str) -> Result<(String
     let backend_name = format!("{:?}", cond.backend).to_lowercase();
     if backend_name == name {
         let base = rinne_conductor::conductor_base_url(cond).ok_or_else(|| {
-            format!("`{name}` (conductor) has no endpoint — set [conductor].base_url or account_id.")
+            format!(
+                "`{name}` (conductor) has no endpoint — set [conductor].base_url or account_id."
+            )
         })?;
         // A keyless backend (e.g. local Ollama) has no credential — query it with
         // an empty key. A backend that DOES expect a key but has none configured
@@ -564,7 +582,10 @@ async fn fetch(
     key: &str,
 ) -> Result<Vec<rinne_workers::transport::http::DiscoveredModel>> {
     let client = rinne_workers::transport::http::OpenAiClient::new(base, Some(key.to_string()));
-    client.list_models().await.map_err(|e| anyhow!(e.to_string()))
+    client
+        .list_models()
+        .await
+        .map_err(|e| anyhow!(e.to_string()))
 }
 
 #[cfg(test)]
@@ -596,6 +617,9 @@ mod tests {
         let err = resolve_endpoint(&cfg, "definitely-not-a-backend").unwrap_err();
         assert!(err.contains("not a known worker"), "{err}");
         // It should suggest valid names (default config enables claude-code).
-        assert!(err.contains("claude-code"), "should list valid names: {err}");
+        assert!(
+            err.contains("claude-code"),
+            "should list valid names: {err}"
+        );
     }
 }

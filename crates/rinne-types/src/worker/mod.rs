@@ -65,5 +65,9 @@ pub trait ToolExecutor: Send + Sync {
     /// Invoke a tool by its qualified id (`server.tool`) with JSON `arguments`,
     /// returning the result rendered as text for the model to read. An error is
     /// returned as a string the loop feeds back so the model can recover.
-    async fn call(&self, id: &str, arguments: serde_json::Value) -> std::result::Result<String, String>;
+    async fn call(
+        &self,
+        id: &str,
+        arguments: serde_json::Value,
+    ) -> std::result::Result<String, String>;
 }

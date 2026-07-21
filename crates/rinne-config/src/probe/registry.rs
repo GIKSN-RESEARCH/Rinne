@@ -39,7 +39,8 @@ pub const KNOWN_HARNESSES: &[KnownHarness] = &[
         // billing and non-interactive `-p` prefers it (`CONTEXT.md` §9).
         override_env: Some("ANTHROPIC_API_KEY"),
         footgun: true,
-        login_hint: "claude  (subscription login is honored automatically; run `claude` once to sign in)",
+        login_hint:
+            "claude  (subscription login is honored automatically; run `claude` once to sign in)",
     },
     KnownHarness {
         name: "codex",

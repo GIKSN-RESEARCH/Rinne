@@ -20,21 +20,25 @@ use rinne_core::worker::{
 use rinne_core::{Result, RinneError};
 use rinne_workers::transport::http::{ChatMessage, ChatRequest, OpenAiClient};
 
-/// Whether Stage visibility is requested (set by CLI/GUI via env).
-fn stage_visible_from_env() -> bool {
-    matches!(
-        std::env::var("RINNE_HARNESS_STAGE_VISIBLE").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
-}
-
 /// A backend that completes a planning prompt and returns the raw model text.
 #[async_trait]
 pub trait PlanBackend: Send + Sync {
     /// A short label for narration / logs.
     fn name(&self) -> &str;
     /// Complete a system+user prompt, returning the raw response text.
-    async fn complete(&self, system: &str, user: &str) -> Result<String>;
+    ///
+    /// `rung` is the planner ladder's current position: 0 is the cheapest rung
+    /// and each escalation adds one. A backend with its own model ladder must
+    /// honour it, or `Conductor::plan` narrates an escalation that never
+    /// happens and re-runs the identical model on the identical prompt.
+    async fn complete(&self, system: &str, user: &str, rung: usize) -> Result<String>;
+
+    /// How many rungs this backend can address on its own. Backends whose model
+    /// is pinned by the caller report 1; a harness reports its ladder length so
+    /// `ConductorLadder` knows escalation still has somewhere to go.
+    fn ladder_depth(&self) -> usize {
+        1
+    }
 }
 
 /// An OpenAI-compatible HTTP backend.
@@ -45,7 +49,12 @@ pub struct OpenAiBackend {
 }
 
 impl OpenAiBackend {
-    pub fn new(name: impl Into<String>, base_url: &str, api_key: Option<String>, model: &str) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        base_url: &str,
+        api_key: Option<String>,
+        model: &str,
+    ) -> Self {
         Self {
             name: name.into(),
             client: OpenAiClient::new(base_url, api_key),
@@ -69,7 +78,9 @@ impl PlanBackend for OpenAiBackend {
         &self.name
     }
 
-    async fn complete(&self, system: &str, user: &str) -> Result<String> {
+    /// `rung` is ignored: the caller already pinned the model for this rung via
+    /// [`resolve_openai_model`] before constructing the backend.
+    async fn complete(&self, system: &str, user: &str, _rung: usize) -> Result<String> {
         let req = ChatRequest {
             model: self.model.clone(),
             messages: vec![ChatMessage::system(system), ChatMessage::user(user)],
@@ -89,8 +100,9 @@ impl PlanBackend for OpenAiBackend {
 /// A harness worker pressed into service as the conductor — the §7 fallback when
 /// no API backend is configured ("the user's cheapest installed harness").
 ///
-/// When Stage is visible, this opens the same PTY/session path as generator
-/// nodes so the planner harness is leveraged and shown on the Stage (`plan.md`).
+/// Runs headless on the cheapest rung of the harness's ladder: a plan is one
+/// small JSON document, so neither a visible Terminal session nor a frontier
+/// model earns its cost here (see `complete` and [`planner_rung`]).
 pub struct HarnessBackend {
     worker: Arc<dyn Worker>,
     workspace: PathBuf,
@@ -120,8 +132,17 @@ impl PlanBackend for HarnessBackend {
         &self.worker.descriptor().name
     }
 
-    async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let visible = stage_visible_from_env();
+    fn ladder_depth(&self) -> usize {
+        self.worker.descriptor().models.len().max(1)
+    }
+
+    async fn complete(&self, system: &str, user: &str, rung: usize) -> Result<String> {
+        // Planning is always headless, even when the Stage is on. A planner
+        // emits one JSON object nobody reads live, so opening a Terminal window
+        // and booting the harness's full product UI to produce it cost minutes
+        // of wall-clock per run for visibility nobody wanted. Generators stay
+        // visible — watching those work is the point of the Stage.
+        const VISIBLE: bool = false;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // Remap SessionOpened so Stage can key the pane as `conductor` (planner).
         let forward = self.events.clone();
@@ -147,25 +168,18 @@ impl PlanBackend for HarnessBackend {
                 }
             }
         });
-        // Prefer a stronger model from the harness ladder when available.
-        let model = self
-            .worker
-            .descriptor()
-            .models
-            .last()
-            .cloned()
-            .or_else(|| self.worker.descriptor().models.first().cloned());
-        // Single-turn planner in Terminal (when Stage is on). Needs enough time
-        // for a real plan — 90s was killing grok mid-run and falling through.
-        // Auth failures still fail-fast via non-zero exit / login text below.
+        let model = planner_rung(&self.worker.descriptor().models, rung);
+        // Needs enough time for a real plan — 90s was killing grok mid-run and
+        // falling through. Auth failures still fail-fast via non-zero exit /
+        // login text below.
         let request = ExecuteRequest {
             role: Role::Planner,
             instruction: format!("{system}\n\n{user}"),
             context: ContextPacket::default(),
             workspace: self.workspace.clone(),
             constraints: Constraints {
-                timeout_secs: Some(if visible { 600 } else { 300 }),
-                visible_stage: visible,
+                timeout_secs: Some(300),
+                visible_stage: VISIBLE,
                 model,
                 ..Default::default()
             },
@@ -220,7 +234,12 @@ fn tail(s: &str, max: usize) -> &str {
     if s.chars().count() <= max {
         return s;
     }
-    let start = s.char_indices().rev().nth(max - 1).map(|(i, _)| i).unwrap_or(0);
+    let start = s
+        .char_indices()
+        .rev()
+        .nth(max - 1)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     &s[start..]
 }
 
@@ -268,8 +287,9 @@ pub fn conductor_base_url(config: &ConductorConfig) -> Option<String> {
             .map(|id| format!("https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1")),
         ConductorBackend::Groq => Some("https://api.groq.com/openai/v1".into()),
         ConductorBackend::Nvidia => Some("https://integrate.api.nvidia.com/v1".into()),
-        other => rinne_config::known::known_api_provider(other.as_str())
-            .map(|p| p.base_url.to_string()),
+        other => {
+            rinne_config::known::known_api_provider(other.as_str()).map(|p| p.base_url.to_string())
+        }
     }
 }
 
@@ -303,12 +323,76 @@ pub fn resolve_openai(config: &ConductorConfig) -> Result<Option<OpenAiBackend>>
     )))
 }
 
+/// Which rung of a harness's model ladder plans on.
+///
+/// Ladders are cheap→strong, and a plan is one small structured document, so
+/// `rung` 0 (the cheapest) plans first. Escalation from `ConductorLadder` walks
+/// up this list — the honest signal that a goal needs a stronger planner —
+/// while taking the top rung up front spent frontier tokens on every goal
+/// however trivial. Past the end, the strongest rung is the best we can do.
+fn planner_rung(models: &[String], rung: usize) -> Option<String> {
+    models.get(rung).or_else(|| models.last()).cloned()
+}
+
 /// Like [`resolve_openai`] but pins the model id (planner ladder rung).
-pub fn resolve_openai_model(config: &ConductorConfig, model: &str) -> Result<Option<OpenAiBackend>> {
+pub fn resolve_openai_model(
+    config: &ConductorConfig,
+    model: &str,
+) -> Result<Option<OpenAiBackend>> {
     let mut backend = match resolve_openai(config)? {
         Some(b) => b,
         None => return Ok(None),
     };
     backend.set_model(model);
     Ok(Some(backend))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planning_starts_on_the_cheapest_rung() {
+        // Ladders are cheap→strong. Planning is one small structured document,
+        // so taking the top rung spent frontier tokens on every goal however
+        // trivial — "explain this codebase" planned on opus.
+        let claude = [
+            "haiku".to_string(),
+            "sonnet".to_string(),
+            "opus".to_string(),
+        ];
+        assert_eq!(planner_rung(&claude, 0).as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn escalating_walks_up_the_harness_ladder() {
+        // Regression: the rung was pinned to `first()`, so a parse failure
+        // narrated "escalating planner …" and then re-ran the identical model.
+        let claude = [
+            "haiku".to_string(),
+            "sonnet".to_string(),
+            "opus".to_string(),
+        ];
+        assert_eq!(planner_rung(&claude, 1).as_deref(), Some("sonnet"));
+        assert_eq!(planner_rung(&claude, 2).as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn a_rung_past_the_top_pins_the_strongest_model() {
+        let claude = ["haiku".to_string(), "opus".to_string()];
+        assert_eq!(planner_rung(&claude, 9).as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn a_single_rung_ladder_still_resolves() {
+        let one = ["grok-4.5".to_string()];
+        assert_eq!(planner_rung(&one, 0).as_deref(), Some("grok-4.5"));
+        assert_eq!(planner_rung(&one, 3).as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn an_empty_ladder_pins_no_model() {
+        assert_eq!(planner_rung(&[], 0), None);
+        assert_eq!(planner_rung(&[], 5), None);
+    }
 }

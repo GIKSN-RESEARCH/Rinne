@@ -69,8 +69,12 @@ fn registry(slow: bool) -> WorkerRegistry {
     };
 
     let mut reg = WorkerRegistry::new();
-    reg.register(Arc::new(MockWorker::new(mk("planner", "design: middleware shape"))) as Arc<dyn Worker>);
-    reg.register(Arc::new(MockWorker::new(mk("coder", "implemented").with_diff("--- the diff ---"))) as Arc<dyn Worker>);
+    reg.register(
+        Arc::new(MockWorker::new(mk("planner", "design: middleware shape"))) as Arc<dyn Worker>,
+    );
+    reg.register(Arc::new(MockWorker::new(
+        mk("coder", "implemented").with_diff("--- the diff ---"),
+    )) as Arc<dyn Worker>);
     reg.register(Arc::new(MockWorker::new(mk("writer", "summary text"))) as Arc<dyn Worker>);
     reg
 }
@@ -84,16 +88,26 @@ async fn runs_dag_end_to_end() {
 
     let reg = registry(false);
     let mut engine = Engine::new(&bb, plan.clone(), &reg, EngineOptions::default());
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
-    assert!(report.completed, "expected completion, got {:?}", report.stop_reason);
+    assert!(
+        report.completed,
+        "expected completion, got {:?}",
+        report.stop_reason
+    );
     assert_eq!(report.stop_reason, StopReason::Completed);
     for (id, status) in &report.node_statuses {
         assert_eq!(*status, NodeStatus::Succeeded, "node {id} not succeeded");
     }
 
     // Artifacts flowed through the blackboard.
-    assert_eq!(bb.read_artifact("design.md").unwrap(), "design: middleware shape");
+    assert_eq!(
+        bb.read_artifact("design.md").unwrap(),
+        "design: middleware shape"
+    );
     assert_eq!(bb.read_artifact("impl.md").unwrap(), "implemented");
     assert_eq!(bb.read_artifact("n2.diff").unwrap(), "--- the diff ---");
     assert_eq!(bb.read_artifact("summary.md").unwrap(), "summary text");
@@ -125,18 +139,26 @@ async fn resume_skips_already_succeeded_nodes() {
             .unwrap()
             .as_secs();
         state.set_meta("started_at", &now.to_string()).unwrap();
-        bb.write_artifact("design.md", "preexisting design").unwrap();
+        bb.write_artifact("design.md", "preexisting design")
+            .unwrap();
     }
 
     let reg = registry(false);
     let mut engine = Engine::new(&bb, plan.clone(), &reg, EngineOptions::default());
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
     assert!(report.completed);
 
     // n1 was never re-run (its iteration count stayed 0); n2/n3 ran once each.
     let state = State::open(&bb.state_db_path()).unwrap();
-    assert_eq!(state.iterations("n1").unwrap(), 0, "n1 should have been skipped");
+    assert_eq!(
+        state.iterations("n1").unwrap(),
+        0,
+        "n1 should have been skipped"
+    );
     assert_eq!(state.iterations("n2").unwrap(), 1);
     assert_eq!(state.iterations("n3").unwrap(), 1);
     // The pre-existing artifact was not overwritten by a re-run.
@@ -167,11 +189,22 @@ async fn kill_then_resume_reaches_same_final_state() {
     // Resume with a fresh token and fast workers: must reach full completion.
     let reg2 = registry(false);
     let mut engine2 = Engine::new(&bb, plan.clone(), &reg2, EngineOptions::default());
-    let second = engine2.run(CancellationToken::new(), None, None).await.unwrap();
+    let second = engine2
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
-    assert!(second.completed, "resume should complete, got {:?}", second.stop_reason);
+    assert!(
+        second.completed,
+        "resume should complete, got {:?}",
+        second.stop_reason
+    );
     for (id, status) in &second.node_statuses {
-        assert_eq!(*status, NodeStatus::Succeeded, "node {id} not succeeded after resume");
+        assert_eq!(
+            *status,
+            NodeStatus::Succeeded,
+            "node {id} not succeeded after resume"
+        );
     }
     assert_eq!(bb.read_artifact("summary.md").unwrap(), "summary text");
 
@@ -191,7 +224,10 @@ async fn iteration_budget_stops_the_run() {
         ..EngineOptions::default()
     };
     let mut engine = Engine::new(&bb, plan.clone(), &reg, opts);
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
     assert_eq!(report.stop_reason, StopReason::BudgetIterations);
     assert!(!report.completed);

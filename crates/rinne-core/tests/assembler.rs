@@ -43,7 +43,9 @@ fn harness_pins_paths_inlines_nothing() {
     let plan = plan_with_mention();
 
     let asm = ContextAssembler::new(&bb, &plan, None);
-    let packet = asm.build(&plan.nodes[0], WorkerFamily::Harness, None).unwrap();
+    let packet = asm
+        .build(&plan.nodes[0], WorkerFamily::Harness, None)
+        .unwrap();
 
     assert!(packet.inlined_files.is_empty());
     assert!(packet.pinned_paths.contains(&PathBuf::from("src/a.rs")));
@@ -68,7 +70,11 @@ fn api_inlines_contents_pins_nothing() {
     let packet = asm.build(&plan.nodes[0], WorkerFamily::Api, None).unwrap();
 
     assert!(packet.pinned_paths.is_empty());
-    let contents: Vec<&str> = packet.inlined_files.iter().map(|f| f.contents.as_str()).collect();
+    let contents: Vec<&str> = packet
+        .inlined_files
+        .iter()
+        .map(|f| f.contents.as_str())
+        .collect();
     assert!(contents.contains(&"fn a() {}"));
     assert!(contents.contains(&"the design"));
 

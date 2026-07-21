@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use rinne_conductor::{Conductor, ConductorInput, PlanBackend};
-use rinne_core::{RinneError, Result};
+use rinne_core::{Result, RinneError};
 
 /// A scripted backend: each `complete` call pops the next canned response.
 /// `Ok` is returned text; `Err` simulates a backend failure.
@@ -31,7 +31,7 @@ impl PlanBackend for MockBackend {
     fn name(&self) -> &str {
         &self.name
     }
-    async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+    async fn complete(&self, _system: &str, _user: &str, _rung: usize) -> Result<String> {
         match self.responses.lock().unwrap().pop_front() {
             Some(Ok(s)) => Ok(s),
             Some(Err(e)) => Err(RinneError::Conductor(e)),

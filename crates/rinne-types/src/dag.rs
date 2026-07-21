@@ -47,7 +47,10 @@ impl Plan {
         let mut seen = HashSet::new();
         for n in &self.nodes {
             if !seen.insert(n.id.as_str()) {
-                return Err(crate::RinneError::Plan(format!("duplicate node id `{}`", n.id)));
+                return Err(crate::RinneError::Plan(format!(
+                    "duplicate node id `{}`",
+                    n.id
+                )));
             }
         }
         for n in &self.nodes {
@@ -77,7 +80,8 @@ impl Plan {
         use std::collections::HashMap;
 
         // 0 = unvisited, 1 = on the current DFS stack, 2 = fully explored.
-        let mut state: HashMap<&str, u8> = self.nodes.iter().map(|n| (n.id.as_str(), 0u8)).collect();
+        let mut state: HashMap<&str, u8> =
+            self.nodes.iter().map(|n| (n.id.as_str(), 0u8)).collect();
 
         // Iterative DFS so a deep chain can't blow the stack.
         for start in &self.nodes {
@@ -87,7 +91,10 @@ impl Plan {
             let mut stack: Vec<(&str, usize)> = vec![(start.id.as_str(), 0)];
             state.insert(start.id.as_str(), 1);
             while let Some(&mut (id, ref mut idx)) = stack.last_mut() {
-                let deps = self.node(id).map(|n| n.depends_on.as_slice()).unwrap_or(&[]);
+                let deps = self
+                    .node(id)
+                    .map(|n| n.depends_on.as_slice())
+                    .unwrap_or(&[]);
                 if *idx < deps.len() {
                     let dep = deps[*idx].as_str();
                     *idx += 1;
@@ -308,10 +315,8 @@ pub fn parse_on_fail(raw: &str) -> Option<OnFail> {
     }
     match head.trim() {
         "loop_back" => {
-            let critique = parts.find_map(|p| {
-                p.strip_prefix("critique=")
-                    .map(|c| c.trim().to_string())
-            });
+            let critique =
+                parts.find_map(|p| p.strip_prefix("critique=").map(|c| c.trim().to_string()));
             Some(OnFail::LoopBack { node, critique })
         }
         "loop_with" => Some(OnFail::LoopWith { node }),
@@ -338,9 +343,15 @@ mod tests {
     fn parses_bare_forms() {
         assert_eq!(
             parse_on_fail("loop_back(n2)"),
-            Some(OnFail::LoopBack { node: "n2".into(), critique: None })
+            Some(OnFail::LoopBack {
+                node: "n2".into(),
+                critique: None
+            })
         );
-        assert_eq!(parse_on_fail("loop_with(n3)"), Some(OnFail::LoopWith { node: "n3".into() }));
+        assert_eq!(
+            parse_on_fail("loop_with(n3)"),
+            Some(OnFail::LoopWith { node: "n3".into() })
+        );
         assert_eq!(parse_on_fail("fixer"), Some(OnFail::Fixer));
         assert_eq!(parse_on_fail("replan"), Some(OnFail::Replan));
     }

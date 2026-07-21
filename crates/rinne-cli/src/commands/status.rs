@@ -9,7 +9,9 @@ use rinne_core::{Blackboard, NodeStatus};
 pub async fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
     if !Blackboard::exists(&cwd) {
-        return Err(anyhow!("no run in this directory (.rinne/plan.json not found)"));
+        return Err(anyhow!(
+            "no run in this directory (.rinne/plan.json not found)"
+        ));
     }
     let bb = Blackboard::open(&cwd)?;
     let plan = bb.load_plan()?;

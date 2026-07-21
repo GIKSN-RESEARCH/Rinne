@@ -61,6 +61,43 @@ impl ParsedHarness {
 /// optional model selection.
 pub type ArgsBuilder = fn(prompt: &str, model: Option<&str>) -> Vec<String>;
 
+/// Serializes tests that mutate process-global harness env vars. Shared across
+/// adapter modules — `cargo test` runs them on one thread pool, so a per-module
+/// lock would not actually exclude them from each other.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Whether harness sessions should pass their non-interactive approval flags.
+///
+/// Set from `[harness_stage].approvals` via `RINNE_HARNESS_APPROVALS`
+/// (`crates/rinne-cli/src/runner.rs::apply_harness_stage_env`). Defaults to
+/// auto, matching the config default: a Stage session nobody is watching
+/// blocks forever on a permission prompt otherwise.
+///
+/// Unset means auto, but any recognised *negative* spelling means human — this
+/// is a permission switch, so `RINNE_HARNESS_APPROVALS=off` must not fail open
+/// into auto-approving every tool call. The vocabulary matches the sibling
+/// `RINNE_HARNESS_INTERACTIVE_TUI` parse below.
+pub fn approvals_are_auto() -> bool {
+    match std::env::var("RINNE_HARNESS_APPROVALS") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "human"
+                | "manual"
+                | "ask"
+                | "prompt"
+                | "never"
+                | "none"
+                | "no"
+                | "off"
+                | "false"
+                | "0"
+                | ""
+        ),
+        Err(_) => true,
+    }
+}
+
 /// Default interactive argv: model flag (if any) + prompt as a positional arg.
 /// Used when an adapter has no custom `interactive_args` (opens product TUI).
 pub fn default_interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
@@ -308,9 +345,7 @@ impl Worker for HarnessAdapter {
                 .map(|v| v.to_ascii_lowercase())
                 .unwrap_or_default();
             let force_plain = matches!(interactive_env.as_str(), "0" | "false" | "no" | "off");
-            let want_interactive_tui = visible
-                && !force_plain
-                && self.interactive_args.is_some();
+            let want_interactive_tui = visible && !force_plain && self.interactive_args.is_some();
 
             let builder = if want_interactive_tui {
                 self.interactive_args.unwrap_or(default_interactive_args)
@@ -462,14 +497,8 @@ impl Worker for HarnessAdapter {
                 };
                 // Real Terminal window. Prefer system Terminal; on failure try
                 // embedded PTY, then in-process headless as last resort.
-                match external_terminal::run_with_mode(
-                    spec.clone(),
-                    &events,
-                    &cancel,
-                    mapper,
-                    mode,
-                )
-                .await
+                match external_terminal::run_with_mode(spec.clone(), &events, &cancel, mapper, mode)
+                    .await
                 {
                     Ok(out) => Ok(out),
                     Err(e) => {
@@ -526,37 +555,42 @@ impl Worker for HarnessAdapter {
                     let timed_out = matches!(out.status, ExecStatus::TimedOut);
                     // Never re-open another Terminal window on timeout — that is
                     // what produced the double grok/claude Stage spam.
-                    if timed_out
-                        && !visible
-                        && attempt < MAX_ATTEMPTS
-                        && !cancel.is_cancelled()
-                    {
-                        emit(&events, WorkerEvent::Message(format!(
-                            "{} timed out — retrying ({attempt}/{MAX_ATTEMPTS})",
-                            self.program
-                        )));
+                    if timed_out && !visible && attempt < MAX_ATTEMPTS && !cancel.is_cancelled() {
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "{} timed out — retrying ({attempt}/{MAX_ATTEMPTS})",
+                                self.program
+                            )),
+                        );
                         continue;
                     }
                     // Rich invocation failed with nothing usable on stdout, and a
                     // lean plain invocation is available → fall back to it once.
-                    let empty_fail = !matches!(out.status, ExecStatus::Success)
-                        && out.stdout.trim().is_empty();
+                    let empty_fail =
+                        !matches!(out.status, ExecStatus::Success) && out.stdout.trim().is_empty();
                     if empty_fail && !lean && has_lean && !cancel.is_cancelled() {
                         lean = true;
-                        emit(&events, WorkerEvent::Message(format!(
-                            "{} failed in streaming mode — retrying in plain mode",
-                            self.program
-                        )));
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "{} failed in streaming mode — retrying in plain mode",
+                                self.program
+                            )),
+                        );
                         continue;
                     }
                     break out;
                 }
                 Err(e) => {
                     if attempt < MAX_ATTEMPTS && !cancel.is_cancelled() {
-                        emit(&events, WorkerEvent::Message(format!(
-                            "{} failed to start ({e}) — retrying ({attempt}/{MAX_ATTEMPTS})",
-                            self.program
-                        )));
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "{} failed to start ({e}) — retrying ({attempt}/{MAX_ATTEMPTS})",
+                                self.program
+                            )),
+                        );
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         continue;
                     }
@@ -642,7 +676,11 @@ impl HarnessAdapter {
             .join("mcp");
         match provisioner(&request.mcp_servers, &scratch) {
             Ok(p) => {
-                let names: Vec<&str> = request.mcp_servers.iter().map(|s| s.name.as_str()).collect();
+                let names: Vec<&str> = request
+                    .mcp_servers
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect();
                 emit(
                     events,
                     WorkerEvent::Message(format!("provisioned MCP: {}", names.join(", "))),
@@ -652,7 +690,9 @@ impl HarnessAdapter {
             Err(e) => {
                 emit(
                     events,
-                    WorkerEvent::Message(format!("MCP provisioning failed ({e}) — running without tools")),
+                    WorkerEvent::Message(format!(
+                        "MCP provisioning failed ({e}) — running without tools"
+                    )),
                 );
                 empty
             }
@@ -726,8 +766,41 @@ pub fn compose_prompt(request: &ExecuteRequest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rinne_core::worker::{ContextPacket, Constraints};
+    use rinne_core::worker::{Constraints, ContextPacket};
     use std::path::PathBuf;
+
+    #[test]
+    fn approvals_default_to_auto_and_human_opts_out() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+        assert!(
+            approvals_are_auto(),
+            "[harness_stage].approvals defaults to auto, so an unset env must match"
+        );
+        std::env::set_var("RINNE_HARNESS_APPROVALS", "human");
+        assert!(!approvals_are_auto());
+        std::env::set_var("RINNE_HARNESS_APPROVALS", "auto");
+        assert!(approvals_are_auto());
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+    }
+
+    #[test]
+    fn approvals_do_not_fail_open_on_negative_spellings() {
+        // A permission switch must not auto-approve because the user wrote
+        // `off` instead of the one blessed spelling.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for v in [
+            "off", "0", "false", "no", "never", "none", "manual", "ASK", " human ",
+        ] {
+            std::env::set_var("RINNE_HARNESS_APPROVALS", v);
+            assert!(!approvals_are_auto(), "`{v}` must not mean auto-approve");
+        }
+        for v in ["auto", "AUTO", "yes", "1"] {
+            std::env::set_var("RINNE_HARNESS_APPROVALS", v);
+            assert!(approvals_are_auto(), "`{v}` must mean auto-approve");
+        }
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+    }
 
     fn req(skill_text: &str) -> ExecuteRequest {
         ExecuteRequest {
@@ -748,8 +821,18 @@ mod tests {
     fn symbol_map_is_rendered_into_harness_prompt() {
         use rinne_types::graph::{Neighborhood, SymbolRef};
         let nb = Neighborhood {
-            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1, end_line: 1 },
-            callers: vec![SymbolRef { name: "main".into(), file: "main.rs".into(), line: 5, end_line: 5 }],
+            definition: SymbolRef {
+                name: "helper".into(),
+                file: "m.rs".into(),
+                line: 1,
+                end_line: 1,
+            },
+            callers: vec![SymbolRef {
+                name: "main".into(),
+                file: "main.rs".into(),
+                line: 5,
+                end_line: 5,
+            }],
             callees: vec![],
             imports: vec![],
             stale: false,
@@ -757,7 +840,10 @@ mod tests {
         let mut r = req("");
         r.context.symbol_map = vec![nb];
         let prompt = compose_prompt(&r);
-        assert!(prompt.contains("## Relevant code structure"), "section header missing");
+        assert!(
+            prompt.contains("## Relevant code structure"),
+            "section header missing"
+        );
         assert!(prompt.contains("helper"), "definition name missing");
         assert!(prompt.contains("m.rs:1"), "definition file:line missing");
         assert!(prompt.contains("main"), "caller name missing");
@@ -841,7 +927,10 @@ mod tests {
     fn no_provisioner_yields_empty_provision_and_narrates() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let p = harness(None).provision(&tool_request(), &tx);
-        assert!(p.args.is_empty(), "no flags when the harness can't provision");
+        assert!(
+            p.args.is_empty(),
+            "no flags when the harness can't provision"
+        );
         assert!(p.env.is_empty());
         // The gap is surfaced, not silent.
         let mut narrated = false;

@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::probe::{AuthMode, WorkerFamily, WorkerProbe, WorkerStatus};
 use crate::model::LimitsConfig;
+use crate::probe::{AuthMode, WorkerFamily, WorkerProbe, WorkerStatus};
 
 /// Default thresholds that fire one-shot alerts when crossed upward.
 pub const DEFAULT_ALERT_THRESHOLDS: &[u8] = &[50, 75, 90, 100];
@@ -228,11 +228,7 @@ impl LimitReport {
     /// Emit one-shot threshold alerts for windows that newly crossed a threshold.
     ///
     /// `fired` maps `"worker:window-label"` → highest threshold already announced.
-    pub fn take_alerts(
-        &self,
-        fired: &mut HashMap<String, u8>,
-        thresholds: &[u8],
-    ) -> Vec<String> {
+    pub fn take_alerts(&self, fired: &mut HashMap<String, u8>, thresholds: &[u8]) -> Vec<String> {
         let mut alerts = Vec::new();
         let mut sorted: Vec<u8> = thresholds.to_vec();
         sorted.sort_unstable();
@@ -306,7 +302,11 @@ fn format_worker_block(w: &WorkerLimit) -> Vec<String> {
                         .map(short_reset)
                         .map(|r| format!(" (resets {r})"))
                         .unwrap_or_default();
-                    format!("{label} {pct:.0}%{reset}", label = win.label, pct = win.used_pct)
+                    format!(
+                        "{label} {pct:.0}%{reset}",
+                        label = win.label,
+                        pct = win.used_pct
+                    )
                 })
                 .collect();
             lines.push(format!("    {:<14} {}", w.name, parts.join("  ·  ")));
@@ -606,16 +606,13 @@ fn token_from_credentials_json(raw: &str) -> ClaudeToken {
     };
     // Full shape: { "claudeAiOauth": { "accessToken", "expiresAt", … } }
     // Also accept a bare oauth object when env was set to that JSON alone.
-    let oauth = v
-        .get("claudeAiOauth")
-        .cloned()
-        .or_else(|| {
-            if v.get("accessToken").is_some() {
-                Some(v.clone())
-            } else {
-                None
-            }
-        });
+    let oauth = v.get("claudeAiOauth").cloned().or_else(|| {
+        if v.get("accessToken").is_some() {
+            Some(v.clone())
+        } else {
+            None
+        }
+    });
     let Some(oauth) = oauth else {
         return ClaudeToken::Missing;
     };
@@ -678,10 +675,25 @@ fn oauth_expires_at_past(oauth: &serde_json::Value) -> bool {
 }
 
 fn read_claude_credentials_raw() -> Option<String> {
+    // Opt out of credential-store reads. A freshly built binary is not in the
+    // Keychain item's ACL, so macOS prompts for a password on every rebuild —
+    // unusable in test and CI runs. Set NO_KEYCHAIN_RINNE=1 to skip.
+    //
+    // Deliberately not `RINNE_`-prefixed: figment maps every `RINNE_*` var onto
+    // a config key, so that prefix would be parsed as one and fail validation.
+    if std::env::var_os("NO_KEYCHAIN_RINNE").is_some() {
+        return None;
+    }
+
     // macOS Keychain (Claude Code's documented store on macOS).
     if cfg!(target_os = "macos") {
         if let Ok(out) = Command::new("security")
-            .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+            .args([
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ])
             .output()
         {
             if out.status.success() {
@@ -845,7 +857,10 @@ mod tests {
         };
         let chip = report.breakdown_chip(&["claude-code", "codex"]);
         assert_eq!(chip, "claude-code 55% · codex n/a");
-        assert_eq!(report.chip_severity_for(&["claude-code"]), ChipSeverity::Warn);
+        assert_eq!(
+            report.chip_severity_for(&["claude-code"]),
+            ChipSeverity::Warn
+        );
         assert_eq!(report.chip_severity_for(&["codex"]), ChipSeverity::Unknown);
     }
 
@@ -962,7 +977,10 @@ mod tests {
         );
 
         assert_eq!(token_from_credentials_json("{}"), ClaudeToken::Missing);
-        assert_eq!(token_from_credentials_json("not-json"), ClaudeToken::Missing);
+        assert_eq!(
+            token_from_credentials_json("not-json"),
+            ClaudeToken::Missing
+        );
     }
 
     #[test]

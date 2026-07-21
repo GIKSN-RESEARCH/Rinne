@@ -48,7 +48,17 @@ pub async fn connect_lines(
         // A base_url override (or being known/configured) makes this an API
         // provider we can set up even if it's not in the catalog.
         if known.is_some() || configured.is_some() || base_url.is_some() {
-            connect_api(backend, known, configured.as_ref(), key, models, base_url, add, &mut out).await;
+            connect_api(
+                backend,
+                known,
+                configured.as_ref(),
+                key,
+                models,
+                base_url,
+                add,
+                &mut out,
+            )
+            .await;
         } else {
             unknown(backend, &mut out);
             return Ok(out);
@@ -64,7 +74,10 @@ pub async fn connect_lines(
             WorkerStatus::NotInstalled => "not detected yet ·",
             WorkerStatus::SmokeTestFailed(_) => "error ✗",
         };
-        out.push(format!("Re-probed `{backend}`: {state} (auth: {}).", w.auth_mode.label()));
+        out.push(format!(
+            "Re-probed `{backend}`: {state} (auth: {}).",
+            w.auth_mode.label()
+        ));
     }
     Ok(out)
 }
@@ -77,21 +90,38 @@ pub async fn list_lines() -> Result<Vec<String>> {
     let mut out = Vec::new();
 
     out.push("HARNESSES (auto-detected once installed + logged in):".to_string());
-    for w in report.workers.iter().filter(|w| w.family == WorkerFamily::Harness) {
+    for w in report
+        .workers
+        .iter()
+        .filter(|w| w.family == WorkerFamily::Harness)
+    {
         let mark = match w.status {
             WorkerStatus::Available => "✔",
             WorkerStatus::NotInstalled => "·",
             WorkerStatus::SmokeTestFailed(_) => "✗",
         };
         let enabled = if w.enabled { "" } else { " (disabled)" };
-        out.push(format!("  {mark} {:<14} {}{}", w.name, status_word(&w.status), enabled));
+        out.push(format!(
+            "  {mark} {:<14} {}{}",
+            w.name,
+            status_word(&w.status),
+            enabled
+        ));
     }
 
     out.push("API PROVIDERS (configured):".to_string());
     let mut any_api = false;
-    for w in report.workers.iter().filter(|w| w.family == WorkerFamily::Api) {
+    for w in report
+        .workers
+        .iter()
+        .filter(|w| w.family == WorkerFamily::Api)
+    {
         any_api = true;
-        let mark = if w.status.is_available() { "✔ key set" } else { "· key missing" };
+        let mark = if w.status.is_available() {
+            "✔ key set"
+        } else {
+            "· key missing"
+        };
         out.push(format!("  {:<14} {}", w.name, mark));
     }
     if !any_api {
@@ -160,7 +190,9 @@ async fn connect_api(
     } else if let Some(p) = configured {
         p.models.clone()
     } else {
-        known.map(|k| k.models.iter().map(|m| m.to_string()).collect()).unwrap_or_default()
+        known
+            .map(|k| k.models.iter().map(|m| m.to_string()).collect())
+            .unwrap_or_default()
     };
 
     // Write config when first configuring, or whenever models/base_url change.
@@ -198,7 +230,10 @@ async fn connect_api(
             rinne_config::secrets::store_api_key(name, k).map(|_| None)
         };
         match stored {
-            Ok(Some(n)) => out.push(format!("✔ key added to the keychain pool ({n} key{} for rotation).", if n == 1 { "" } else { "s" })),
+            Ok(Some(n)) => out.push(format!(
+                "✔ key added to the keychain pool ({n} key{} for rotation).",
+                if n == 1 { "" } else { "s" }
+            )),
             Ok(None) => out.push("✔ key stored securely in your OS keychain.".to_string()),
             Err(e) => {
                 out.push(format!("⚠ could not use the keychain ({e})."));
@@ -210,8 +245,12 @@ async fn connect_api(
             Some(src) => out.push(format!("✔ key found ({src}).")),
             None => {
                 out.push("Provide your key once — either of:".to_string());
-                out.push(format!("  rinne connect {name} <your-key>   (stored securely in the OS keychain)"));
-                out.push(format!("  export {key_env}=<your-key>        (per-shell env var)"));
+                out.push(format!(
+                    "  rinne connect {name} <your-key>   (stored securely in the OS keychain)"
+                ));
+                out.push(format!(
+                    "  export {key_env}=<your-key>        (per-shell env var)"
+                ));
                 return;
             }
         }
@@ -259,7 +298,9 @@ async fn verify_api(base_url: &str, key: &str, model: &str) -> std::result::Resu
     {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("timed out after 30s (endpoint slow, model cold-starting, or unreachable)".into()),
+        Err(_) => {
+            Err("timed out after 30s (endpoint slow, model cold-starting, or unreachable)".into())
+        }
     }
 }
 
@@ -270,7 +311,14 @@ fn unknown(backend: &str, out: &mut Vec<String>) {
         out.push(format!("  • {}", h.name));
     }
     out.push("Known API providers (`rinne connect <name>`):".to_string());
-    out.push(format!("  {}", KNOWN_API_PROVIDERS.iter().map(|p| p.name).collect::<Vec<_>>().join(", ")));
+    out.push(format!(
+        "  {}",
+        KNOWN_API_PROVIDERS
+            .iter()
+            .map(|p| p.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
 }
 
 fn status_word(s: &WorkerStatus) -> String {

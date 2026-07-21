@@ -3,8 +3,8 @@
 //! used to test the loop engine (`CONTEXT.md` §8; `PHASE.md` P2).
 
 pub mod adapters;
-pub mod session_gate;
 pub mod mock;
+pub mod session_gate;
 pub mod transport;
 
 pub use mock::{MockScript, MockWorker};

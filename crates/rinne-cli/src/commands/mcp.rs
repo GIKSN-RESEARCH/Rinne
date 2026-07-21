@@ -80,7 +80,13 @@ fn keychain_provider(name: &str) -> String {
 fn default_key_env(name: &str) -> String {
     let up: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{up}_MCP_TOKEN")
 }
@@ -182,13 +188,18 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
         None => derive_name(link, is_url),
     };
     if name.is_empty() {
-        return vec!["could not derive a name from the link — pass one with --name <name>".to_string()];
+        return vec![
+            "could not derive a name from the link — pass one with --name <name>".to_string(),
+        ];
     }
 
     // Resolve the single auth secret + how it's presented. Bearer/api-key/oauth
     // are for remote (http) servers; secret-env is for local (stdio) servers.
     if is_url && secret_env.is_some() {
-        return vec!["--secret-env is for local (stdio) servers; use --bearer/--api-key/--oauth for a URL".to_string()];
+        return vec![
+            "--secret-env is for local (stdio) servers; use --bearer/--api-key/--oauth for a URL"
+                .to_string(),
+        ];
     }
     if !is_url && (bearer.is_some() || api_key.is_some() || oauth) {
         return vec!["--bearer/--api-key/--oauth are for remote (http) servers; use --secret-env VAR=<token> for a local server".to_string()];
@@ -288,7 +299,12 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     // reported against the existing server; a name already in use is refused.
     if let Ok(config) = rinne_config::load(cwd) {
         let new_key = link_key(&server);
-        if let Some((existing, _)) = config.mcp.servers.iter().find(|(_, s)| link_key(s) == new_key) {
+        if let Some((existing, _)) = config
+            .mcp
+            .servers
+            .iter()
+            .find(|(_, s)| link_key(s) == new_key)
+        {
             return vec![format!(
                 "that server is already added as `{existing}` — remove it first with `rinne mcp remove {existing}`"
             )];
@@ -306,7 +322,9 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     // resulting session in the keychain before saving the server. Do this after
     // the dedup guard so a redundant add can't open a browser.
     if oauth {
-        out.push(format!("Authorizing `{name}` via OAuth — opening your browser…"));
+        out.push(format!(
+            "Authorizing `{name}` via OAuth — opening your browser…"
+        ));
         match rinne_mcp::login(link, None, client_id, now_secs()).await {
             Ok(session) => match serde_json::to_string(&session) {
                 Ok(json) => {
@@ -327,7 +345,9 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     if let Some(token) = &token {
         match rinne_config::secrets::store_api_key(&keychain_provider(&name), token) {
             Ok(()) => out.push("✔ token stored in your OS keychain (set once).".to_string()),
-            Err(e) => out.push(format!("⚠ could not store the token in the keychain ({e}).")),
+            Err(e) => out.push(format!(
+                "⚠ could not store the token in the keychain ({e})."
+            )),
         }
     }
 
@@ -339,7 +359,11 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     if let Err(e) = write::write_mcp_server_to(&path, &name, &server) {
         return vec![format!("✗ could not write config: {e}")];
     }
-    out.push(format!("Wrote [mcp.servers.{name}] to {} ({})", path.display(), scope.label()));
+    out.push(format!(
+        "Wrote [mcp.servers.{name}] to {} ({})",
+        path.display(),
+        scope.label()
+    ));
 
     // Connect-test so problems surface now, not mid-run.
     out.push("testing the connection…".to_string());
@@ -348,7 +372,10 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
         // A 401 on a plain remote add almost always means the server wants a
         // login — auto-fall back to the OAuth flow rather than just reporting it.
         Err(e) if is_url && server.auth.is_none() && e.contains("401") => {
-            out.push("this server requires authorization — starting OAuth login, opening your browser…".to_string());
+            out.push(
+                "this server requires authorization — starting OAuth login, opening your browser…"
+                    .to_string(),
+            );
             match rinne_mcp::login(link, None, None, now_secs()).await {
                 Ok(session) => {
                     let stored = serde_json::to_string(&session).ok().and_then(|json| {
@@ -379,7 +406,10 @@ async fn add(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
         }
         Err(e) => {
             out.push(format!("✗ could not connect: {e}"));
-            out.push("  the server is saved; fix the link/token and re-run `rinne mcp test`.".to_string());
+            out.push(
+                "  the server is saved; fix the link/token and re-run `rinne mcp test`."
+                    .to_string(),
+            );
         }
     }
     out
@@ -458,7 +488,13 @@ fn derive_name(link: &str, is_url: bool) -> String {
 fn sanitize_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let mut s = cleaned.trim_matches('-').to_lowercase();
     for p in ["mcp-server-", "server-", "mcp-"] {
@@ -505,7 +541,8 @@ fn list(cwd: &Path) -> Vec<String> {
             flags.push("host-only".to_string());
         }
         if let Some(key_env) = &s.key_env {
-            let has = rinne_config::secrets::key_source(&keychain_provider(name), key_env).is_some();
+            let has =
+                rinne_config::secrets::key_source(&keychain_provider(name), key_env).is_some();
             let kind = s.auth.as_deref().unwrap_or("bearer");
             flags.push(if has {
                 format!("{kind} ✔")
@@ -513,7 +550,11 @@ fn list(cwd: &Path) -> Vec<String> {
                 format!("{kind} missing")
             });
         }
-        let suffix = if flags.is_empty() { String::new() } else { format!("  [{}]", flags.join(", ")) };
+        let suffix = if flags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", flags.join(", "))
+        };
         out.push(format!("  {:<16} {}{}", name, endpoint.trim(), suffix));
     }
     out
@@ -560,10 +601,14 @@ async fn login(cwd: &Path, rest: &[&str]) -> Vec<String> {
         Err(e) => return vec![e],
     };
     let Some(url) = server.url.clone() else {
-        return vec![format!("`{name}` is not a remote server — OAuth applies to http servers")];
+        return vec![format!(
+            "`{name}` is not a remote server — OAuth applies to http servers"
+        )];
     };
 
-    let mut out = vec![format!("Authorizing `{name}` via OAuth — opening your browser…")];
+    let mut out = vec![format!(
+        "Authorizing `{name}` via OAuth — opening your browser…"
+    )];
     match rinne_mcp::login(&url, None, client_id, now_secs()).await {
         Ok(session) => match serde_json::to_string(&session) {
             Ok(json) => {
@@ -615,7 +660,10 @@ async fn test(cwd: &Path, rest: &[&str]) -> Vec<String> {
         Ok(mut client) => {
             let label = client.server_name().unwrap_or(name).to_string();
             let n = client.list_tools().await.map(|t| t.len()).unwrap_or(0);
-            vec![format!("✔ `{name}` reachable — server `{label}`, {n} tool{}.", if n == 1 { "" } else { "s" })]
+            vec![format!(
+                "✔ `{name}` reachable — server `{label}`, {n} tool{}.",
+                if n == 1 { "" } else { "s" }
+            )]
         }
         Err(e) => vec![format!("✗ `{name}` not reachable: {e}")],
     }
@@ -662,8 +710,11 @@ pub(crate) async fn connect_client(
             let Some(command) = server.command.as_deref() else {
                 return Err("stdio server has no `command`".into());
             };
-            let mut env: Vec<(String, String)> =
-                server.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let mut env: Vec<(String, String)> = server
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             // Inject a token as the server's auth environment variable.
             if let Some(var) = server.stdio_auth_env() {
                 if let Some(token) = resolve_token(name, server).await {
@@ -678,8 +729,11 @@ pub(crate) async fn connect_client(
             let Some(url) = server.url.as_deref() else {
                 return Err("http server has no `url`".into());
             };
-            let mut headers: Vec<(String, String)> =
-                server.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let mut headers: Vec<(String, String)> = server
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             // Inject a token in the configured auth header (bearer by default).
             if let Some(token) = resolve_token(name, server).await {
                 let (header, prefix) = server.http_auth();

@@ -34,10 +34,7 @@ pub fn resolve_symbols(
     let mut out: Vec<String> = Vec::new();
     // Exact identifier tokens from the instruction that name a known symbol.
     for tok in instruction.split(|c: char| !c.is_alphanumeric() && c != '_') {
-        if tok.len() >= MIN_IDENT_LEN
-            && known_set.contains(tok)
-            && !out.iter().any(|o| o == tok)
-        {
+        if tok.len() >= MIN_IDENT_LEN && known_set.contains(tok) && !out.iter().any(|o| o == tok) {
             out.push(tok.to_string());
         }
     }
@@ -99,7 +96,11 @@ impl<'a> ContextAssembler<'a> {
         plan: &'a Plan,
         graph: Option<&'a dyn rinne_types::graph::CodeGraph>,
     ) -> Self {
-        Self { blackboard, plan, graph }
+        Self {
+            blackboard,
+            plan,
+            graph,
+        }
     }
 
     /// Assemble the packet for `node`, shaped for the target worker `family`.
@@ -137,9 +138,7 @@ impl<'a> ContextAssembler<'a> {
                 }
                 for name in &input_artifacts {
                     if self.blackboard.artifact_exists(name) {
-                        packet
-                            .pinned_paths
-                            .push(artifact_rel_path(name));
+                        packet.pinned_paths.push(artifact_rel_path(name));
                     }
                 }
             }
@@ -223,15 +222,29 @@ mod graph_tests {
     impl CodeGraph for FakeGraph {
         fn neighborhood(&self, symbol: &str) -> Option<Neighborhood> {
             (symbol == "HttpTransport").then(|| Neighborhood {
-                definition: SymbolRef { name: "HttpTransport".into(), file: "t.rs".into(), line: 10, end_line: 10 },
-                callers: vec![SymbolRef { name: "send".into(), file: "s.rs".into(), line: 3, end_line: 3 }],
+                definition: SymbolRef {
+                    name: "HttpTransport".into(),
+                    file: "t.rs".into(),
+                    line: 10,
+                    end_line: 10,
+                },
+                callers: vec![SymbolRef {
+                    name: "send".into(),
+                    file: "s.rs".into(),
+                    line: 3,
+                    end_line: 3,
+                }],
                 callees: vec![],
                 imports: vec![],
                 stale: false,
             })
         }
-        fn resolve_in_file(&self, _f: &str, _n: &str) -> Option<SymbolRef> { None }
-        fn symbol_names(&self) -> Vec<String> { vec!["HttpTransport".into()] }
+        fn resolve_in_file(&self, _f: &str, _n: &str) -> Option<SymbolRef> {
+            None
+        }
+        fn symbol_names(&self) -> Vec<String> {
+            vec!["HttpTransport".into()]
+        }
     }
 
     #[test]
@@ -266,7 +279,12 @@ mod graph_tests {
     impl AmbiguousGraph {
         fn nb(file: &str) -> Neighborhood {
             Neighborhood {
-                definition: SymbolRef { name: "build".into(), file: file.into(), line: 1, end_line: 1 },
+                definition: SymbolRef {
+                    name: "build".into(),
+                    file: file.into(),
+                    line: 1,
+                    end_line: 1,
+                },
                 callers: vec![],
                 callees: vec![],
                 imports: vec![],
@@ -285,8 +303,12 @@ mod graph_tests {
                 vec![]
             }
         }
-        fn resolve_in_file(&self, _f: &str, _n: &str) -> Option<SymbolRef> { None }
-        fn symbol_names(&self) -> Vec<String> { vec!["build".into()] }
+        fn resolve_in_file(&self, _f: &str, _n: &str) -> Option<SymbolRef> {
+            None
+        }
+        fn symbol_names(&self) -> Vec<String> {
+            vec!["build".into()]
+        }
     }
 
     #[test]

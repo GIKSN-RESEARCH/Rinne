@@ -29,7 +29,10 @@ impl Store {
         // binary re-extracts every file automatically (no manual re-index needed).
         crate::schema::migrate_graph_if_stale(&conn)?;
         init_graph_schema(&conn)?;
-        Ok(Store { conn, root: root.to_path_buf() })
+        Ok(Store {
+            conn,
+            root: root.to_path_buf(),
+        })
     }
 
     /// Stable content hash for freshness comparison.
@@ -100,12 +103,7 @@ impl Store {
                     tx.execute(
                         "INSERT INTO graph_edges (src_symbol, dst_symbol, dst_name, kind) \
                          VALUES (?1, ?2, ?3, ?4)",
-                        rusqlite::params![
-                            edge.src,
-                            edge.dst,
-                            edge.dst_name,
-                            edge.kind.as_str(),
-                        ],
+                        rusqlite::params![edge.src, edge.dst, edge.dst_name, edge.kind.as_str(),],
                     )?;
                 }
             }
@@ -332,8 +330,7 @@ impl Store {
             .and_then(|mut stmt| {
                 stmt.query_map([path], |row| {
                     let kind_str: String = row.get(3)?;
-                    let kind =
-                        SymbolKind::from_str(&kind_str).unwrap_or(SymbolKind::Function);
+                    let kind = SymbolKind::from_str(&kind_str).unwrap_or(SymbolKind::Function);
                     Ok(Symbol {
                         id: row.get(0)?,
                         file: row.get(1)?,
@@ -358,7 +355,10 @@ mod tests {
     fn mem_store() -> Store {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::schema::init_graph_schema(&conn).unwrap();
-        Store { conn, root: std::env::temp_dir() }
+        Store {
+            conn,
+            root: std::env::temp_dir(),
+        }
     }
 
     #[test]
@@ -397,8 +397,14 @@ mod tests {
         let path = "weird'name.rs";
         store.index_file(path, "fn first_sym() {}\n", 0).unwrap();
         store.index_file(path, "fn second_sym() {}\n", 1).unwrap();
-        assert!(store.neighborhood("first_sym").is_none(), "old symbol must be gone after reindex");
-        assert!(store.neighborhood("second_sym").is_some(), "new symbol must exist after reindex");
+        assert!(
+            store.neighborhood("first_sym").is_none(),
+            "old symbol must be gone after reindex"
+        );
+        assert!(
+            store.neighborhood("second_sym").is_some(),
+            "new symbol must exist after reindex"
+        );
     }
 
     // REPRODUCTION (Stage 1 bug): two symbols named `build` in different files.
@@ -416,10 +422,18 @@ mod tests {
     fn resolve_in_file_disambiguates_same_name_across_files() {
         let store = mem_store();
         store
-            .index_file("assembler.rs", "fn build() {}\nfn assemble() { build(); }\n", 0)
+            .index_file(
+                "assembler.rs",
+                "fn build() {}\nfn assemble() { build(); }\n",
+                0,
+            )
             .unwrap();
         store
-            .index_file("blackboard.rs", "fn build() {}\nfn open() { build(); }\n", 0)
+            .index_file(
+                "blackboard.rs",
+                "fn build() {}\nfn open() { build(); }\n",
+                0,
+            )
             .unwrap();
 
         let in_assembler = store
@@ -440,8 +454,12 @@ mod tests {
     #[test]
     fn neighborhood_surfaces_all_same_name_definitions() {
         let store = mem_store();
-        store.index_file("assembler.rs", "fn build() {}\n", 0).unwrap();
-        store.index_file("blackboard.rs", "fn build() {}\n", 0).unwrap();
+        store
+            .index_file("assembler.rs", "fn build() {}\n", 0)
+            .unwrap();
+        store
+            .index_file("blackboard.rs", "fn build() {}\n", 0)
+            .unwrap();
 
         let all = store.neighborhood_all("build");
         let mut files: Vec<&str> = all.iter().map(|n| n.definition.file.as_str()).collect();
@@ -589,7 +607,10 @@ impl ContextAssembler {
 
         // Mutate the file on disk without reindexing.
         std::fs::write(&file, "fn helper() {}\nfn main() { helper(); helper(); }\n").unwrap();
-        assert!(store.neighborhood("helper").unwrap().stale, "must report stale after on-disk edit");
+        assert!(
+            store.neighborhood("helper").unwrap().stale,
+            "must report stale after on-disk edit"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -22,10 +22,7 @@ pub enum LearnCmd {
 ///
 /// Returns `(edges, seeds_used)` — seeds_used is the ordered anchor list the
 /// renderer should root the diagram on.
-fn cluster_flow(
-    graph: &dyn CodeGraph,
-    cluster: &Cluster,
-) -> (Vec<(String, String)>, Vec<String>) {
+fn cluster_flow(graph: &dyn CodeGraph, cluster: &Cluster) -> (Vec<(String, String)>, Vec<String>) {
     /// Noise we never want on a "how this works" map.
     fn is_noise(name: &str) -> bool {
         let base = name.rsplit("::").next().unwrap_or(name);
@@ -229,7 +226,8 @@ async fn explain_with_progress(
 
     // If the graph is empty, index the whole repo so a fresh project can
     // resolve any symbol.
-    if bb.concrete_graph()
+    if bb
+        .concrete_graph()
         .as_ref()
         .map(|g| g.stats().0)
         .unwrap_or(0)
@@ -281,8 +279,7 @@ async fn explain_with_progress(
                 &on_progress,
             )
             .await;
-            total_usage =
-                crate::learn::translate::add_usage(total_usage, picked.usage);
+            total_usage = crate::learn::translate::add_usage(total_usage, picked.usage);
             if !picked.symbols.is_empty() {
                 c = crate::learn::resolve::cluster_from_seeds(g, &topic, &picked.symbols, 40);
             }
@@ -421,9 +418,16 @@ mod tests {
         .unwrap();
 
         // no_ai = true → template-only, no worker required.
-        run(LearnCmd::Explain { topic: "harness".into() }, dir.clone(), true, false)
-            .await
-            .unwrap();
+        run(
+            LearnCmd::Explain {
+                topic: "harness".into(),
+            },
+            dir.clone(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
 
         let out = dir.join(".rinne/learn/harness.html");
         assert!(out.is_file(), "html artifact written");
@@ -483,7 +487,9 @@ mod tests {
         let lines = run_lines_with_progress("harness", dir.clone(), noop).await;
 
         assert!(
-            lines.iter().any(|l| l.starts_with("wrote ") && l.contains("harness.html")),
+            lines
+                .iter()
+                .any(|l| l.starts_with("wrote ") && l.contains("harness.html")),
             "run_lines returns the wrote-path line, got: {lines:?}"
         );
         assert!(
@@ -505,8 +511,7 @@ mod tests {
         )
         .unwrap();
 
-        let seen: std::sync::Arc<Mutex<Vec<String>>> =
-            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
         // no_ai = true → template-only path, no worker required; the resolve
         // milestone must still fire.
         let seen_cb = seen.clone();
@@ -520,7 +525,8 @@ mod tests {
 
         let seen = seen.lock().unwrap().clone();
         assert!(
-            seen.iter().any(|m| m.contains("resolve") && m.contains("symbols")),
+            seen.iter()
+                .any(|m| m.contains("resolve") && m.contains("symbols")),
             "resolve milestone reported, got: {seen:?}"
         );
         assert!(

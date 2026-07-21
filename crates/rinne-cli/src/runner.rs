@@ -14,7 +14,7 @@ use rinne_conductor::{
     load_user_exemplars, resolve_openai, Conductor, ConductorInput, HarnessBackend, PlanBackend,
 };
 // EventSink used when wiring harness conductor → Stage.
-use rinne_config::model::{ConductorBackend, ConductorConfig, PreferFamily};
+use rinne_config::model::{ConductorBackend, ConductorConfig, HarnessApprovals, PreferFamily};
 use rinne_config::probe::WorkerFamily;
 use rinne_config::Config;
 use rinne_core::worker::Capability;
@@ -53,9 +53,11 @@ async fn build_registry_inner(
     let report = rinne_config::doctor(config, false).await?;
 
     let mut reg = WorkerRegistry::new();
-    for w in report.workers.iter().filter(|w| {
-        w.family == WorkerFamily::Harness && w.enabled && w.status.is_available()
-    }) {
+    for w in report
+        .workers
+        .iter()
+        .filter(|w| w.family == WorkerFamily::Harness && w.enabled && w.status.is_available())
+    {
         let adapter = match w.name.as_str() {
             "claude-code" => Some(claude_code::worker()),
             "codex" => Some(codex::worker()),
@@ -292,10 +294,7 @@ fn order_harnesses_for_conductor(
     let Some(want) = preferred_conductor_harness(config) else {
         return harnesses;
     };
-    if let Some(i) = harnesses
-        .iter()
-        .position(|w| w.descriptor().name == want)
-    {
+    if let Some(i) = harnesses.iter().position(|w| w.descriptor().name == want) {
         let preferred = harnesses.remove(i);
         harnesses.insert(0, preferred);
         tracing::info!(
@@ -326,8 +325,11 @@ pub async fn oneshot_json(goal: &str, no_graph: bool) -> Result<serde_json::Valu
         build_conductor(&config, &registry, cwd.clone())?.with_context(template.clone()),
     );
 
+    // Read before save_plan overwrites the prior plan, so a follow-up prompt
+    // ("do it for me") is planned against what the last run actually produced.
     let input = ConductorInput {
         goal: goal.to_string(),
+        digest: last_run_digest(&bb),
         ..template
     };
     let plan = conductor.plan(&input).await?;
@@ -393,7 +395,11 @@ fn stop_reason_parts(s: &rinne_core::StopReason) -> (&'static str, Option<String
         BudgetIterations => ("budget_iterations", None),
         Cancelled => ("cancelled", None),
         NoCapableWorker(n) => ("no_capable_worker", Some(n.clone())),
-        NeedsHuman { node, question, gate } => {
+        NeedsHuman {
+            node,
+            question,
+            gate,
+        } => {
             let detail = if let Some(g) = gate {
                 format!("{node} (gate {g}): {question}")
             } else {
@@ -444,13 +450,17 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
         if let Some(g) = rinne_types::Blackboard::code_graph(blackboard) {
             let known = g.symbol_names();
             let picked = rinne_loop::assembler::resolve_symbols(g, goal, &[], &known);
-            picked.iter().filter_map(|name| g.neighborhood(name)).collect()
+            picked
+                .iter()
+                .filter_map(|name| g.neighborhood(name))
+                .collect()
         } else {
             Vec::new()
         };
     let input = ConductorInput {
         goal: goal.to_string(),
         structure,
+        digest: last_run_digest(blackboard),
         ..template
     };
 
@@ -461,7 +471,11 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
     // clock) so a leftover `.rinne/` does not trip budgets or skip nodes.
     blackboard.reset_run()?;
 
-    println!("\nplan ({} node{}):", plan.nodes.len(), if plan.nodes.len() == 1 { "" } else { "s" });
+    println!(
+        "\nplan ({} node{}):",
+        plan.nodes.len(),
+        if plan.nodes.len() == 1 { "" } else { "s" }
+    );
     for n in &plan.nodes {
         let dep = if n.depends_on.is_empty() {
             String::new()
@@ -486,6 +500,61 @@ fn prefer_label(p: PreferFamily) -> &'static str {
         PreferFamily::Api => "api",
         PreferFamily::Balanced => "balanced",
     }
+}
+
+/// How much of the previous deliverable is worth showing the planner. Enough to
+/// resolve "do it for me"; not so much that planning re-reads a whole report.
+const DIGEST_MAX_CHARS: usize = 1_200;
+
+/// A digest of the previous run, so a follow-up prompt is not planned in a
+/// vacuum. Without it "do it for me" reached the planner as that bare string
+/// and became a "too vague, ask the user" node.
+///
+/// Returns `None` when there is nothing useful to carry — a first prompt in a
+/// fresh workspace plans on the goal alone, as before.
+fn previous_run_digest(prev_goal: &str, deliverable: Option<&str>) -> Option<String> {
+    let goal = prev_goal.trim();
+    if goal.is_empty() {
+        return None;
+    }
+    let mut s = format!("Previous request in this session: {goal}");
+    if let Some(text) = deliverable.map(str::trim).filter(|t| !t.is_empty()) {
+        s.push_str("\n\nWhat it produced:\n");
+        if text.chars().count() > DIGEST_MAX_CHARS {
+            let head: String = text.chars().take(DIGEST_MAX_CHARS).collect();
+            s.push_str(&head);
+            s.push('…');
+        } else {
+            s.push_str(text);
+        }
+    }
+    s.push_str(
+        "\n\nIf the new request refers back to this (\"do it\", \"now fix it\", \"continue\"), \
+         plan it as the follow-up work rather than asking the user to restate the task.",
+    );
+    Some(s)
+}
+
+/// Read the previous run's goal and deliverable from the blackboard, if any.
+/// Must be called before the new plan overwrites `plan.json`.
+pub fn last_run_digest(bb: &Blackboard) -> Option<String> {
+    let plan = bb.load_plan().ok()?;
+    let deliverable = plan.nodes.iter().rev().find_map(|n| {
+        // Mirror `engine::persist_outputs`, which does NOT write under the
+        // literal names in `outputs`: a `"diff"` output lands at `<id>.diff`,
+        // and a node that declares no outputs at all lands at `<id>.out.md`.
+        // Reading `outputs` verbatim missed both — i.e. most nodes — and the
+        // digest silently carried the goal line with no content.
+        let named = n
+            .outputs
+            .iter()
+            .filter(|o| *o != "diff")
+            .find_map(|out| bb.read_artifact(out).ok());
+        named
+            .or_else(|| bb.read_artifact(&format!("{}.out.md", n.id)).ok())
+            .or_else(|| bb.read_artifact(&format!("{}.diff", n.id)).ok())
+    });
+    previous_run_digest(&plan.goal, deliverable.as_deref())
 }
 
 /// The reusable planning context (everything but the per-call goal/mentioned):
@@ -560,10 +629,7 @@ fn apply_evaluator_pin(pin: &str, opts: &mut EngineOptions) {
         opts.evaluator_kind_override = Some(EvaluatorKind::Ai);
         return;
     }
-    if let Some(rest) = pin
-        .strip_prefix("ai:")
-        .or_else(|| pin.strip_prefix("AI:"))
-    {
+    if let Some(rest) = pin.strip_prefix("ai:").or_else(|| pin.strip_prefix("AI:")) {
         opts.evaluator_kind_override = Some(EvaluatorKind::Ai);
         // `worker` or `worker:model` (model ids rarely contain `:`; first segment
         // is the worker name, remainder is the model if present).
@@ -572,26 +638,27 @@ fn apply_evaluator_pin(pin: &str, opts: &mut EngineOptions) {
         }
         match rest.split_once(':') {
             Some((worker, model)) if !worker.is_empty() => {
-                opts.role_prefers.insert("evaluator".into(), worker.to_string());
+                opts.role_prefers
+                    .insert("evaluator".into(), worker.to_string());
                 if !model.is_empty() {
-                    opts.role_models.insert("evaluator".into(), model.to_string());
+                    opts.role_models
+                        .insert("evaluator".into(), model.to_string());
                 }
             }
             _ => {
-                opts.role_prefers.insert("evaluator".into(), rest.to_string());
+                opts.role_prefers
+                    .insert("evaluator".into(), rest.to_string());
             }
         }
         return;
     }
     // Bare worker name (config-style role pin).
-    opts.role_prefers.insert("evaluator".into(), pin.to_string());
+    opts.role_prefers
+        .insert("evaluator".into(), pin.to_string());
 }
 
 /// Apply conductor pins from a human session onto a config clone.
-pub fn conductor_config_with_session(
-    config: &Config,
-    session: &HumanSession,
-) -> ConductorConfig {
+pub fn conductor_config_with_session(config: &Config, session: &HumanSession) -> ConductorConfig {
     let mut c = config.conductor.clone();
     if !session.active {
         return c;
@@ -625,10 +692,19 @@ pub fn apply_harness_stage_env(config: &Config, interactive: bool) {
         "RINNE_HARNESS_STAGE_MAX",
         config.harness_stage.max_sessions.to_string(),
     );
+    // Read by the adapters' interactive argv builders — without this the
+    // approvals setting is inert and every visible session stops on its
+    // harness's permission prompt.
+    let approvals = match config.harness_stage.approvals {
+        HarnessApprovals::Auto => "auto",
+        HarnessApprovals::Human => "human",
+    };
+    std::env::set_var("RINNE_HARNESS_APPROVALS", approvals);
     tracing::info!(
         mode = mode.as_str(),
         visible,
         interactive,
+        approvals,
         max = config.harness_stage.max_sessions,
         "harness stage"
     );
@@ -737,7 +813,11 @@ async fn server_spec(name: &str, s: &rinne_config::model::McpServer) -> rinne_co
         args: s.args.clone(),
         env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         url: s.url.clone(),
-        headers: s.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        headers: s
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         token_env: s.key_env.clone(),
         token,
         auth: s.auth.clone(),
@@ -989,6 +1069,38 @@ fn print_report(report: &RunReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_followup_prompt_carries_the_previous_goal_and_deliverable() {
+        // "do it for me" reached the planner with no memory of what "it" was,
+        // so the plan became "Execute user's task" / "too vague".
+        let d = previous_run_digest(
+            "separate formatting from this PR",
+            Some("Commit 1178089 is a pure rustfmt commit; the rest are functional."),
+        )
+        .expect("a completed previous run must produce a digest");
+        assert!(d.contains("separate formatting from this PR"), "{d}");
+        assert!(d.contains("1178089"), "{d}");
+    }
+
+    #[test]
+    fn a_long_deliverable_is_truncated() {
+        let long = "x".repeat(DIGEST_MAX_CHARS * 3);
+        let d = previous_run_digest("g", Some(&long)).unwrap();
+        assert!(
+            d.len() < DIGEST_MAX_CHARS * 2,
+            "digest not bounded: {}",
+            d.len()
+        );
+        assert!(d.contains('…'), "truncation must be visible: {d}");
+    }
+
+    #[test]
+    fn no_previous_goal_means_no_digest() {
+        assert!(previous_run_digest("", Some("x")).is_none());
+        assert!(previous_run_digest("   ", None).is_none());
+    }
+
     use rinne_core::dag::EvaluatorKind;
     use rinne_core::HumanSession;
 

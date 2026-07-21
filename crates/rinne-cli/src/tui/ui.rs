@@ -61,7 +61,13 @@ pub fn flush_lines(
 }
 
 /// The five identity colors, reused for the wordmark gradient.
-const GRADIENT: [Color; 5] = [Color::Cyan, Color::Magenta, Color::Blue, Color::Green, Color::Cyan];
+const GRADIENT: [Color; 5] = [
+    Color::Cyan,
+    Color::Magenta,
+    Color::Blue,
+    Color::Green,
+    Color::Cyan,
+];
 
 /// The startup intro for scrollback: the gradient wordmark + a resolved workers
 /// table. Used when committing the dismissed intro; the spinner is irrelevant by
@@ -109,7 +115,9 @@ fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'stati
     let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::from(Span::styled(
         "  workers",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
     let mut rows: Vec<&super::WorkerRow> = intro.workers.iter().collect();
     rows.sort_by_key(|w| match w.avail {
@@ -123,7 +131,11 @@ fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'stati
             WorkerAvail::Checking => (spin.to_string(), Color::Cyan),
             WorkerAvail::NotInstalled => ("·".to_string(), Color::DarkGray),
         };
-        let name_color = if w.avail == WorkerAvail::NotInstalled { Color::DarkGray } else { Color::White };
+        let name_color = if w.avail == WorkerAvail::NotInstalled {
+            Color::DarkGray
+        } else {
+            Color::White
+        };
         let detail = match w.avail {
             WorkerAvail::NotInstalled => "not installed".to_string(),
             WorkerAvail::Checking => "checking…".to_string(),
@@ -131,7 +143,11 @@ fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'stati
             WorkerAvail::Available if !w.ladder.is_empty() => w.ladder.join(" · "),
             WorkerAvail::Available => "(no model id)".to_string(),
         };
-        let detail_color = if w.avail == WorkerAvail::Available { Color::Gray } else { Color::DarkGray };
+        let detail_color = if w.avail == WorkerAvail::Available {
+            Color::Gray
+        } else {
+            Color::DarkGray
+        };
         out.push(Line::from(vec![
             Span::styled(format!("  {glyph} "), Style::default().fg(gcolor)),
             Span::styled(format!("{:<14}", w.name), Style::default().fg(name_color)),
@@ -140,7 +156,12 @@ fn workers_table_lines(intro: &super::IntroState, spin: &str) -> Vec<Line<'stati
     }
     out.push(Line::default());
     out.push(Line::from(vec![
-        Span::styled("  conductor  ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  conductor  ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(intro.conductor.clone(), Style::default().fg(Color::Gray)),
     ]));
     out.push(Line::default());
@@ -163,7 +184,10 @@ fn wordmark_lines() -> Vec<Line<'static>> {
                 .enumerate()
                 .map(|(i, c)| {
                     let color = GRADIENT[(i * GRADIENT.len() / n).min(GRADIENT.len() - 1)];
-                    Span::styled(c.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD))
+                    Span::styled(
+                        c.to_string(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    )
                 })
                 .collect();
             Line::from(spans)
@@ -177,7 +201,9 @@ pub fn draw_viewport(f: &mut Frame, app: &App) {
 
     let prompt_inner_w = (area.width.saturating_sub(5)).max(8) as usize;
     let wrapped_input = wrap_input(app.input_str(), prompt_inner_w);
-    let input_h = (wrapped_input.len() as u16 + 2).min(area.height.saturating_sub(2)).max(3);
+    let input_h = (wrapped_input.len() as u16 + 2)
+        .min(area.height.saturating_sub(2))
+        .max(3);
 
     // Bottom-anchored: the live region (agents flow / picker / tail) fills the
     // space ABOVE the status+prompt footer. When idle it's empty, so the fill
@@ -193,7 +219,14 @@ pub fn draw_viewport(f: &mut Frame, app: &App) {
     let cursor_char = app.cursor_char();
     draw_middle(f, chunks[0], app);
     draw_status(f, chunks[1], app);
-    draw_prompt(f, chunks[2], app, &wrapped_input, cursor_char, prompt_inner_w);
+    draw_prompt(
+        f,
+        chunks[2],
+        app,
+        &wrapped_input,
+        cursor_char,
+        prompt_inner_w,
+    );
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
@@ -207,16 +240,29 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     };
     let (done, total) = app.progress();
     let mut spans = vec![
-        Span::styled(" rinne ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " rinne ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled(status, Style::default().fg(color)),
     ];
     if total > 0 {
-        let active = app.nodes.iter().filter(|n| matches!(n.status, NodeStatus::Running | NodeStatus::Parked)).count();
+        let active = app
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.status, NodeStatus::Running | NodeStatus::Parked))
+            .count();
         let summary = if app.nodes.len() == 1 {
             format!("  · {done}/{total} done")
         } else {
-            format!("  · {active} agent{} active · {done}/{total} done", if active == 1 { "" } else { "s" })
+            format!(
+                "  · {active} agent{} active · {done}/{total} done",
+                if active == 1 { "" } else { "s" }
+            )
         };
         spans.push(Span::styled(summary, Style::default().fg(Color::DarkGray)));
     }
@@ -229,10 +275,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     }
     if app.run_tokens > 0 {
         spans.push(Span::styled(
-            format!(
-                "  · {} tok",
-                rinne_core::format_token_count(app.run_tokens)
-            ),
+            format!("  · {} tok", rinne_core::format_token_count(app.run_tokens)),
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -240,11 +283,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     //   during a run  → average limit % across harness workers used so far
     //   after the run → per-worker breakdown for participants
     //   idle/cleared  → pool-wide max overview
-    let used_refs: Vec<&str> = app
-        .run_participants
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let used_refs: Vec<&str> = app.run_participants.iter().map(String::as_str).collect();
     let chip = limits_status_chip(
         app.limits_show_status,
         app.limit_report.as_ref(),
@@ -258,10 +297,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     };
     if let Some(goal) = app.goal.as_deref() {
         spans.push(Span::styled("  · ", Style::default().fg(Color::DarkGray)));
-        let budget = area
-            .width
-            .saturating_sub(28)
-            .saturating_sub(chip_w as u16) as usize;
+        let budget = area.width.saturating_sub(28).saturating_sub(chip_w as u16) as usize;
         spans.push(Span::styled(
             truncate(goal, budget.max(8)),
             Style::default().fg(Color::White),
@@ -366,7 +402,11 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
         // Pre-wrap the focused stream (answer preferred, else thinking),
         // preserving hard newlines so a banner line and the answer don't merge.
         let answering = !app.live_tail.is_empty();
-        let body = if answering { &app.live_tail } else { &app.live_thinking };
+        let body = if answering {
+            &app.live_tail
+        } else {
+            &app.live_thinking
+        };
         let avail = area.width.saturating_sub(4).max(8) as usize;
         let tail = tail_lines(body, avail, 2);
         let lines = render_agents_flow(
@@ -396,8 +436,16 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
                 ListItem::new(Line::from(Span::styled(format!(" {m}"), style)))
             })
             .collect();
-        let title = format!("@{} · {} match{} · tab", picker.query, picker.matches.len(), if picker.matches.len() == 1 { "" } else { "es" });
-        let block = Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Cyan)).title(title);
+        let title = format!(
+            "@{} · {} match{} · tab",
+            picker.query,
+            picker.matches.len(),
+            if picker.matches.len() == 1 { "" } else { "es" }
+        );
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title);
         let slot = bottom_slice(area, items.len() as u16 + 1);
         f.render_widget(List::new(items).block(block), slot);
     } else if let Some(comp) = &app.completion {
@@ -443,7 +491,11 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
         // starts; until then show the reasoning (dimmed) so thinking is visible.
         let node = app.live_node.as_deref().unwrap_or("");
         let answering = !app.live_tail.is_empty();
-        let body = if answering { &app.live_tail } else { &app.live_thinking };
+        let body = if answering {
+            &app.live_tail
+        } else {
+            &app.live_thinking
+        };
         let prefix = if answering { "" } else { "✻ " };
         let text = format!("{node}  {prefix}{body}");
         let avail = area.width.saturating_sub(2).max(8) as usize;
@@ -453,7 +505,9 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
         let style = if answering {
             Style::default().fg(Color::Gray)
         } else {
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC)
         };
         let lines: Vec<Line> = wrapped[start..]
             .iter()
@@ -485,10 +539,16 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &App) {
 
     let horizontal = area.width >= 90 && indices.len() > 1;
     let panes: Vec<Rect> = if horizontal {
-        let constraints: Vec<Constraint> = indices.iter().map(|_| Constraint::Ratio(1, indices.len() as u32)).collect();
+        let constraints: Vec<Constraint> = indices
+            .iter()
+            .map(|_| Constraint::Ratio(1, indices.len() as u32))
+            .collect();
         Layout::horizontal(constraints).split(area).to_vec()
     } else {
-        let constraints: Vec<Constraint> = indices.iter().map(|_| Constraint::Ratio(1, indices.len() as u32)).collect();
+        let constraints: Vec<Constraint> = indices
+            .iter()
+            .map(|_| Constraint::Ratio(1, indices.len() as u32))
+            .collect();
         Layout::vertical(constraints).split(area).to_vec()
     };
 
@@ -509,11 +569,7 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &App) {
             StageStatus::Failed => Color::Red,
             StageStatus::Cancelled => Color::Yellow,
         };
-        let title = format!(
-            " {} · {} ",
-            session.title(),
-            session.status.label()
-        );
+        let title = format!(" {} · {} ", session.title(), session.status.label());
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(if focused {
@@ -524,13 +580,11 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &App) {
             .border_style(border)
             .title(Span::styled(
                 title,
-                Style::default()
-                    .fg(status_color)
-                    .add_modifier(if focused {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
+                Style::default().fg(status_color).add_modifier(if focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
             ));
         let inner = block.inner(pane);
         f.render_widget(block, pane);
@@ -544,7 +598,9 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     " (no output captured)"
                 },
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ))]
         } else {
             window
@@ -576,7 +632,14 @@ fn draw_stage(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String], cursor_char: usize, width: usize) {
+fn draw_prompt(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    wrapped: &[String],
+    cursor_char: usize,
+    width: usize,
+) {
     let hint = if app.parked.is_some() {
         "enter to steer · /approve · /reject"
     } else if app.running {
@@ -593,7 +656,12 @@ fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String], cursor_
         .enumerate()
         .map(|(i, text)| {
             let lead = if i == 0 {
-                Span::styled("› ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                Span::styled(
+                    "› ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 Span::raw("  ")
             };
@@ -616,7 +684,10 @@ fn draw_prompt(f: &mut Frame, area: Rect, app: &App, wrapped: &[String], cursor_
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title_bottom(Span::styled(format!(" {hint} "), Style::default().fg(Color::DarkGray)));
+        .title_bottom(Span::styled(
+            format!(" {hint} "),
+            Style::default().fg(Color::DarkGray),
+        ));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -648,9 +719,17 @@ fn render_entry(entry: FeedEntryRef, width: usize, expand_thinking: bool) -> Vec
         let node = entry.node.map(|n| format!("{n} ")).unwrap_or_default();
         let dim_head = Style::default().fg(Color::DarkGray);
         if !expand_thinking {
-            let n = entry.text.lines().filter(|l| !l.trim().is_empty()).count().max(1);
+            let n = entry
+                .text
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+                .max(1);
             return vec![Line::from(Span::styled(
-                format!("  ✻ {node}thinking · {n} line{} · ctrl+o to show", if n == 1 { "" } else { "s" }),
+                format!(
+                    "  ✻ {node}thinking · {n} line{} · ctrl+o to show",
+                    if n == 1 { "" } else { "s" }
+                ),
                 dim_head,
             ))];
         }
@@ -658,7 +737,10 @@ fn render_entry(entry: FeedEntryRef, width: usize, expand_thinking: bool) -> Vec
         let avail = width.saturating_sub(indent + 1).max(24);
         let dim = dim_head.add_modifier(Modifier::ITALIC);
         let mut out: Vec<Line<'static>> = Vec::new();
-        out.push(Line::from(Span::styled(format!("  ✻ {node}thinking"), dim_head)));
+        out.push(Line::from(Span::styled(
+            format!("  ✻ {node}thinking"),
+            dim_head,
+        )));
         for seg in entry.text.split('\n') {
             if seg.trim().is_empty() {
                 out.push(Line::default());
@@ -732,7 +814,11 @@ struct FeedEntryRef<'a> {
 
 impl<'a> From<&'a super::FeedEntry> for FeedEntryRef<'a> {
     fn from(e: &'a super::FeedEntry) -> Self {
-        FeedEntryRef { kind: e.kind, text: &e.text, node: e.node.as_deref() }
+        FeedEntryRef {
+            kind: e.kind,
+            text: &e.text,
+            node: e.node.as_deref(),
+        }
     }
 }
 
@@ -774,7 +860,12 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 /// (bottom-anchored) live region instead of floating at its top.
 fn bottom_slice(area: Rect, want: u16) -> Rect {
     let h = want.min(area.height);
-    Rect { x: area.x, y: area.y + area.height - h, width: area.width, height: h }
+    Rect {
+        x: area.x,
+        y: area.y + area.height - h,
+        width: area.width,
+        height: h,
+    }
 }
 
 /// The last `max` visual lines of `body` for the focused-stream tail. Splits on
@@ -869,7 +960,9 @@ fn render_agents_flow(
     height: usize,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
-    if height == 0 { return out; }
+    if height == 0 {
+        return out;
+    }
 
     // Order: active (running/parked) first, then finished — so truncation drops
     // finished/overflow last.
@@ -880,7 +973,11 @@ fn render_agents_flow(
     });
 
     // Reserve room for the focused tail (at most 2 lines) when present.
-    let tail_budget = if focused.is_some() && !tail.is_empty() { tail.len().min(2) } else { 0 };
+    let tail_budget = if focused.is_some() && !tail.is_empty() {
+        tail.len().min(2)
+    } else {
+        0
+    };
     let body_budget = height.saturating_sub(tail_budget);
 
     let mut shown = 0usize;
@@ -897,12 +994,18 @@ fn render_agents_flow(
         };
         let mut heading = vec![
             Span::styled(format!("{glyph} "), Style::default().fg(gcolor)),
-            Span::styled(n.role.clone(), Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                n.role.clone(),
+                Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled(n.worker.clone(), Style::default().fg(Color::DarkGray)),
         ];
         if matches!(n.status, NodeStatus::Succeeded) {
-            heading.push(Span::styled("  · done", Style::default().fg(Color::DarkGray)));
+            heading.push(Span::styled(
+                "  · done",
+                Style::default().fg(Color::DarkGray),
+            ));
         } else if matches!(n.status, NodeStatus::Failed) {
             heading.push(Span::styled("  · failed", Style::default().fg(Color::Red)));
         }
@@ -917,7 +1020,9 @@ fn render_agents_flow(
             )));
             break;
         }
-        if shown >= body_budget { break; }
+        if shown >= body_budget {
+            break;
+        }
         out.push(Line::from(heading));
         shown += 1;
 
@@ -925,7 +1030,9 @@ fn render_agents_flow(
         if matches!(n.status, NodeStatus::Running | NodeStatus::Parked) {
             if let Some(acts) = actions.get(&n.id) {
                 for a in acts.iter() {
-                    if shown >= body_budget { break; }
+                    if shown >= body_budget {
+                        break;
+                    }
                     out.push(Line::from(vec![
                         Span::styled("  ⏺ ", Style::default().fg(Color::DarkGray)),
                         Span::styled(a.clone(), Style::default().fg(Color::DarkGray)),
@@ -941,7 +1048,12 @@ fn render_agents_flow(
         for l in tail.iter().take(tail_budget) {
             out.push(Line::from(vec![
                 Span::styled("  ┊ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(l.clone(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    l.clone(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
             ]));
         }
     }
@@ -949,11 +1061,22 @@ fn render_agents_flow(
 }
 
 fn agent_color(index: usize) -> Color {
-    const PALETTE: [Color; 5] = [Color::Cyan, Color::Magenta, Color::Green, Color::Yellow, Color::Blue];
+    const PALETTE: [Color; 5] = [
+        Color::Cyan,
+        Color::Magenta,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+    ];
     PALETTE[index % PALETTE.len()]
 }
 
-fn status_glyph(status: NodeStatus, identity: Color, spinner: &str, focused: bool) -> (String, Color) {
+fn status_glyph(
+    status: NodeStatus,
+    identity: Color,
+    spinner: &str,
+    focused: bool,
+) -> (String, Color) {
     match status {
         NodeStatus::Running if focused => (spinner.to_string(), Color::Cyan),
         NodeStatus::Running => ("●".to_string(), identity),
@@ -974,9 +1097,21 @@ mod tests {
         use crate::tui::{IntroState, WorkerAvail, WorkerRow};
         let intro = IntroState {
             workers: vec![
-                WorkerRow { name: "claude-code".into(), avail: WorkerAvail::Available, ladder: vec!["haiku".into(), "sonnet".into(), "opus".into()] },
-                WorkerRow { name: "codex".into(), avail: WorkerAvail::Available, ladder: vec![] },
-                WorkerRow { name: "grok".into(), avail: WorkerAvail::NotInstalled, ladder: vec![] },
+                WorkerRow {
+                    name: "claude-code".into(),
+                    avail: WorkerAvail::Available,
+                    ladder: vec!["haiku".into(), "sonnet".into(), "opus".into()],
+                },
+                WorkerRow {
+                    name: "codex".into(),
+                    avail: WorkerAvail::Available,
+                    ladder: vec![],
+                },
+                WorkerRow {
+                    name: "grok".into(),
+                    avail: WorkerAvail::NotInstalled,
+                    ladder: vec![],
+                },
             ],
             conductor: "groq · openai/gpt-oss-120b".into(),
             resolved: true,
@@ -989,14 +1124,26 @@ mod tests {
             .map(|s| s.content.as_ref().to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("conductor for your AI coding tools"), "tagline missing");
+        assert!(
+            text.contains("conductor for your AI coding tools"),
+            "tagline missing"
+        );
         assert!(text.contains("workers"), "workers header missing");
         // Available harness with a ladder shows its full ladder.
-        assert!(text.contains("claude-code") && text.contains("haiku") && text.contains("opus"), "ladder missing: {text}");
+        assert!(
+            text.contains("claude-code") && text.contains("haiku") && text.contains("opus"),
+            "ladder missing: {text}"
+        );
         // Available harness without a ladder shows a clear missing-id note (not "default model").
-        assert!(text.contains("codex") && text.contains("no model id"), "codex row missing: {text}");
+        assert!(
+            text.contains("codex") && text.contains("no model id"),
+            "codex row missing: {text}"
+        );
         // Not-installed harness is shown as such, not hidden.
-        assert!(text.contains("grok") && text.contains("not installed"), "grok row missing: {text}");
+        assert!(
+            text.contains("grok") && text.contains("not installed"),
+            "grok row missing: {text}"
+        );
         assert!(text.contains("conductor"), "conductor line missing");
         // The wordmark rows use the gradient: more than one fg color appears.
         let colors: std::collections::HashSet<_> = lines
@@ -1004,14 +1151,21 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .filter_map(|s| s.style.fg)
             .collect();
-        assert!(colors.len() >= 3, "expected a multi-color gradient, got {colors:?}");
+        assert!(
+            colors.len() >= 3,
+            "expected a multi-color gradient, got {colors:?}"
+        );
     }
 
     #[test]
     fn intro_render_table_only_omits_wordmark_and_hints() {
         use crate::tui::{IntroState, WorkerAvail, WorkerRow};
         let intro = IntroState {
-            workers: vec![WorkerRow { name: "claude-code".into(), avail: WorkerAvail::Available, ladder: vec!["haiku".into(), "sonnet".into()] }],
+            workers: vec![WorkerRow {
+                name: "claude-code".into(),
+                avail: WorkerAvail::Available,
+                ladder: vec!["haiku".into(), "sonnet".into()],
+            }],
             conductor: "groq · m".into(),
             resolved: true,
             banner: false, // /models view: table only
@@ -1023,11 +1177,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         // Table content present.
-        assert!(text.contains("workers") && text.contains("claude-code") && text.contains("haiku"), "{text}");
+        assert!(
+            text.contains("workers") && text.contains("claude-code") && text.contains("haiku"),
+            "{text}"
+        );
         assert!(text.contains("conductor"), "{text}");
         // Chrome absent.
-        assert!(!text.contains("conductor for your AI coding tools"), "tagline leaked: {text}");
-        assert!(!text.contains("describe what you want done"), "prompt hint leaked: {text}");
+        assert!(
+            !text.contains("conductor for your AI coding tools"),
+            "tagline leaked: {text}"
+        );
+        assert!(
+            !text.contains("describe what you want done"),
+            "prompt hint leaked: {text}"
+        );
         assert!(!text.contains('╦'), "wordmark leaked: {text}");
     }
 
@@ -1041,12 +1204,30 @@ mod tests {
     #[test]
     fn status_glyph_per_state() {
         let id = Color::Magenta;
-        assert_eq!(status_glyph(NodeStatus::Succeeded, id, "⠹", false), ("✔".into(), Color::Green));
-        assert_eq!(status_glyph(NodeStatus::Failed, id, "⠹", false), ("✗".into(), Color::Red));
-        assert_eq!(status_glyph(NodeStatus::Running, id, "⠹", false).0, "●".to_string());
-        assert_eq!(status_glyph(NodeStatus::Running, id, "⠹", true).0, "⠹".to_string());
-        assert_eq!(status_glyph(NodeStatus::Parked, id, "⠹", false), ("⏸".into(), Color::Yellow));
-        assert_eq!(status_glyph(NodeStatus::Pending, id, "⠹", false), ("○".into(), Color::DarkGray));
+        assert_eq!(
+            status_glyph(NodeStatus::Succeeded, id, "⠹", false),
+            ("✔".into(), Color::Green)
+        );
+        assert_eq!(
+            status_glyph(NodeStatus::Failed, id, "⠹", false),
+            ("✗".into(), Color::Red)
+        );
+        assert_eq!(
+            status_glyph(NodeStatus::Running, id, "⠹", false).0,
+            "●".to_string()
+        );
+        assert_eq!(
+            status_glyph(NodeStatus::Running, id, "⠹", true).0,
+            "⠹".to_string()
+        );
+        assert_eq!(
+            status_glyph(NodeStatus::Parked, id, "⠹", false),
+            ("⏸".into(), Color::Yellow)
+        );
+        assert_eq!(
+            status_glyph(NodeStatus::Pending, id, "⠹", false),
+            ("○".into(), Color::DarkGray)
+        );
         assert_eq!(status_glyph(NodeStatus::Running, id, "⠹", false).1, id); // identity color on unfocused running dot
     }
 
@@ -1054,15 +1235,23 @@ mod tests {
     fn input_wrap_preserves_spaces() {
         assert_eq!(wrap_input("a b ", 80), vec!["a b ".to_string()]);
         assert_eq!(wrap_input("", 80), vec![String::new()]);
-        assert_eq!(wrap_input("abcdef", 3), vec!["abc".to_string(), "def".to_string()]);
+        assert_eq!(
+            wrap_input("abcdef", 3),
+            vec!["abc".to_string(), "def".to_string()]
+        );
     }
 
     #[test]
     fn bottom_slice_hugs_bottom() {
-        let area = Rect { x: 2, y: 0, width: 40, height: 10 };
+        let area = Rect {
+            x: 2,
+            y: 0,
+            width: 40,
+            height: 10,
+        };
         let s = bottom_slice(area, 3);
         assert_eq!((s.x, s.y, s.width, s.height), (2, 7, 40, 3)); // last 3 rows
-        // Requesting more than available clamps to the area height.
+                                                                  // Requesting more than available clamps to the area height.
         let s2 = bottom_slice(area, 99);
         assert_eq!((s2.y, s2.height), (0, 10));
     }
@@ -1107,13 +1296,34 @@ mod tests {
         // Collapsed: a single summary line with the line count.
         let collapsed = render_entry((&entry).into(), 80, false);
         assert_eq!(collapsed.len(), 1);
-        let t: String = collapsed[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(t.contains("n3") && t.contains("thinking") && t.contains("3 lines") && t.contains("ctrl+o"), "{t:?}");
+        let t: String = collapsed[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            t.contains("n3")
+                && t.contains("thinking")
+                && t.contains("3 lines")
+                && t.contains("ctrl+o"),
+            "{t:?}"
+        );
         // Expanded: a header plus the body lines.
         let expanded = render_entry((&entry).into(), 80, true);
-        assert!(expanded.len() > 3, "expected full body, got {}", expanded.len());
-        let all: String = expanded.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref().to_string()).collect();
-        assert!(all.contains("first thought") && all.contains("third"), "{all:?}");
+        assert!(
+            expanded.len() > 3,
+            "expected full body, got {}",
+            expanded.len()
+        );
+        let all: String = expanded
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert!(
+            all.contains("first thought") && all.contains("third"),
+            "{all:?}"
+        );
     }
 
     #[test]
@@ -1136,7 +1346,10 @@ mod tests {
 
     #[test]
     fn wrap_input_splits_on_newline() {
-        assert_eq!(wrap_input("a\nb", 80), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            wrap_input("a\nb", 80),
+            vec!["a".to_string(), "b".to_string()]
+        );
         assert_eq!(wrap_input("a\n", 80), vec!["a".to_string(), String::new()]);
         assert_eq!(
             wrap_input("abcdef\nx", 3),
@@ -1151,49 +1364,102 @@ mod tests {
         assert_eq!(cursor_pos_in_text("ab\ncd", 80, 2), (0, 2)); // on the '\n'
         assert_eq!(cursor_pos_in_text("ab\ncd", 80, 3), (1, 0)); // first char after '\n'
         assert_eq!(cursor_pos_in_text("ab\ncd", 80, 5), (1, 2)); // end
-        // Width wrap and the trailing-empty-line case must agree with wrap_input.
+                                                                 // Width wrap and the trailing-empty-line case must agree with wrap_input.
         assert_eq!(cursor_pos_in_text("abcdef", 3, 3), (0, 3)); // at the wrap boundary
-        assert_eq!(cursor_pos_in_text("a\n", 80, 2), (1, 0));   // cursor on the new empty line
+        assert_eq!(cursor_pos_in_text("a\n", 80, 2), (1, 0)); // cursor on the new empty line
     }
 
     #[test]
     fn agents_flow_renders_role_headings_and_actions() {
         use std::collections::HashMap;
         let nodes = vec![
-            NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Running, worker: "claude-code".into() },
-            NodeView { id: "n2".into(), role: "scanner".into(), status: NodeStatus::Succeeded, worker: "haiku".into() },
+            NodeView {
+                id: "n1".into(),
+                role: "generator".into(),
+                status: NodeStatus::Running,
+                worker: "claude-code".into(),
+            },
+            NodeView {
+                id: "n2".into(),
+                role: "scanner".into(),
+                status: NodeStatus::Succeeded,
+                worker: "haiku".into(),
+            },
         ];
         let mut actions = HashMap::new();
-        actions.insert("n1".to_string(), vec!["Read Cargo.toml".to_string(), "Searched needle".to_string()]);
+        actions.insert(
+            "n1".to_string(),
+            vec!["Read Cargo.toml".to_string(), "Searched needle".to_string()],
+        );
         let lines = render_agents_flow(&nodes, &actions, Some("n1"), "⠹", &[], 20);
-        let text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref().to_string()).collect();
-        assert!(text.contains("generator") && text.contains("claude-code"), "{text}");
-        assert!(text.contains("Read Cargo.toml") && text.contains("Searched needle"), "{text}");
-        assert!(text.contains("scanner"), "finished agent heading still shown: {text}");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert!(
+            text.contains("generator") && text.contains("claude-code"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Read Cargo.toml") && text.contains("Searched needle"),
+            "{text}"
+        );
+        assert!(
+            text.contains("scanner"),
+            "finished agent heading still shown: {text}"
+        );
         // No node-ids leak into the user view.
-        assert!(!text.contains("n1") && !text.contains("n2"), "ids must not appear: {text}");
+        assert!(
+            !text.contains("n1") && !text.contains("n2"),
+            "ids must not appear: {text}"
+        );
     }
 
     #[test]
     fn agents_flow_truncates_under_height_pressure() {
         use std::collections::HashMap;
-        let nodes: Vec<NodeView> = (0..10).map(|i| NodeView {
-            id: format!("n{i}"), role: format!("role{i}"), status: NodeStatus::Running, worker: "w".into(),
-        }).collect();
+        let nodes: Vec<NodeView> = (0..10)
+            .map(|i| NodeView {
+                id: format!("n{i}"),
+                role: format!("role{i}"),
+                status: NodeStatus::Running,
+                worker: "w".into(),
+            })
+            .collect();
         let lines = render_agents_flow(&nodes, &HashMap::new(), None, "⠹", &[], 4);
         assert!(lines.len() <= 4, "must fit height: {}", lines.len());
-        let text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref().to_string()).collect();
-        assert!(text.contains("more agents"), "overflow summary expected: {text}");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert!(
+            text.contains("more agents"),
+            "overflow summary expected: {text}"
+        );
     }
 
     #[test]
     fn agents_flow_shows_focused_tail() {
         use std::collections::HashMap;
-        let nodes = vec![NodeView { id: "n1".into(), role: "gen".into(), status: NodeStatus::Running, worker: "cc".into() }];
+        let nodes = vec![NodeView {
+            id: "n1".into(),
+            role: "gen".into(),
+            status: NodeStatus::Running,
+            worker: "cc".into(),
+        }];
         let tail = vec!["…scanning the workspace now".to_string()];
         let lines = render_agents_flow(&nodes, &HashMap::new(), Some("n1"), "⠹", &tail, 20);
-        let text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref().to_string()).collect();
-        assert!(text.contains("┊") && text.contains("scanning the workspace"), "{text}");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert!(
+            text.contains("┊") && text.contains("scanning the workspace"),
+            "{text}"
+        );
     }
 
     fn known_report() -> rinne_config::LimitReport {
@@ -1249,10 +1515,7 @@ mod tests {
 
     #[test]
     fn limits_chip_probing_placeholder() {
-        assert_eq!(
-            limits_status_chip(true, None, false, &[]),
-            "limits …"
-        );
+        assert_eq!(limits_status_chip(true, None, false, &[]), "limits …");
     }
 
     #[test]
@@ -1278,10 +1541,7 @@ mod tests {
     fn limits_chip_pool_when_idle_no_participants() {
         let r = known_report();
         // Pool max across workers: 60.
-        assert_eq!(
-            limits_status_chip(true, Some(&r), false, &[]),
-            "limits 60%"
-        );
+        assert_eq!(limits_status_chip(true, Some(&r), false, &[]), "limits 60%");
     }
 
     #[test]

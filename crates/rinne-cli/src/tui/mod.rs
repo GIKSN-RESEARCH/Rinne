@@ -6,8 +6,8 @@
 //! status, any in-progress streamed text, the `@`-picker, and the prompt. This
 //! mirrors how Claude Code / Grok behave, rather than a fixed full-screen grid.
 
-mod index;
 mod complete;
+mod index;
 mod markdown;
 mod picker;
 mod stage;
@@ -18,14 +18,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyboardEnhancementFlags,
-    KeyCode, KeyEventKind, KeyModifiers, PopKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
-use crossterm::cursor::MoveTo;
 use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -188,7 +188,10 @@ pub struct IntroState {
 /// Messages delivered to the app loop from background runs.
 pub enum AppMsg {
     Engine(EngineEvent),
-    Planned { goal: String, nodes: Vec<NodeView> },
+    Planned {
+        goal: String,
+        nodes: Vec<NodeView>,
+    },
     Finished(RunReport),
     Failed(String),
     Reindex,
@@ -286,7 +289,11 @@ pub struct App {
 }
 
 impl App {
-    fn new(index: FileIndex, tx: tokio::sync::mpsc::UnboundedSender<AppMsg>, no_graph: bool) -> Self {
+    fn new(
+        index: FileIndex,
+        tx: tokio::sync::mpsc::UnboundedSender<AppMsg>,
+        no_graph: bool,
+    ) -> Self {
         Self {
             goal: None,
             nodes: Vec::new(),
@@ -346,8 +353,11 @@ impl App {
             .collect();
         self.intro = Some(IntroState {
             workers,
-            conductor: format!("{:?} · {}", config.conductor.backend, config.conductor.model)
-                .to_lowercase(),
+            conductor: format!(
+                "{:?} · {}",
+                config.conductor.backend, config.conductor.model
+            )
+            .to_lowercase(),
             resolved: false,
             banner,
         });
@@ -387,7 +397,11 @@ impl App {
 
     /// Queue a committed line for scrollback.
     fn push(&mut self, kind: FeedKind, text: impl Into<String>) {
-        self.pending.push(FeedEntry { kind, text: text.into(), node: None });
+        self.pending.push(FeedEntry {
+            kind,
+            text: text.into(),
+            node: None,
+        });
     }
 
     /// Commit any accumulated reasoning as a dimmed thinking block. Reasoning
@@ -555,14 +569,24 @@ impl App {
                             format!(
                                 "done · {} iteration{} · {} tok (in {} · out {})",
                                 report.total_iterations,
-                                if report.total_iterations == 1 { "" } else { "s" },
+                                if report.total_iterations == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                },
                                 rinne_core::format_token_count(report.total_usage.total_tokens()),
                                 rinne_core::format_token_count(report.total_usage.prompt_tokens),
-                                rinne_core::format_token_count(report.total_usage.completion_tokens),
+                                rinne_core::format_token_count(
+                                    report.total_usage.completion_tokens
+                                ),
                             ),
                         );
                     }
-                    StopReason::NeedsHuman { node, question, gate } => {
+                    StopReason::NeedsHuman {
+                        node,
+                        question,
+                        gate,
+                    } => {
                         self.parked = Some(question.clone());
                         let label = gate
                             .as_ref()
@@ -691,10 +715,7 @@ impl App {
                             .as_deref()
                             .map(|m| format!(":{m}"))
                             .unwrap_or_default();
-                        self.push(
-                            FeedKind::System,
-                            format!("stage  {worker}{m} [{backend}]"),
-                        );
+                        self.push(FeedKind::System, format!("stage  {worker}{m} [{backend}]"));
                     }
                     Reading(ref p) | Editing(ref p) | ToolUse(ref p) => {
                         self.commit_tail();
@@ -703,7 +724,9 @@ impl App {
                             let acts = self.live_actions.entry(id.clone()).or_default();
                             acts.push(label);
                             let n = acts.len();
-                            if n > ACTIONS_PER_AGENT { acts.drain(0..n - ACTIONS_PER_AGENT); }
+                            if n > ACTIONS_PER_AGENT {
+                                acts.drain(0..n - ACTIONS_PER_AGENT);
+                            }
                         } else {
                             self.stage.append(&id, p);
                         }
@@ -780,7 +803,12 @@ impl App {
         // When Stage is active: Tab cycles panes; PgUp/PgDn scroll the focused pane.
         if self.stage.is_active() && self.picker.is_none() && self.completion.is_none() {
             match code {
-                KeyCode::Tab if !mods.contains(KeyModifiers::SHIFT) => {
+                // Sessions linger after a run, so the Stage would otherwise own
+                // Tab for the rest of the session and Tab could never re-summon
+                // a dismissed completion. An editable line outranks pane cycling.
+                KeyCode::Tab
+                    if !mods.contains(KeyModifiers::SHIFT) && !self.input_is_completable() =>
+                {
                     self.stage.cycle_focus();
                     return;
                 }
@@ -804,7 +832,11 @@ impl App {
         // (scrollback is append-only, so already-printed blocks are unchanged).
         if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('o')) {
             self.expand_thinking = !self.expand_thinking;
-            let state = if self.expand_thinking { "expanded" } else { "collapsed" };
+            let state = if self.expand_thinking {
+                "expanded"
+            } else {
+                "collapsed"
+            };
             self.push(FeedKind::System, format!("thinking {state} (ctrl+o)"));
             return;
         }
@@ -877,9 +909,15 @@ impl App {
                 self.refresh_completions();
             }
             KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) => self.cursor = 0,
-            KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => self.cursor = self.input.len(),
-            KeyCode::Left if mods.contains(KeyModifiers::ALT) => self.cursor = prev_word(&self.input, self.cursor),
-            KeyCode::Right if mods.contains(KeyModifiers::ALT) => self.cursor = next_word(&self.input, self.cursor),
+            KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => {
+                self.cursor = self.input.len()
+            }
+            KeyCode::Left if mods.contains(KeyModifiers::ALT) => {
+                self.cursor = prev_word(&self.input, self.cursor)
+            }
+            KeyCode::Right if mods.contains(KeyModifiers::ALT) => {
+                self.cursor = next_word(&self.input, self.cursor)
+            }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
@@ -915,7 +953,9 @@ impl App {
             KeyCode::Down => self.history_next(),
             // Re-summon completion (e.g. after Esc) on a slash line.
             KeyCode::Tab => self.refresh_completions(),
-            KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::ALT) => {
+            KeyCode::Enter
+                if mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::ALT) =>
+            {
                 self.input.insert(self.cursor, '\n');
                 self.cursor += 1;
             }
@@ -966,7 +1006,9 @@ impl App {
     /// keys and `--key` tokens must never be written to disk, so a line that
     /// `redact_secret` would alter is kept in-session only and not persisted.
     fn persist_history(&self, entry: &str) {
-        let Some(path) = &self.history_path else { return };
+        let Some(path) = &self.history_path else {
+            return;
+        };
         if redact_secret(entry) != entry {
             return; // contains a key/token — never write it to disk
         }
@@ -974,7 +1016,11 @@ impl App {
             let _ = std::fs::create_dir_all(parent);
         }
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "{entry}");
         }
     }
@@ -1007,6 +1053,18 @@ impl App {
             let draft = std::mem::take(&mut self.draft);
             self.set_input(draft);
         }
+    }
+
+    /// Whether Tab would actually produce a completion on the current line — a
+    /// resolvable slash command or an `@`-mention. Mirrors the two branches of
+    /// [`Self::refresh_completions`].
+    ///
+    /// A bare `/` prefix is not enough: `complete::suggest` returns `None` for
+    /// most slash lines past the first token, so `/steer fix the thing` + Tab
+    /// would skip pane cycling *and* complete nothing, leaving Tab a dead key.
+    fn input_is_completable(&self) -> bool {
+        current_token(&self.input).starts_with('@')
+            || (self.input.starts_with('/') && complete::suggest(&self.input).is_some())
     }
 
     fn refresh_completions(&mut self) {
@@ -1092,7 +1150,10 @@ impl App {
 
         // A slash command, or a `rinne <cmd>` typed out of shell habit — both
         // route to the command handler, never the conductor.
-        if let Some(cmd) = text.strip_prefix('/').or_else(|| text.strip_prefix("rinne ")) {
+        if let Some(cmd) = text
+            .strip_prefix('/')
+            .or_else(|| text.strip_prefix("rinne "))
+        {
             self.slash(cmd.trim());
             return;
         }
@@ -1101,7 +1162,10 @@ impl App {
             return;
         }
         if self.running {
-            self.push(FeedKind::System, "a run is active — /pause first, or wait for it to park");
+            self.push(
+                FeedKind::System,
+                "a run is active — /pause first, or wait for it to park",
+            );
             return;
         }
         match self.resolve_mentions(&text) {
@@ -1397,7 +1461,10 @@ impl App {
                         port = p;
                         i += 1;
                     } else {
-                        self.push(FeedKind::System, "usage: /serve [--port N] [--no-open]  ·  /serve stop");
+                        self.push(
+                            FeedKind::System,
+                            "usage: /serve [--port N] [--no-open]  ·  /serve stop",
+                        );
                         return;
                     }
                 }
@@ -1484,7 +1551,9 @@ impl App {
         self.push(FeedKind::System, format!("fetching models for {provider}…"));
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let text = crate::commands::models::list_lines(&provider).await.join("\n");
+            let text = crate::commands::models::list_lines(&provider)
+                .await
+                .join("\n");
             let _ = tx.send(AppMsg::Note(text));
         });
     }
@@ -1512,16 +1581,34 @@ impl App {
         tokio::spawn(async move {
             if let Ok((registry, names)) = runner::build_registry(&config).await {
                 let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
-                let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
+                let _ = probe_tx.send(AppMsg::Capabilities {
+                    available: names,
+                    ladders,
+                });
             }
         });
     }
 
-    fn connect(&mut self, backend: String, key: Option<String>, models: Vec<String>, base_url: Option<String>, add: bool) {
+    fn connect(
+        &mut self,
+        backend: String,
+        key: Option<String>,
+        models: Vec<String>,
+        base_url: Option<String>,
+        add: bool,
+    ) {
         self.push(FeedKind::System, format!("connecting {backend}…"));
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let text = match crate::commands::connect::connect_lines(&backend, key.as_deref(), &models, base_url.as_deref(), add).await {
+            let text = match crate::commands::connect::connect_lines(
+                &backend,
+                key.as_deref(),
+                &models,
+                base_url.as_deref(),
+                add,
+            )
+            .await
+            {
                 Ok(lines) => lines.join("\n"),
                 Err(e) => format!("connect failed: {e}"),
             };
@@ -1532,7 +1619,10 @@ impl App {
     fn pause(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
-            self.push(FeedKind::System, "paused — state saved; type to steer or /resume");
+            self.push(
+                FeedKind::System,
+                "paused — state saved; type to steer or /resume",
+            );
         }
     }
 
@@ -1546,7 +1636,14 @@ impl App {
         self.run_participants.clear();
         self.run_tokens = 0;
         self.push(FeedKind::Conductor, format!("planning: {goal}"));
-        spawn_run(self.tx.clone(), goal, mentioned, None, cancel, self.no_graph);
+        spawn_run(
+            self.tx.clone(),
+            goal,
+            mentioned,
+            None,
+            cancel,
+            self.no_graph,
+        );
     }
 
     fn resume_with(&mut self, decision: HumanDecision) {
@@ -1558,9 +1655,19 @@ impl App {
         self.running = true;
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
-        let resume = ResumeInput { node: None, decision };
+        let resume = ResumeInput {
+            node: None,
+            decision,
+        };
         self.push(FeedKind::Conductor, "resuming with your decision");
-        spawn_run(self.tx.clone(), String::new(), Vec::new(), Some(resume), cancel, self.no_graph);
+        spawn_run(
+            self.tx.clone(),
+            String::new(),
+            Vec::new(),
+            Some(resume),
+            cancel,
+            self.no_graph,
+        );
     }
 
     fn resume_plain(&mut self) {
@@ -1568,7 +1675,14 @@ impl App {
         self.cancel = Some(cancel.clone());
         self.running = true;
         self.push(FeedKind::Conductor, "resuming");
-        spawn_run(self.tx.clone(), String::new(), Vec::new(), None, cancel, self.no_graph);
+        spawn_run(
+            self.tx.clone(),
+            String::new(),
+            Vec::new(),
+            None,
+            cancel,
+            self.no_graph,
+        );
     }
 
     fn resolve_mentions(&self, input: &str) -> std::result::Result<(String, Vec<PathBuf>), String> {
@@ -1667,7 +1781,11 @@ fn split_args(s: &str) -> Vec<String> {
 
 /// The byte index of the char boundary just before `i` (clamped at 0).
 fn prev_boundary(s: &str, i: usize) -> usize {
-    s[..i].char_indices().next_back().map(|(b, _)| b).unwrap_or(0)
+    s[..i]
+        .char_indices()
+        .next_back()
+        .map(|(b, _)| b)
+        .unwrap_or(0)
 }
 
 /// The byte index of the char boundary just after `i` (clamped at `s.len()`).
@@ -1680,10 +1798,16 @@ fn next_boundary(s: &str, i: usize) -> usize {
 fn prev_word(s: &str, mut i: usize) -> usize {
     let bytes = s.as_bytes();
     // Spaces are word delimiters; a newline is a hard stop word-motion never crosses.
-    while i > 0 && bytes[i - 1] == b' ' { i -= 1; }
-    while i > 0 && !matches!(bytes[i - 1], b' ' | b'\n') { i = prev_boundary(s, i); }
+    while i > 0 && bytes[i - 1] == b' ' {
+        i -= 1;
+    }
+    while i > 0 && !matches!(bytes[i - 1], b' ' | b'\n') {
+        i = prev_boundary(s, i);
+    }
     // If only spaces remain to the left of this logical line, collapse past them.
-    if i > 0 && bytes[i - 1] == b' ' && bytes[..i].iter().all(|&b| b == b' ') { i = 0; }
+    if i > 0 && bytes[i - 1] == b' ' && bytes[..i].iter().all(|&b| b == b' ') {
+        i = 0;
+    }
     i
 }
 
@@ -1691,8 +1815,12 @@ fn prev_word(s: &str, mut i: usize) -> usize {
 /// non-spaces right. A newline is a hard stop word-motion never crosses.
 fn next_word(s: &str, mut i: usize) -> usize {
     let bytes = s.as_bytes();
-    while i < s.len() && bytes[i] == b' ' { i += 1; }
-    while i < s.len() && !matches!(bytes[i], b' ' | b'\n') { i = next_boundary(s, i); }
+    while i < s.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    while i < s.len() && !matches!(bytes[i], b' ' | b'\n') {
+        i = next_boundary(s, i);
+    }
     i
 }
 
@@ -1854,7 +1982,10 @@ fn spawn_run(
     no_graph: bool,
 ) {
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 let _ = tx.send(AppMsg::Failed(format!("runtime: {e}")));
@@ -1922,9 +2053,10 @@ async fn do_run(
     .ok()
     .map(|c| {
         Arc::new(
-            c.with_context(template.clone()).with_narration(move |line| {
-                let _ = narration_tx.send(AppMsg::Engine(EngineEvent::Narration(line)));
-            }),
+            c.with_context(template.clone())
+                .with_narration(move |line| {
+                    let _ = narration_tx.send(AppMsg::Engine(EngineEvent::Narration(line)));
+                }),
         )
     });
 
@@ -1932,9 +2064,15 @@ async fn do_run(
         let conductor = conductor
             .clone()
             .ok_or_else(|| anyhow!("no conductor backend available"))?;
+        // Read the digest before `save_plan` overwrites `plan.json`. Without it
+        // a follow-up typed in the TUI — the one place follow-ups happen —
+        // reached the planner as a bare "do it for me" and became a "too vague,
+        // ask the user" node.
+        let digest = runner::last_run_digest(&bb);
         let input = ConductorInput {
             goal: goal.clone(),
             mentioned,
+            digest,
             ..template
         };
         let plan = conductor.plan(&input).await?;
@@ -1953,8 +2091,15 @@ async fn do_run(
             worker: String::new(),
         })
         .collect();
-    let goal_label = if goal.is_empty() { plan.goal.clone() } else { goal };
-    let _ = tx.send(AppMsg::Planned { goal: goal_label, nodes });
+    let goal_label = if goal.is_empty() {
+        plan.goal.clone()
+    } else {
+        goal
+    };
+    let _ = tx.send(AppMsg::Planned {
+        goal: goal_label,
+        nodes,
+    });
 
     let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
     let ftx = tx.clone();
@@ -1972,7 +2117,10 @@ async fn do_run(
     if let Some(c) = &conductor {
         engine = engine.with_replanner(c.clone());
     }
-    engine.run(cancel, Some(etx), resume).await.map_err(Into::into)
+    engine
+        .run(cancel, Some(etx), resume)
+        .await
+        .map_err(Into::into)
 }
 
 /// Entry point: set up an inline viewport and run the event loop.
@@ -2015,7 +2163,10 @@ pub async fn run(no_graph: bool) -> Result<()> {
         tokio::spawn(async move {
             if let Ok((registry, names)) = runner::build_registry(&config_for_registry).await {
                 let ladders = rinne_core::pool::profile(&registry.descriptors()).ladders();
-                let _ = probe_tx.send(AppMsg::Capabilities { available: names, ladders });
+                let _ = probe_tx.send(AppMsg::Capabilities {
+                    available: names,
+                    ladders,
+                });
             }
         });
         // Live subscription limits: poll on a timer for the status chip +
@@ -2024,7 +2175,9 @@ pub async fn run(no_graph: bool) -> Result<()> {
             let limits_tx = tx_for_probe.clone();
             let poll = std::time::Duration::from_secs(limits_cfg.poll_secs.max(30));
             let alert_at = limits_cfg.alert_at;
-            let alert_path = cwd.join(rinne_core::BLACKBOARD_DIR).join("limit-alerts.json");
+            let alert_path = cwd
+                .join(rinne_core::BLACKBOARD_DIR)
+                .join("limit-alerts.json");
             tokio::spawn(async move {
                 let mut alert_state = rinne_config::AlertState::load(&alert_path);
                 loop {
@@ -2066,9 +2219,15 @@ pub async fn run(no_graph: bool) -> Result<()> {
     };
     let mut out = io::stdout();
     let _ = execute!(out, EnableBracketedPaste);
-    let kbd_enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+    let kbd_enhanced = matches!(
+        crossterm::terminal::supports_keyboard_enhancement(),
+        Ok(true)
+    );
     if kbd_enhanced {
-        let _ = execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        let _ = execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
     }
 
     let result = event_loop(&mut terminal, &mut app, &mut rx).await;
@@ -2076,7 +2235,9 @@ pub async fn run(no_graph: bool) -> Result<()> {
     // Leave the transcript intact; just drop the live region and free the line.
     let _ = terminal.clear();
     let mut out = io::stdout();
-    if kbd_enhanced { let _ = execute!(out, PopKeyboardEnhancementFlags); }
+    if kbd_enhanced {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(out, DisableBracketedPaste);
     disable_raw_mode()?;
     println!();
@@ -2099,7 +2260,12 @@ async fn event_loop(
             // screen + scrollback clear (like the shell `clear`), then let the
             // draw below repaint the viewport. ratatui must re-sync afterwards so
             // it doesn't assume the old buffer is still on screen.
-            let _ = execute!(io::stdout(), MoveTo(0, 0), Clear(ClearType::All), Clear(ClearType::Purge));
+            let _ = execute!(
+                io::stdout(),
+                MoveTo(0, 0),
+                Clear(ClearType::All),
+                Clear(ClearType::Purge)
+            );
             let _ = terminal.clear();
             // A staged intro banner must not survive a screen wipe.
             app.pending_intro = None;
@@ -2150,6 +2316,44 @@ mod tests {
     }
 
     #[test]
+    fn tab_resummons_completion_on_a_slash_line_even_with_the_stage_active() {
+        let dir = temp_dir("tab-stage-completion");
+        let mut app = app_for(&dir);
+        // A finished harness session lingers on the Stage long after the run,
+        // so `stage.is_active()` stays true for the rest of the session.
+        app.stage
+            .open_session("n1".into(), "codex".into(), None, "headless".into());
+        assert!(app.stage.is_active());
+
+        for c in "/mo".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        // Esc dismisses the popup; Tab is the documented way to bring it back.
+        app.completion = None;
+        app.on_key(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            app.completion.is_some(),
+            "Tab on a completable line must re-summon completion, not cycle Stage panes"
+        );
+    }
+
+    #[test]
+    fn tab_still_cycles_stage_panes_when_there_is_nothing_to_complete() {
+        let dir = temp_dir("tab-stage-cycle");
+        let mut app = app_for(&dir);
+        app.stage
+            .open_session("a".into(), "codex".into(), None, "headless".into());
+        app.stage
+            .open_session("b".into(), "codex".into(), None, "headless".into());
+        assert_eq!(app.stage.sessions[app.stage.focus].node_id, "b");
+
+        app.on_key(KeyCode::Tab, KeyModifiers::NONE); // empty prompt
+
+        assert_eq!(app.stage.sessions[app.stage.focus].node_id, "a");
+    }
+
+    #[test]
     fn current_token_picks_trailing_word() {
         assert_eq!(current_token("fix @src/li"), "@src/li");
         assert_eq!(current_token("hello world"), "world");
@@ -2183,8 +2387,8 @@ mod tests {
         let dir = temp_dir("stream");
         let mut app = app_for(&dir);
         let before = app.pending.len(); // welcome lines
-        // Token deltas (often mid-word) concatenate verbatim and commit as ONE
-        // markdown block tagged with its node — not one fragment per row.
+                                        // Token deltas (often mid-word) concatenate verbatim and commit as ONE
+                                        // markdown block tagged with its node — not one fragment per row.
         app.stream_token("n1", "Hel");
         app.stream_token("n1", "lo wor");
         app.stream_token("n1", "ld\nsecond line");
@@ -2259,15 +2463,27 @@ mod tests {
         app.persist_history("/help");
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("summarize the repo") && contents.contains("/help"), "{contents:?}");
-        assert!(!contents.contains("sk-SECRETKEY"), "API key leaked to history file");
-        assert!(!contents.contains("TOKENABC"), "token leaked to history file");
+        assert!(
+            contents.contains("summarize the repo") && contents.contains("/help"),
+            "{contents:?}"
+        );
+        assert!(
+            !contents.contains("sk-SECRETKEY"),
+            "API key leaked to history file"
+        );
+        assert!(
+            !contents.contains("TOKENABC"),
+            "token leaked to history file"
+        );
 
         // A fresh session loads the persisted (secret-free) entries.
         let mut app2 = app_for(&dir);
         app2.attach_history(path);
         assert!(app2.history.contains(&"summarize the repo".to_string()));
-        assert!(app2.history.iter().all(|h| !h.contains("SECRETKEY") && !h.contains("TOKENABC")));
+        assert!(app2
+            .history
+            .iter()
+            .all(|h| !h.contains("SECRETKEY") && !h.contains("TOKENABC")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2279,7 +2495,11 @@ mod tests {
         // Reasoning streams first…
         app.stream_thinking("n1", "let me consider ");
         app.stream_thinking("n1", "the options");
-        assert_eq!(app.pending.len(), before, "thinking shouldn't flush until the answer starts");
+        assert_eq!(
+            app.pending.len(),
+            before,
+            "thinking shouldn't flush until the answer starts"
+        );
         // …then the answer begins, flushing the thinking block above it.
         app.stream_token("n1", "# Answer");
         assert_eq!(app.pending.len(), before + 1);
@@ -2318,7 +2538,10 @@ mod tests {
     fn redact_hides_conductor_token() {
         let r = redact_secret("/config conductor cloudflare @cf/llama --key TOKEN123 --project");
         assert!(!r.contains("TOKEN123"), "token leaked: {r}");
-        assert!(r.contains("cloudflare") && r.contains("--project") && r.contains("***"), "{r}");
+        assert!(
+            r.contains("cloudflare") && r.contains("--project") && r.contains("***"),
+            "{r}"
+        );
         // positional form: /config key <token>
         let r2 = redact_secret("/config key TOKEN456");
         assert!(!r2.contains("TOKEN456"), "token leaked: {r2}");
@@ -2365,24 +2588,26 @@ mod tests {
 
     #[test]
     fn word_boundaries() {
-        assert_eq!(prev_word("foo bar", 7), 4);     // from end → start of "bar"
-        assert_eq!(prev_word("foo bar", 4), 0);     // skips trailing space → start of "foo"
-        assert_eq!(prev_word("  foo", 5), 0);       // leading spaces collapse to 0
-        assert_eq!(next_word("foo bar", 0), 3);     // end of "foo"
-        assert_eq!(next_word("foo bar", 3), 7);     // skips space → end of "bar"
-        assert_eq!(next_word("foo", 3), 3);         // at end stays
-        // Word motion must NOT cross a hard newline (multi-line input).
-        assert_eq!(prev_word("foo\nbar", 7), 4);    // deletes only "bar", stops at the '\n'
-        assert_eq!(prev_word("foo\nbar", 4), 4);    // already at line start → no move
-        assert_eq!(next_word("foo\nbar", 0), 3);    // stops before the '\n'
-        assert_eq!(next_word("foo\nbar", 3), 3);    // sitting on the '\n' → no move
+        assert_eq!(prev_word("foo bar", 7), 4); // from end → start of "bar"
+        assert_eq!(prev_word("foo bar", 4), 0); // skips trailing space → start of "foo"
+        assert_eq!(prev_word("  foo", 5), 0); // leading spaces collapse to 0
+        assert_eq!(next_word("foo bar", 0), 3); // end of "foo"
+        assert_eq!(next_word("foo bar", 3), 7); // skips space → end of "bar"
+        assert_eq!(next_word("foo", 3), 3); // at end stays
+                                            // Word motion must NOT cross a hard newline (multi-line input).
+        assert_eq!(prev_word("foo\nbar", 7), 4); // deletes only "bar", stops at the '\n'
+        assert_eq!(prev_word("foo\nbar", 4), 4); // already at line start → no move
+        assert_eq!(next_word("foo\nbar", 0), 3); // stops before the '\n'
+        assert_eq!(next_word("foo\nbar", 3), 3); // sitting on the '\n' → no move
     }
 
     #[test]
     fn ctrl_w_deletes_word_back() {
         let dir = temp_dir("ctrlw");
         let mut app = app_for(&dir);
-        for c in "hello world".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "hello world".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         app.on_key(KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert_eq!(app.input, "hello ");
         assert_eq!(app.cursor, app.input.len());
@@ -2392,7 +2617,9 @@ mod tests {
     fn ctrl_u_deletes_to_line_start_and_ctrl_a_e_move() {
         let dir = temp_dir("ctrlu");
         let mut app = app_for(&dir);
-        for c in "abc def".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "abc def".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         app.on_key(KeyCode::Char('a'), KeyModifiers::CONTROL); // line start
         assert_eq!(app.cursor, 0);
         app.on_key(KeyCode::Char('e'), KeyModifiers::CONTROL); // line end
@@ -2405,7 +2632,9 @@ mod tests {
     fn ctrl_k_truncates_forward() {
         let dir = temp_dir("ctrlk");
         let mut app = app_for(&dir);
-        for c in "hello world".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "hello world".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         app.on_key(KeyCode::Char('a'), KeyModifiers::CONTROL); // move to start
         app.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL);
         assert_eq!(app.input, "");
@@ -2416,7 +2645,9 @@ mod tests {
     fn alt_arrows_move_by_word() {
         let dir = temp_dir("altarrow");
         let mut app = app_for(&dir);
-        for c in "foo bar".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "foo bar".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         app.on_key(KeyCode::Left, KeyModifiers::ALT);
         assert_eq!(app.cursor, 4); // start of "bar" (space before it is preserved)
         app.on_key(KeyCode::Left, KeyModifiers::ALT);
@@ -2430,8 +2661,17 @@ mod tests {
         let mut app = app_for(&temp_dir("clear"));
         app.history.push("prior goal".to_string());
         app.goal = Some("a goal".to_string());
-        app.nodes.push(NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: "x".into() });
-        app.pending.push(FeedEntry { kind: FeedKind::System, text: "x".into(), node: None });
+        app.nodes.push(NodeView {
+            id: "n1".into(),
+            role: "generator".into(),
+            status: NodeStatus::Pending,
+            worker: "x".into(),
+        });
+        app.pending.push(FeedEntry {
+            kind: FeedKind::System,
+            text: "x".into(),
+            node: None,
+        });
         app.live_node = Some("n1".to_string());
         app.slash("clear");
         assert!(app.goal.is_none());
@@ -2453,7 +2693,10 @@ mod tests {
         app.commit_intro(); // simulates the commit_intro() submit() runs before slash routing
         assert!(app.pending_intro.is_some(), "precondition: banner staged");
         app.slash("clear");
-        assert!(app.pending_intro.is_none(), "staged banner must be dropped on /clear");
+        assert!(
+            app.pending_intro.is_none(),
+            "staged banner must be dropped on /clear"
+        );
     }
 
     #[test]
@@ -2488,7 +2731,9 @@ mod tests {
     #[test]
     fn paste_inserts_verbatim_including_newlines() {
         let mut app = app_for(&temp_dir("paste"));
-        for c in "ab".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "ab".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         app.cursor = 1; // between a and b
         app.paste("X\nY");
         assert_eq!(app.input, "aX\nYb");
@@ -2498,7 +2743,9 @@ mod tests {
     #[test]
     fn alt_backspace_deletes_word_back() {
         let mut app = app_for(&temp_dir("altbs"));
-        for c in "one two".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "one two".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         app.on_key(KeyCode::Backspace, KeyModifiers::ALT);
         assert_eq!(app.input, "one ");
     }
@@ -2507,9 +2754,13 @@ mod tests {
     fn shift_enter_inserts_newline_plain_enter_submits() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut app = app_for(&temp_dir("shiftenter"));
-        for c in "line1".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "line1".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         app.on_key(KeyCode::Enter, KeyModifiers::SHIFT);
-        for c in "line2".chars() { app.on_key(KeyCode::Char(c), KeyModifiers::NONE); }
+        for c in "line2".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         assert_eq!(app.input, "line1\nline2");
         app.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.input, "");
@@ -2519,25 +2770,54 @@ mod tests {
     fn tool_calls_fill_live_actions_not_scrollback() {
         use rinne_core::worker::WorkerEvent as W;
         let mut app = app_for(&temp_dir("liveact"));
-        app.nodes = vec![NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Running, worker: "claude-code".into() }];
+        app.nodes = vec![NodeView {
+            id: "n1".into(),
+            role: "generator".into(),
+            status: NodeStatus::Running,
+            worker: "claude-code".into(),
+        }];
         let before = app.pending.len();
-        app.apply_engine(EngineEvent::NodeStream { id: "n1".into(), event: W::Reading("Cargo.toml".into()) });
-        app.apply_engine(EngineEvent::NodeStream { id: "n1".into(), event: W::ToolUse("grep needle".into()) });
-        assert_eq!(app.live_actions.get("n1").map(Vec::as_slice), Some(["Read Cargo.toml".to_string(), "Searched needle".to_string()].as_slice()));
-        assert_eq!(app.pending.len(), before, "tool calls must not be pushed to scrollback");
+        app.apply_engine(EngineEvent::NodeStream {
+            id: "n1".into(),
+            event: W::Reading("Cargo.toml".into()),
+        });
+        app.apply_engine(EngineEvent::NodeStream {
+            id: "n1".into(),
+            event: W::ToolUse("grep needle".into()),
+        });
+        assert_eq!(
+            app.live_actions.get("n1").map(Vec::as_slice),
+            Some(["Read Cargo.toml".to_string(), "Searched needle".to_string()].as_slice())
+        );
+        assert_eq!(
+            app.pending.len(),
+            before,
+            "tool calls must not be pushed to scrollback"
+        );
     }
 
     #[test]
     fn live_actions_capped_per_agent() {
         use rinne_core::worker::WorkerEvent as W;
         let mut app = app_for(&temp_dir("liveactcap"));
-        app.nodes = vec![NodeView { id: "n1".into(), role: "r".into(), status: NodeStatus::Running, worker: "w".into() }];
+        app.nodes = vec![NodeView {
+            id: "n1".into(),
+            role: "r".into(),
+            status: NodeStatus::Running,
+            worker: "w".into(),
+        }];
         for i in 0..(ACTIONS_PER_AGENT + 3) {
-            app.apply_engine(EngineEvent::NodeStream { id: "n1".into(), event: W::Reading(format!("f{i}.rs")) });
+            app.apply_engine(EngineEvent::NodeStream {
+                id: "n1".into(),
+                event: W::Reading(format!("f{i}.rs")),
+            });
         }
         let acts = app.live_actions.get("n1").unwrap();
         assert_eq!(acts.len(), ACTIONS_PER_AGENT);
-        assert_eq!(acts.last().unwrap(), &format!("Read f{}.rs", ACTIONS_PER_AGENT + 2));
+        assert_eq!(
+            acts.last().unwrap(),
+            &format!("Read f{}.rs", ACTIONS_PER_AGENT + 2)
+        );
     }
 
     #[test]
@@ -2545,11 +2825,20 @@ mod tests {
         use rinne_core::worker::WorkerEvent as W;
         let cases = [
             (W::Reading("Cargo.toml".into()), Some("Read Cargo.toml")),
-            (W::Editing("editing src/foo.rs".into()), Some("Edited src/foo.rs")),
-            (W::Editing("writing src/foo.rs".into()), Some("Wrote src/foo.rs")),
+            (
+                W::Editing("editing src/foo.rs".into()),
+                Some("Edited src/foo.rs"),
+            ),
+            (
+                W::Editing("writing src/foo.rs".into()),
+                Some("Wrote src/foo.rs"),
+            ),
             (W::ToolUse("grep needle".into()), Some("Searched needle")),
             (W::ToolUse("glob **/*.rs".into()), Some("Listed **/*.rs")),
-            (W::ToolUse("subagent: review the diff".into()), Some("Delegated review the diff")),
+            (
+                W::ToolUse("subagent: review the diff".into()),
+                Some("Delegated review the diff"),
+            ),
             (W::ToolUse("cargo build".into()), Some("cargo build")),
             (W::Token("hi".into()), None),
             (W::Done, None),
@@ -2570,19 +2859,36 @@ mod tests {
         // Before the probe: all rows are Checking.
         let intro = app.intro.as_ref().unwrap();
         assert_eq!(intro.workers.len(), 3);
-        assert!(intro.workers.iter().all(|w| w.avail == WorkerAvail::Checking));
+        assert!(intro
+            .workers
+            .iter()
+            .all(|w| w.avail == WorkerAvail::Checking));
         assert!(!intro.resolved);
 
         // Probe: claude-code + codex available (claude-code has a ladder); grok not.
         let mut ladders: HashMap<String, Vec<String>> = HashMap::new();
-        ladders.insert("claude-code".into(), vec!["haiku".into(), "sonnet".into(), "opus".into()]);
+        ladders.insert(
+            "claude-code".into(),
+            vec!["haiku".into(), "sonnet".into(), "opus".into()],
+        );
         app.apply_capabilities(&["claude-code".to_string(), "codex".to_string()], &ladders);
 
         let intro = app.intro.as_ref().unwrap();
         assert!(intro.resolved);
-        let cc = intro.workers.iter().find(|w| w.name == "claude-code").unwrap();
+        let cc = intro
+            .workers
+            .iter()
+            .find(|w| w.name == "claude-code")
+            .unwrap();
         assert_eq!(cc.avail, WorkerAvail::Available);
-        assert_eq!(cc.ladder, vec!["haiku".to_string(), "sonnet".to_string(), "opus".to_string()]);
+        assert_eq!(
+            cc.ladder,
+            vec![
+                "haiku".to_string(),
+                "sonnet".to_string(),
+                "opus".to_string()
+            ]
+        );
         let cx = intro.workers.iter().find(|w| w.name == "codex").unwrap();
         assert_eq!(cx.avail, WorkerAvail::Available);
         assert!(cx.ladder.is_empty());
@@ -2599,18 +2905,22 @@ mod tests {
     fn viewport_height_scales_and_clamps() {
         assert_eq!(super::viewport_height_for(24), 14); // 60% of 24
         assert_eq!(super::viewport_height_for(80), 24); // capped at 24
-        assert_eq!(super::viewport_height_for(10), 6);  // floor of 6
-        assert_eq!(super::viewport_height_for(5), 4);   // never exceeds rows-1
-        assert_eq!(super::viewport_height_for(1), 1);   // degenerate
+        assert_eq!(super::viewport_height_for(10), 6); // floor of 6
+        assert_eq!(super::viewport_height_for(5), 4); // never exceeds rows-1
+        assert_eq!(super::viewport_height_for(1), 1); // degenerate
     }
 
     #[test]
     fn internal_narration_is_hidden() {
         // Jargon lines suppressed in the user view.
-        assert!(super::is_internal_narration("routed n1 (Generator) to claude-code [harness]"));
+        assert!(super::is_internal_narration(
+            "routed n1 (Generator) to claude-code [harness]"
+        ));
         assert!(super::is_internal_narration("n1 on claude-code:sonnet"));
         // Ordinary narration kept.
-        assert!(!super::is_internal_narration("planning: help me understand the project"));
+        assert!(!super::is_internal_narration(
+            "planning: help me understand the project"
+        ));
         assert!(!super::is_internal_narration("resuming with your decision"));
         assert!(!super::is_internal_narration("waiting on human input")); // " on " but not id:worker:model
     }
@@ -2621,22 +2931,60 @@ mod tests {
         app.apply(AppMsg::Planned {
             goal: "g".into(),
             nodes: vec![
-                NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: String::new() },
-                NodeView { id: "n2".into(), role: "evaluator".into(), status: NodeStatus::Pending, worker: String::new() },
+                NodeView {
+                    id: "n1".into(),
+                    role: "generator".into(),
+                    status: NodeStatus::Pending,
+                    worker: String::new(),
+                },
+                NodeView {
+                    id: "n2".into(),
+                    role: "evaluator".into(),
+                    status: NodeStatus::Pending,
+                    worker: String::new(),
+                },
             ],
         });
-        let plan = app.pending.iter().find(|e| e.text.starts_with("Plan:")).expect("plan entry");
-        assert!(plan.text.contains("generator") && plan.text.contains("evaluator"), "{}", plan.text);
-        assert!(!plan.text.contains("n1") && !plan.text.contains("n2"), "ids leaked: {}", plan.text);
+        let plan = app
+            .pending
+            .iter()
+            .find(|e| e.text.starts_with("Plan:"))
+            .expect("plan entry");
+        assert!(
+            plan.text.contains("generator") && plan.text.contains("evaluator"),
+            "{}",
+            plan.text
+        );
+        assert!(
+            !plan.text.contains("n1") && !plan.text.contains("n2"),
+            "ids leaked: {}",
+            plan.text
+        );
     }
 
     #[test]
     fn node_started_heading_uses_role() {
         let mut app = app_for(&temp_dir("nodestart"));
-        app.nodes = vec![NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: String::new() }];
-        app.apply_engine(EngineEvent::NodeStarted { id: "n1".into(), worker: "claude-code".into() });
-        let start = app.pending.iter().find(|e| e.kind == FeedKind::NodeStart).expect("node start entry");
-        assert!(start.text.contains("generator") && start.text.contains("claude-code"), "{}", start.text);
+        app.nodes = vec![NodeView {
+            id: "n1".into(),
+            role: "generator".into(),
+            status: NodeStatus::Pending,
+            worker: String::new(),
+        }];
+        app.apply_engine(EngineEvent::NodeStarted {
+            id: "n1".into(),
+            worker: "claude-code".into(),
+        });
+        let start = app
+            .pending
+            .iter()
+            .find(|e| e.kind == FeedKind::NodeStart)
+            .expect("node start entry");
+        assert!(
+            start.text.contains("generator") && start.text.contains("claude-code"),
+            "{}",
+            start.text
+        );
         assert!(!start.text.contains("n1"), "id leaked: {}", start.text);
     }
 
@@ -2644,22 +2992,50 @@ mod tests {
     fn node_started_records_run_participants_once() {
         let mut app = app_for(&temp_dir("parts"));
         app.nodes = vec![
-            NodeView { id: "n1".into(), role: "generator".into(), status: NodeStatus::Pending, worker: String::new() },
-            NodeView { id: "n2".into(), role: "evaluator".into(), status: NodeStatus::Pending, worker: String::new() },
+            NodeView {
+                id: "n1".into(),
+                role: "generator".into(),
+                status: NodeStatus::Pending,
+                worker: String::new(),
+            },
+            NodeView {
+                id: "n2".into(),
+                role: "evaluator".into(),
+                status: NodeStatus::Pending,
+                worker: String::new(),
+            },
         ];
-        app.apply_engine(EngineEvent::NodeStarted { id: "n1".into(), worker: "claude-code".into() });
-        app.apply_engine(EngineEvent::NodeStarted { id: "n2".into(), worker: "codex".into() });
+        app.apply_engine(EngineEvent::NodeStarted {
+            id: "n1".into(),
+            worker: "claude-code".into(),
+        });
+        app.apply_engine(EngineEvent::NodeStarted {
+            id: "n2".into(),
+            worker: "codex".into(),
+        });
         // Re-dispatch same worker: still one entry.
-        app.apply_engine(EngineEvent::NodeStarted { id: "n1".into(), worker: "claude-code".into() });
+        app.apply_engine(EngineEvent::NodeStarted {
+            id: "n1".into(),
+            worker: "claude-code".into(),
+        });
         // Tool steps never join the limits participant set.
-        app.apply_engine(EngineEvent::NodeStarted { id: "n2".into(), worker: "tool:npm test".into() });
+        app.apply_engine(EngineEvent::NodeStarted {
+            id: "n2".into(),
+            worker: "tool:npm test".into(),
+        });
         assert_eq!(app.run_participants, vec!["claude-code", "codex"]);
     }
 
     #[test]
     fn participant_key_strips_model_and_skips_tools() {
-        assert_eq!(App::participant_key("claude-code").as_deref(), Some("claude-code"));
-        assert_eq!(App::participant_key("claude-code:sonnet").as_deref(), Some("claude-code"));
+        assert_eq!(
+            App::participant_key("claude-code").as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            App::participant_key("claude-code:sonnet").as_deref(),
+            Some("claude-code")
+        );
         assert_eq!(App::participant_key("tool:npm test"), None);
         assert_eq!(App::participant_key(""), None);
         assert_eq!(App::participant_key("  "), None);

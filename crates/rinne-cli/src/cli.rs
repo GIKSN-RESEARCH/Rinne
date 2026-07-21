@@ -322,4 +322,3 @@ pub enum GraphCmd {
         symbol: String,
     },
 }
-

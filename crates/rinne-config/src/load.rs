@@ -29,6 +29,19 @@ const NON_CONFIG_ENV_SUFFIXES: &[&str] = &[
     "NO_UPDATE_CHECK",
     // optional path override for locating the `rinne` binary (used by wrappers)
     "BIN",
+    // harness Stage plumbing: the CLI exports these for child worker processes
+    // (`runner.rs`, `session_gate.rs`, `transport/external_terminal.rs`). They
+    // share the RINNE_ prefix but are not `[harness_stage]` fields — with
+    // `.split("_")` they would deserialize as `harness.stage.*` and fail
+    // `deny_unknown_fields`, breaking every config load inside a Stage session.
+    "HARNESS_STAGE_VISIBLE",
+    "HARNESS_STAGE_MODE",
+    "HARNESS_STAGE_MAX",
+    // `[harness_stage].approvals`, exported as `RINNE_HARNESS_APPROVALS` by
+    // `runner.rs` and read back by the adapters — `harness.approvals` is not a
+    // Config field, so it must be ignored like the rest of the Stage plumbing.
+    "HARNESS_APPROVALS",
+    "STAGE_TAG",
 ];
 
 /// Load configuration for the given project root, applying the full layering.

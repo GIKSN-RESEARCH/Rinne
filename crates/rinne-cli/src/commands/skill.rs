@@ -59,7 +59,9 @@ fn usage() -> String {
 
 fn install(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     let Some(src) = rest.first().copied() else {
-        return vec!["usage: rinne skill add <path>   (a skill folder or a SKILL.md file)".to_string()];
+        return vec![
+            "usage: rinne skill add <path>   (a skill folder or a SKILL.md file)".to_string(),
+        ];
     };
     // Accept either the skill folder or a path straight to its SKILL.md.
     let mut source = resolve(cwd, src);
@@ -122,7 +124,9 @@ fn show(cwd: &Path, rest: &[&str]) -> Vec<String> {
             out.extend(s.body.lines().map(String::from));
             out
         }
-        None => vec![format!("no skill named `{name}` — `rinne skill list` to see them")],
+        None => vec![format!(
+            "no skill named `{name}` — `rinne skill list` to see them"
+        )],
     }
 }
 
@@ -132,7 +136,10 @@ fn remove(scope: Scope, cwd: &Path, rest: &[&str]) -> Vec<String> {
     };
     match skills::remove(name, scope, cwd) {
         Ok(true) => vec![format!("✔ removed skill `{name}` ({})", scope.label())],
-        Ok(false) => vec![format!("· `{name}` is not installed in the {} scope", scope.label())],
+        Ok(false) => vec![format!(
+            "· `{name}` is not installed in the {} scope",
+            scope.label()
+        )],
         Err(e) => vec![format!("✗ {e}")],
     }
 }

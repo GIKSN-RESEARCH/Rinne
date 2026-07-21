@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use rinne_loop::worker::{
-    format_token_count, ContextPacket, Constraints, ExecuteRequest, ExecuteResult, InlinedFile,
+    format_token_count, Constraints, ContextPacket, ExecuteRequest, ExecuteResult, InlinedFile,
     Role, Usage, Worker, WorkerEvent,
 };
 use rinne_loop::WorkerRegistry;
@@ -328,14 +328,12 @@ fn format_worker_event(ev: &WorkerEvent) -> Option<String> {
                 .as_deref()
                 .map(|m| format!(":{m}"))
                 .unwrap_or_default();
-            Some(progress(
-                "stage",
-                &format!("{worker}{m} [{backend}]"),
-            ))
+            Some(progress("stage", &format!("{worker}{m} [{backend}]")))
         }
-        WorkerEvent::Raw(_) | WorkerEvent::Token(_) | WorkerEvent::Thinking(_) | WorkerEvent::Done => {
-            None
-        }
+        WorkerEvent::Raw(_)
+        | WorkerEvent::Token(_)
+        | WorkerEvent::Thinking(_)
+        | WorkerEvent::Done => None,
     }
 }
 
@@ -485,9 +483,15 @@ fn split_narration(raw: &str) -> (String, String, String) {
     // Collect present markers in document order, then each part runs from the end
     // of its marker to the start of the next present marker (or end of string).
     let mut marks: Vec<(usize, usize, u8)> = Vec::new(); // (start, content_start, which)
-    if let Some((s, c)) = ov { marks.push((s, c, 0)); }
-    if let Some((s, c)) = dec { marks.push((s, c, 1)); }
-    if let Some((s, c)) = con { marks.push((s, c, 2)); }
+    if let Some((s, c)) = ov {
+        marks.push((s, c, 0));
+    }
+    if let Some((s, c)) = dec {
+        marks.push((s, c, 1));
+    }
+    if let Some((s, c)) = con {
+        marks.push((s, c, 2));
+    }
     marks.sort_by_key(|m| m.0);
 
     let mut parts = [String::new(), String::new(), String::new()];
@@ -545,13 +549,9 @@ impl Translator for WorkerTranslator {
                 mcp_servers: vec![],
             };
 
-            let Some(r) =
-                execute_with_progress(worker.as_ref(), req, &self.on_progress).await
+            let Some(r) = execute_with_progress(worker.as_ref(), req, &self.on_progress).await
             else {
-                (self.on_progress)(progress(
-                    "fail",
-                    format!("{} — next", used.label()),
-                ));
+                (self.on_progress)(progress("fail", format!("{} — next", used.label())));
                 continue;
             };
 
@@ -568,10 +568,7 @@ impl Translator for WorkerTranslator {
                     usage: r.usage,
                 });
             }
-            (self.on_progress)(progress(
-                "fail",
-                format!("{} — next", used.label()),
-            ));
+            (self.on_progress)(progress("fail", format!("{} — next", used.label())));
         }
 
         None
@@ -658,11 +655,11 @@ pub async fn ai_pick_symbols(
     let known_set: std::collections::HashSet<&str> = known.iter().map(|s| s.as_str()).collect();
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
-        let name = line.trim().trim_matches(|c: char| c == '`' || c == '-' || c == '*').trim();
-        if !name.is_empty()
-            && known_set.contains(name)
-            && !out.iter().any(|o| o == name)
-        {
+        let name = line
+            .trim()
+            .trim_matches(|c: char| c == '`' || c == '-' || c == '*')
+            .trim();
+        if !name.is_empty() && known_set.contains(name) && !out.iter().any(|o| o == name) {
             out.push(name.to_string());
         }
         if out.len() >= 8 {
@@ -728,8 +725,14 @@ mod tests {
             wall_ms: 87_400,
         };
         let s = format_usage(&u);
-        assert!(s.contains("in") && s.contains("out"), "token split missing: {s}");
-        assert!(s.contains("87s") || s.contains("88s"), "elapsed missing: {s}");
+        assert!(
+            s.contains("in") && s.contains("out"),
+            "token split missing: {s}"
+        );
+        assert!(
+            s.contains("87s") || s.contains("88s"),
+            "elapsed missing: {s}"
+        );
     }
 
     #[test]
@@ -813,8 +816,14 @@ mod tests {
         let known = vec!["Blackboard".to_string(), "Engine".to_string()];
         let p = pick_prompt("what is the loop", &known);
         assert!(p.contains("what is the loop"), "query missing");
-        assert!(p.contains("Blackboard") && p.contains("Engine"), "candidates missing");
-        assert!(p.to_lowercase().contains("one per line"), "output format missing");
+        assert!(
+            p.contains("Blackboard") && p.contains("Engine"),
+            "candidates missing"
+        );
+        assert!(
+            p.to_lowercase().contains("one per line"),
+            "output format missing"
+        );
     }
 
     #[test]
@@ -833,7 +842,10 @@ mod tests {
         assert!(p.contains("harness"), "topic missing");
         assert!(lower.contains("mermaid"), "no mermaid instruction");
         // Domain-first across verticals — not a single-industry template.
-        assert!(lower.contains("vertical") || lower.contains("domain"), "no multi-domain framing");
+        assert!(
+            lower.contains("vertical") || lower.contains("domain"),
+            "no multi-domain framing"
+        );
         assert!(
             lower.contains("healthcare")
                 || lower.contains("e-commerce")
@@ -841,24 +853,40 @@ mod tests {
                 || lower.contains("construction"),
             "should name diverse industry examples, not only one vertical"
         );
-        assert!(lower.contains("journey") || lower.contains("pipeline"), "no journey framing");
-        assert!(lower.contains("rules") && lower.contains("conditions"), "no rules ask");
+        assert!(
+            lower.contains("journey") || lower.contains("pipeline"),
+            "no journey framing"
+        );
+        assert!(
+            lower.contains("rules") && lower.contains("conditions"),
+            "no rules ask"
+        );
         assert!(p.to_uppercase().contains("CONCEPTS"), "no concepts ask");
-        assert!(p.contains(OVERVIEW_MARK) && p.contains(DECISIONS_MARK) && p.contains(CONCEPTS_MARK));
+        assert!(
+            p.contains(OVERVIEW_MARK) && p.contains(DECISIONS_MARK) && p.contains(CONCEPTS_MARK)
+        );
         // Diagram shape: prefer TD, branches/multiple ends, not a long LR sausage.
-        assert!(lower.contains("flowchart td") || lower.contains("top-down"), "no TD preference");
+        assert!(
+            lower.contains("flowchart td") || lower.contains("top-down"),
+            "no TD preference"
+        );
         assert!(
             lower.contains("branch") || lower.contains("diamond") || lower.contains("multiple"),
             "should allow non-linear / multi-end business flows"
         );
-        assert!(lower.contains("8") || lower.contains("10") || lower.contains("cap"), "no node budget");
+        assert!(
+            lower.contains("8") || lower.contains("10") || lower.contains("cap"),
+            "no node budget"
+        );
     }
 
     #[test]
     fn split_narration_separates_marked_parts() {
         let raw = format!(
             "{ov}\nwhat it is\n{dec}\n- handles empty topic\n{con}\n- trait seam",
-            ov = OVERVIEW_MARK, dec = DECISIONS_MARK, con = CONCEPTS_MARK,
+            ov = OVERVIEW_MARK,
+            dec = DECISIONS_MARK,
+            con = CONCEPTS_MARK,
         );
         let (ov, dec, con) = split_narration(&raw);
         assert_eq!(ov, "what it is");

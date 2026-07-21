@@ -11,121 +11,161 @@ use nucleo::{Config, Matcher};
 
 /// Top-level slash commands, shown when completing the command name.
 const SLASH_COMMANDS: &[(&str, &str, &str)] = &[
-    ("config",  "[sub …]",                       "view or edit configuration"),
-    ("connect", "<backend> [key] [--model <id>]", "connect a harness or API provider"),
-    ("mcp",     "[sub …]",                       "connect and manage MCP servers"),
-    ("skill",   "[sub …]",                       "install and manage Agent Skills"),
-    ("learn",   "<topic> | serve",               "explain a subsystem, or serve all docs"),
-    ("serve",   "[--port N] | stop",             "browse learn docs in a browser"),
-    ("index",   "",                              "reindex the repo's code graph now"),
-    ("graph",   "[sub …]",                       "inspect the local code graph"),
-    ("workers", "",                              "list workers + connected APIs"),
-    ("models",  "<provider>",                   "list an API provider's models"),
-    ("limit-usage", "",                          "subscription limits per harness (alias: /usage)"),
-    ("usage",   "",                              "alias for /limit-usage"),
-    ("forget",  "<provider>",                   "delete a stored API key"),
-    ("plan",    "",                              "show the current plan"),
-    ("stage",   "",                              "show/hide Harness Stage panes (ctrl+y)"),
-    ("human",   "[sub …]",                       "pin roles for this run"),
-    ("steer",   "<text>",                        "guide a parked node"),
-    ("approve", "",                              "accept the current state"),
-    ("reject",  "",                              "throw out the approach and replan"),
-    ("pause",   "",                              "pause the running loop"),
-    ("resume",  "",                              "resume a paused run"),
-    ("budget",  "<min>",                         "adjust the time budget"),
-    ("route",   "<node> <worker>",               "pin a node to a worker"),
-    ("logs",    "",                              "where logs are written"),
-    ("clear",   "",                              "wipe the screen and reset the session"),
-    ("new",     "",                              "alias for /clear"),
-    ("help",    "",                              "command reference"),
-    ("quit",    "",                              "exit"),
+    ("config", "[sub …]", "view or edit configuration"),
+    (
+        "connect",
+        "<backend> [key] [--model <id>]",
+        "connect a harness or API provider",
+    ),
+    ("mcp", "[sub …]", "connect and manage MCP servers"),
+    ("skill", "[sub …]", "install and manage Agent Skills"),
+    (
+        "learn",
+        "<topic> | serve",
+        "explain a subsystem, or serve all docs",
+    ),
+    (
+        "serve",
+        "[--port N] | stop",
+        "browse learn docs in a browser",
+    ),
+    ("index", "", "reindex the repo's code graph now"),
+    ("graph", "[sub …]", "inspect the local code graph"),
+    ("workers", "", "list workers + connected APIs"),
+    ("models", "<provider>", "list an API provider's models"),
+    (
+        "limit-usage",
+        "",
+        "subscription limits per harness (alias: /usage)",
+    ),
+    ("usage", "", "alias for /limit-usage"),
+    ("forget", "<provider>", "delete a stored API key"),
+    ("plan", "", "show the current plan"),
+    ("stage", "", "show/hide Harness Stage panes (ctrl+y)"),
+    ("human", "[sub …]", "pin roles for this run"),
+    ("steer", "<text>", "guide a parked node"),
+    ("approve", "", "accept the current state"),
+    ("reject", "", "throw out the approach and replan"),
+    ("pause", "", "pause the running loop"),
+    ("resume", "", "resume a paused run"),
+    ("budget", "<min>", "adjust the time budget"),
+    ("route", "<node> <worker>", "pin a node to a worker"),
+    ("logs", "", "where logs are written"),
+    ("clear", "", "wipe the screen and reset the session"),
+    ("new", "", "alias for /clear"),
+    ("help", "", "command reference"),
+    ("quit", "", "exit"),
 ];
 
 /// `/config` subcommands.
 const CONFIG_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("show",      "", "print resolved config + sources"),
-    ("conductor", "", "set planner backend [+ model] [--key <token>]"),
-    ("key",       "", "store the current conductor's token (keychain)"),
-    ("prefer",    "", "routing family: harness|api|balanced"),
-    ("role",      "", "pin a role to a worker"),
-    ("model",     "", "default model for a worker"),
-    ("set",       "", "set any field: <key> <value>"),
-    ("unset",     "", "remove an override"),
-    ("init",      "", "scaffold a commented config file"),
-    ("edit",      "", "open the config file in your editor"),
-    ("path",      "", "show config file paths"),
+    ("show", "", "print resolved config + sources"),
+    (
+        "conductor",
+        "",
+        "set planner backend [+ model] [--key <token>]",
+    ),
+    ("key", "", "store the current conductor's token (keychain)"),
+    ("prefer", "", "routing family: harness|api|balanced"),
+    ("role", "", "pin a role to a worker"),
+    ("model", "", "default model for a worker"),
+    ("set", "", "set any field: <key> <value>"),
+    ("unset", "", "remove an override"),
+    ("init", "", "scaffold a commented config file"),
+    ("edit", "", "open the config file in your editor"),
+    ("path", "", "show config file paths"),
 ];
 
 /// `/mcp` subcommands.
 const MCP_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("add",    "<link> [--name] [--bearer|--api-key|--oauth|--secret-env]", "connect a server (URL or launch command)"),
-    ("list",   "", "list connected servers"),
-    ("tools",  "<name>", "list a server's tools"),
-    ("test",   "<name>", "check a server is reachable"),
-    ("login",  "<name>", "authorize a server via OAuth (browser)"),
+    (
+        "add",
+        "<link> [--name] [--bearer|--api-key|--oauth|--secret-env]",
+        "connect a server (URL or launch command)",
+    ),
+    ("list", "", "list connected servers"),
+    ("tools", "<name>", "list a server's tools"),
+    ("test", "<name>", "check a server is reachable"),
+    ("login", "<name>", "authorize a server via OAuth (browser)"),
     ("remove", "<name>", "disconnect a server"),
 ];
 
 /// `/skill` subcommands.
 const SKILL_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("add",    "<path>", "install a skill (folder or SKILL.md)"),
-    ("list",   "", "list installed skills"),
-    ("show",   "<name>", "print a skill's instructions"),
+    ("add", "<path>", "install a skill (folder or SKILL.md)"),
+    ("list", "", "list installed skills"),
+    ("show", "<name>", "print a skill's instructions"),
     ("remove", "<name>", "uninstall a skill"),
 ];
 
 /// `/graph` subcommands.
 const GRAPH_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("stats",        "",         "symbol / edge / file counts"),
-    ("symbols",      "<file>",   "symbols defined in a file"),
+    ("stats", "", "symbol / edge / file counts"),
+    ("symbols", "<file>", "symbols defined in a file"),
     ("neighborhood", "<symbol>", "a symbol's callers and callees"),
-    ("index",        "",         "reindex the repo now"),
+    ("index", "", "reindex the repo now"),
 ];
 
 /// `/serve` and `/learn serve` subcommands / flags.
 const SERVE_SUBCOMMANDS: &[(&str, &str, &str)] = &[
-    ("stop",      "", "stop the docs server (incl. ghosts)"),
-    ("status",    "", "show the live URL if serving"),
-    ("--port",    "<n>", "bind port (default 7420)"),
+    ("stop", "", "stop the docs server (incl. ghosts)"),
+    ("status", "", "show the live URL if serving"),
+    ("--port", "<n>", "bind port (default 7420)"),
     ("--no-open", "", "don't open a browser"),
 ];
 
 /// Backends accepted by `/config conductor <backend>`.
 const CONDUCTOR_BACKENDS: &[(&str, &str, &str)] = &[
     ("cloudflare", "", "Workers AI (needs account_id)"),
-    ("groq",       "", "fast + cheap"),
-    ("nvidia",     "", "NIM endpoint"),
-    ("local",      "", "Ollama, fully offline"),
-    ("harness",    "", "use the cheapest installed harness"),
+    ("groq", "", "fast + cheap"),
+    ("nvidia", "", "NIM endpoint"),
+    ("local", "", "Ollama, fully offline"),
+    ("harness", "", "use the cheapest installed harness"),
 ];
 
 /// Families accepted by `/config prefer <family>`.
 const PREFER_FAMILIES: &[(&str, &str, &str)] = &[
-    ("harness",  "", "prefer CLI harnesses"),
-    ("api",      "", "prefer API workers"),
+    ("harness", "", "prefer CLI harnesses"),
+    ("api", "", "prefer API workers"),
     ("balanced", "", "mix by suitability"),
 ];
 
 /// Roles accepted by `/config role <role> <worker>`.
 const ROLES: &[(&str, &str, &str)] = &[
-    ("planner",     "", "decomposes the goal into the DAG"),
-    ("generator",   "", "produces the work"),
-    ("evaluator",   "", "grades the work"),
+    ("planner", "", "decomposes the goal into the DAG"),
+    ("generator", "", "produces the work"),
+    ("evaluator", "", "grades the work"),
     ("synthesizer", "", "merges parallel results"),
-    ("fixer",       "", "addresses critique"),
+    ("fixer", "", "addresses critique"),
 ];
 
 /// Common dotted keys for `/config set|unset <key>`.
 const CONFIG_KEYS: &[(&str, &str, &str)] = &[
-    ("conductor.backend",              "", "cloudflare|groq|nvidia|local|harness"),
-    ("conductor.model",                "", "model id on that backend"),
-    ("conductor.base_url",             "", "override the endpoint"),
-    ("conductor.account_id",           "", "cloudflare account id"),
-    ("loop.max_iterations_per_node",   "", "generator↔evaluator rounds"),
-    ("loop.global_budget_minutes",     "", "wall-clock ceiling"),
-    ("loop.test_ratchet",              "", "true|false — block test-weakening diffs"),
-    ("loop.stuck_loop_threshold",      "", "failures before escalating to you"),
-    ("preferences.prefer",             "", "harness|api|balanced"),
+    (
+        "conductor.backend",
+        "",
+        "cloudflare|groq|nvidia|local|harness",
+    ),
+    ("conductor.model", "", "model id on that backend"),
+    ("conductor.base_url", "", "override the endpoint"),
+    ("conductor.account_id", "", "cloudflare account id"),
+    (
+        "loop.max_iterations_per_node",
+        "",
+        "generator↔evaluator rounds",
+    ),
+    ("loop.global_budget_minutes", "", "wall-clock ceiling"),
+    (
+        "loop.test_ratchet",
+        "",
+        "true|false — block test-weakening diffs",
+    ),
+    (
+        "loop.stuck_loop_threshold",
+        "",
+        "failures before escalating to you",
+    ),
+    ("preferences.prefer", "", "harness|api|balanced"),
 ];
 
 /// One suggestion: the value to insert, its usage hint, plus a short description.
@@ -166,8 +206,16 @@ pub fn suggest(input: &str) -> Option<Completion> {
     let body = input.strip_prefix('/')?;
     let trailing_ws = input.ends_with(char::is_whitespace);
     let parts: Vec<&str> = body.split_whitespace().collect();
-    let partial = if trailing_ws { "" } else { parts.last().copied().unwrap_or("") };
-    let complete_len = if trailing_ws { parts.len() } else { parts.len().saturating_sub(1) };
+    let partial = if trailing_ws {
+        ""
+    } else {
+        parts.last().copied().unwrap_or("")
+    };
+    let complete_len = if trailing_ws {
+        parts.len()
+    } else {
+        parts.len().saturating_sub(1)
+    };
     let complete = &parts[..complete_len];
     // `partial` is the trailing run of non-space chars, so it is an ASCII suffix
     // of `input` and this byte arithmetic lands on a char boundary.
@@ -181,12 +229,24 @@ pub fn suggest(input: &str) -> Option<Completion> {
     // Stage 2+ — argument completion for commands that have subcommands.
     match complete[0] {
         "config" => match complete.len() {
-            1 => filter(CONFIG_SUBCOMMANDS, partial, "/config subcommand", token_start),
+            1 => filter(
+                CONFIG_SUBCOMMANDS,
+                partial,
+                "/config subcommand",
+                token_start,
+            ),
             2 => match complete[1] {
-                "conductor" => filter(CONDUCTOR_BACKENDS, partial, "conductor backend", token_start),
+                "conductor" => filter(
+                    CONDUCTOR_BACKENDS,
+                    partial,
+                    "conductor backend",
+                    token_start,
+                ),
                 "prefer" => filter(PREFER_FAMILIES, partial, "prefer family", token_start),
                 "role" => filter(ROLES, partial, "role", token_start),
-                "set" | "unset" | "clear" => filter(CONFIG_KEYS, partial, "config key", token_start),
+                "set" | "unset" | "clear" => {
+                    filter(CONFIG_KEYS, partial, "config key", token_start)
+                }
                 _ => None,
             },
             _ => None,
@@ -200,14 +260,16 @@ pub fn suggest(input: &str) -> Option<Completion> {
         "graph" if complete.len() == 1 => {
             filter(GRAPH_SUBCOMMANDS, partial, "/graph subcommand", token_start)
         }
-        "serve" if complete.len() == 1 => {
-            filter(SERVE_SUBCOMMANDS, partial, "/serve", token_start)
-        }
+        "serve" if complete.len() == 1 => filter(SERVE_SUBCOMMANDS, partial, "/serve", token_start),
         "learn" if complete.len() == 1 => {
             // Suggest `serve` as a peer of free-form topics; no full topic list.
             filter(
                 &[
-                    ("serve", "[--port N] | stop", "browse all generated learn docs"),
+                    (
+                        "serve",
+                        "[--port N] | stop",
+                        "browse all generated learn docs",
+                    ),
                     ("explain", "<topic>", "alias — same as /learn <topic>"),
                 ],
                 partial,
@@ -266,7 +328,12 @@ fn filter(
         return None;
     }
     items.truncate(12);
-    Some(Completion { items, selected: 0, token_start, label: label.to_string() })
+    Some(Completion {
+        items,
+        selected: 0,
+        token_start,
+        label: label.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -288,7 +355,10 @@ mod tests {
     #[test]
     fn completes_config_subcommands() {
         let v = values("/config ");
-        assert!(v.contains(&"conductor".to_string()) && v.contains(&"set".to_string()), "{v:?}");
+        assert!(
+            v.contains(&"conductor".to_string()) && v.contains(&"set".to_string()),
+            "{v:?}"
+        );
         // Partial narrows it.
         let v2 = values("/config co");
         assert_eq!(v2, vec!["conductor".to_string()]);
@@ -297,7 +367,10 @@ mod tests {
     #[test]
     fn completes_graph_subcommands() {
         let v = values("/graph ");
-        assert!(v.contains(&"stats".to_string()) && v.contains(&"neighborhood".to_string()), "{v:?}");
+        assert!(
+            v.contains(&"stats".to_string()) && v.contains(&"neighborhood".to_string()),
+            "{v:?}"
+        );
         assert_eq!(values("/graph sym"), vec!["symbols".to_string()]);
     }
 
@@ -310,7 +383,10 @@ mod tests {
     #[test]
     fn completes_conductor_backends() {
         let v = values("/config conductor ");
-        assert!(v.contains(&"groq".to_string()) && v.contains(&"local".to_string()), "{v:?}");
+        assert!(
+            v.contains(&"groq".to_string()) && v.contains(&"local".to_string()),
+            "{v:?}"
+        );
         assert_eq!(values("/config conductor g"), vec!["groq".to_string()]);
     }
 
@@ -318,7 +394,10 @@ mod tests {
     fn completes_config_keys_for_set() {
         let v = values("/config set loop.");
         assert!(v.iter().all(|k| k.starts_with("loop.")), "{v:?}");
-        assert!(v.contains(&"loop.max_iterations_per_node".to_string()), "{v:?}");
+        assert!(
+            v.contains(&"loop.max_iterations_per_node".to_string()),
+            "{v:?}"
+        );
     }
 
     #[test]

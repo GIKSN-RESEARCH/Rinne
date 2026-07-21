@@ -36,7 +36,11 @@ fn safe_url(url: &str) -> String {
         || trimmed.starts_with("./")
         || trimmed.starts_with("../")
         || !lower.contains(':'); // scheme-less relative refs (e.g. `page.html`)
-    if ok { url.to_string() } else { "#".to_string() }
+    if ok {
+        url.to_string()
+    } else {
+        "#".to_string()
+    }
 }
 
 pub fn render_markdown(md: &str) -> String {
@@ -76,7 +80,12 @@ pub fn render_markdown(md: &str) -> String {
                 flush(&mut passthrough, &mut out);
                 out.push_str(&esc(&h));
             }
-            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => {
                 passthrough.push(Event::Start(Tag::Link {
                     link_type,
                     dest_url: safe_url(&dest_url).into(),
@@ -84,7 +93,12 @@ pub fn render_markdown(md: &str) -> String {
                     id,
                 }));
             }
-            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => {
                 passthrough.push(Event::Start(Tag::Image {
                     link_type,
                     dest_url: safe_url(&dest_url).into(),
@@ -114,7 +128,10 @@ mod tests {
     fn mermaid_fence_becomes_pre_mermaid_escaped() {
         let md = "```mermaid\nflowchart LR\n  A --> B\n```";
         let html = render_markdown(md);
-        assert!(html.contains("<div class=\"diagram\">"), "scroll shell missing: {html}");
+        assert!(
+            html.contains("<div class=\"diagram\">"),
+            "scroll shell missing: {html}"
+        );
         assert!(html.contains("<pre class=\"mermaid\">"), "got: {html}");
         // Arrows are HTML-escaped; mermaid decodes textContent back to `-->`.
         assert!(html.contains("A --&gt; B"), "got: {html}");
@@ -125,7 +142,10 @@ mod tests {
         let md = "```mermaid\n</pre><script>alert(1)</script>\n```";
         let html = render_markdown(md);
         assert!(!html.contains("<script>"), "live script leaked: {html}");
-        assert!(html.contains("&lt;/pre&gt;&lt;script&gt;"), "not escaped: {html}");
+        assert!(
+            html.contains("&lt;/pre&gt;&lt;script&gt;"),
+            "not escaped: {html}"
+        );
     }
 
     #[test]
@@ -134,14 +154,20 @@ mod tests {
         let html = render_markdown(md);
         assert!(html.contains("<pre><code"), "got: {html}");
         // Angle brackets in code are escaped by pulldown-cmark.
-        assert!(html.contains("&gt;"), "code angle-bracket not escaped: {html}");
+        assert!(
+            html.contains("&gt;"),
+            "code angle-bracket not escaped: {html}"
+        );
         assert!(!html.contains("class=\"mermaid\""));
     }
 
     #[test]
     fn raw_html_in_prose_is_escaped() {
         let html = render_markdown("hello <script>alert(1)</script> world");
-        assert!(html.contains("&lt;script&gt;"), "script not escaped: {html}");
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "script not escaped: {html}"
+        );
         assert!(!html.contains("<script>"), "live script tag leaked: {html}");
     }
 
@@ -161,14 +187,20 @@ mod tests {
     #[test]
     fn http_and_relative_urls_survive() {
         let html = render_markdown("[a](https://example.com) and [b](./page.md)");
-        assert!(html.contains("https://example.com"), "https dropped: {html}");
+        assert!(
+            html.contains("https://example.com"),
+            "https dropped: {html}"
+        );
         assert!(html.contains("./page.md"), "relative dropped: {html}");
     }
 
     #[test]
     fn protocol_relative_url_is_neutralized() {
         let html = render_markdown("[x](//evil.com/beacon)");
-        assert!(!html.contains("//evil.com"), "protocol-relative leaked: {html}");
+        assert!(
+            !html.contains("//evil.com"),
+            "protocol-relative leaked: {html}"
+        );
         assert!(html.contains("href=\"#\""), "not neutralized: {html}");
     }
 }

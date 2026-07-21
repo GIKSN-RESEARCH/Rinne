@@ -77,6 +77,12 @@ impl Conductor {
     pub async fn plan(&self, input: &ConductorInput) -> Result<Plan> {
         let classification = self.classify(input);
         let mut ladder = ConductorLadder::from_config(&self.config);
+        // Harness backends climb their descriptor's ladder, not `rungs`. Without
+        // this the ladder is one rung deep on a harness-only config and no
+        // parse or validation failure ever reaches a stronger planner.
+        if let Some(depth) = self.backends.iter().map(|b| b.ladder_depth()).max() {
+            ladder.widen_to(depth);
+        }
         ladder.select_starting_rung(&classification);
 
         let system = system_prompt();
@@ -89,14 +95,14 @@ impl Conductor {
                 .unwrap_or(&self.config.model)
                 .to_string();
 
-            match self.run_once(&system, &user, &model).await {
+            match self
+                .run_once(&system, &user, &model, ladder.active_index)
+                .await
+            {
                 Ok(mut plan) => {
-                    if plan.nodes.len() > 12
-                        && ladder.active_index == 0
-                        && ladder.can_escalate()
-                    {
-                        if let Some((from, to, why)) =
-                            ladder.escalate(EscalationReason::HighNodeCount(plan.nodes.len() as u32))
+                    if plan.nodes.len() > 12 && ladder.active_index == 0 && ladder.can_escalate() {
+                        if let Some((from, to, why)) = ladder
+                            .escalate(EscalationReason::HighNodeCount(plan.nodes.len() as u32))
                         {
                             let msg = format!("escalating planner {from} → {to}: {why}");
                             tracing::info!("conductor: {msg}");
@@ -157,7 +163,7 @@ impl Conductor {
 
     /// One planning attempt: API backend at `model` (unless `backend = harness`),
     /// then harness fallbacks in preference order (claude auth fail → next).
-    async fn run_once(&self, system: &str, user: &str, model: &str) -> Result<Plan> {
+    async fn run_once(&self, system: &str, user: &str, model: &str, rung: usize) -> Result<Plan> {
         let mut last_err: Option<RinneError> = None;
 
         // When the user configures conductor backend = harness, never burn an
@@ -169,7 +175,7 @@ impl Conductor {
 
         if !skip_api {
             if let Ok(Some(api)) = resolve_openai_model(&self.config, model) {
-                match self.try_backend(&api, system, user).await {
+                match self.try_backend(&api, system, user, rung).await {
                     Ok(plan) => return Ok(plan),
                     Err(e) => {
                         tracing::warn!("conductor api `{model}` failed: {e}");
@@ -180,11 +186,8 @@ impl Conductor {
         }
 
         for backend in &self.backends {
-            self.narrate(format!(
-                "trying conductor backend `{}`…",
-                backend.name()
-            ));
-            match self.try_backend(backend.as_ref(), system, user).await {
+            self.narrate(format!("trying conductor backend `{}`…", backend.name()));
+            match self.try_backend(backend.as_ref(), system, user, rung).await {
                 Ok(plan) => {
                     self.narrate(format!("conductor `{}` produced a plan", backend.name()));
                     return Ok(plan);
@@ -211,9 +214,8 @@ impl Conductor {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            RinneError::Conductor("all conductor backends failed".into())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| RinneError::Conductor("all conductor backends failed".into())))
     }
 
     async fn try_backend(
@@ -221,8 +223,9 @@ impl Conductor {
         backend: &dyn PlanBackend,
         system: &str,
         user: &str,
+        rung: usize,
     ) -> Result<Plan> {
-        let raw = backend.complete(system, user).await?;
+        let raw = backend.complete(system, user, rung).await?;
         match parse_plan(&raw) {
             Ok(plan) => Ok(finalize(plan)),
             Err(first) => {
@@ -234,7 +237,7 @@ impl Conductor {
                     "{user}\n\nYour previous response could not be parsed as the required JSON \
                      DAG. Return ONLY the JSON object, with no prose, comments, or code fence."
                 );
-                let raw2 = backend.complete(system, &repair_user).await?;
+                let raw2 = backend.complete(system, &repair_user, rung).await?;
                 parse_plan(&raw2).map(finalize)
             }
         }
@@ -312,10 +315,12 @@ mod tests {
         fn name(&self) -> &str {
             "recording"
         }
-        async fn complete(&self, _system: &str, user: &str) -> Result<String> {
+        async fn complete(&self, _system: &str, user: &str, _rung: usize) -> Result<String> {
             *self.last_user.lock().unwrap() = user.to_string();
-            Ok(r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#
-                .to_string())
+            Ok(
+                r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#
+                    .to_string(),
+            )
         }
     }
 
@@ -348,8 +353,17 @@ mod tests {
         assert!(!plan.nodes.is_empty(), "routing may inject evaluators");
 
         let prompt = recorded.lock().unwrap().clone();
-        assert!(prompt.contains("github.search_issues"), "tool catalog flowed into replan");
-        assert!(prompt.contains("pdf-forms"), "skill catalog flowed into replan");
-        assert!(prompt.contains("node n1 failed"), "digest flowed into replan");
+        assert!(
+            prompt.contains("github.search_issues"),
+            "tool catalog flowed into replan"
+        );
+        assert!(
+            prompt.contains("pdf-forms"),
+            "skill catalog flowed into replan"
+        );
+        assert!(
+            prompt.contains("node n1 failed"),
+            "digest flowed into replan"
+        );
     }
 }

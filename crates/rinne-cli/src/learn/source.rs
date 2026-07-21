@@ -15,16 +15,14 @@ pub fn assemble(workspace: &Path, cluster: &Cluster) -> (Vec<Snippet>, Vec<DocSe
     let mut doc_refs: Vec<(String, u32)> = Vec::new(); // (docfile, section_N)
 
     for sym in &cluster.symbols {
-        let lines = file_cache
-            .entry(sym.file.clone())
-            .or_insert_with(|| {
-                let path = workspace.join(&sym.file);
-                std::fs::read_to_string(&path)
-                    .unwrap_or_default()
-                    .lines()
-                    .map(|l| l.to_string())
-                    .collect()
-            });
+        let lines = file_cache.entry(sym.file.clone()).or_insert_with(|| {
+            let path = workspace.join(&sym.file);
+            std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.to_string())
+                .collect()
+        });
 
         // `line` is 1-based; symbol's first line in 0-based index is `line - 1`.
         let sym_idx = (sym.line as usize).saturating_sub(1);
@@ -155,7 +153,10 @@ fn collect_refs(text: &str, out: &mut Vec<(String, u32)>) {
 
         // Parse digits after `§`.
         let after_sign = &rest[sign_pos + SECTION_SIGN.len()..];
-        let digits: String = after_sign.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = after_sign
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         let abs_sign = i + sign_pos;
         if digits.is_empty() {
             // Advance past this `§` (2 bytes) and keep scanning.
@@ -263,7 +264,9 @@ mod tests {
         assert!(snippets[0].code.contains("fn thing"));
         assert!(snippets[0].doc.contains("Does the thing"));
         assert!(
-            sections.iter().any(|s| s.body.contains("the why lives here")),
+            sections
+                .iter()
+                .any(|s| s.body.contains("the why lives here")),
             "referenced CONTEXT.md §12 section pulled in"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -284,7 +287,10 @@ mod tests {
         // into the ASCII prefix, so multiple markers in one text must not slice
         // on a non-char boundary. Two refs exercise the loop's second iteration.
         let mut out = Vec::new();
-        collect_refs("see CONTEXT.md §12 and CONTEXT.md §7 and PHASE.md §3", &mut out);
+        collect_refs(
+            "see CONTEXT.md §12 and CONTEXT.md §7 and PHASE.md §3",
+            &mut out,
+        );
         assert!(out.contains(&("CONTEXT.md".to_string(), 12)));
         assert!(out.contains(&("CONTEXT.md".to_string(), 7)));
         assert!(out.contains(&("PHASE.md".to_string(), 3)));
@@ -319,7 +325,9 @@ mod tests {
         };
         let (_, sections) = assemble(&dir, &cluster);
         assert!(
-            sections.iter().any(|s| s.body.contains("real rationale here")),
+            sections
+                .iter()
+                .any(|s| s.body.contains("real rationale here")),
             "backtick ref `CONTEXT.md` §7 with ## N. heading not resolved"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -353,14 +361,23 @@ mod tests {
             topic: "rule".into(),
             seeds: vec!["rule".into()],
             symbols: vec![ClusterSymbol {
-                name: "rule".into(), file: "m.rs".into(), line: 1, end_line: 5,
+                name: "rule".into(),
+                file: "m.rs".into(),
+                line: 1,
+                end_line: 5,
                 kind: "symbol".into(),
             }],
             files: vec!["m.rs".into()],
         };
         let (snippets, _) = assemble(&dir, &cluster);
-        assert!(snippets[0].code.contains("if a > 0"), "logic past blank line kept");
-        assert!(!snippets[0].code.contains("fn other"), "next symbol not bled in");
+        assert!(
+            snippets[0].code.contains("if a > 0"),
+            "logic past blank line kept"
+        );
+        assert!(
+            !snippets[0].code.contains("fn other"),
+            "next symbol not bled in"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -374,9 +391,12 @@ mod tests {
             "pub struct Thing;".to_string(),
         ];
         let doc = extract_doc(&lines, 2); // symbol at index 2
-        // extract_doc walks upward and stops at the first non-doc line; the attribute
-        // is not a doc line, so it stops there and captures nothing above it.
-        assert!(!doc.contains("derive"), "rust attribute leaked into doc: {doc:?}");
+                                          // extract_doc walks upward and stops at the first non-doc line; the attribute
+                                          // is not a doc line, so it stops there and captures nothing above it.
+        assert!(
+            !doc.contains("derive"),
+            "rust attribute leaked into doc: {doc:?}"
+        );
     }
 
     #[test]
@@ -387,6 +407,9 @@ mod tests {
             "def qualify():".to_string(),
         ];
         let doc = extract_doc(&py, 1); // sym at index 1 (def qualify)
-        assert!(doc.contains("qualifies a lead"), "python # comment captured: {doc:?}");
+        assert!(
+            doc.contains("qualifies a lead"),
+            "python # comment captured: {doc:?}"
+        );
     }
 }
