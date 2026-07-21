@@ -1224,16 +1224,13 @@ enum MacTerminal {
 
 /// Pick the terminal app for a Stage session.
 ///
-/// `prefer` comes from `RINNE_EXTERNAL_TERMINAL`. An explicit value always
-/// wins: merely having iTerm installed must not override the user asking for
-/// Terminal.app, or the escape hatch is unusable on machines with both.
-fn choose_macos_terminal(prefer: &str, iterm_installed: bool) -> MacTerminal {
+/// `prefer` comes from `RINNE_EXTERNAL_TERMINAL`. Terminal.app is the default,
+/// matching the "opening … in system Terminal" narration; iTerm is opt-in even
+/// when installed. An explicit preference always wins, so having iTerm present
+/// can never override a user asking for Terminal.app.
+fn choose_macos_terminal(prefer: &str, _iterm_installed: bool) -> MacTerminal {
     match prefer.trim().to_ascii_lowercase().as_str() {
         "iterm" | "iterm2" => MacTerminal::ITerm,
-        "terminal" | "terminal.app" | "apple" => MacTerminal::Apple,
-        // No preference: keep using iTerm when it is present, since that is
-        // usually the terminal such a user actually works in.
-        "" if iterm_installed => MacTerminal::ITerm,
         _ => MacTerminal::Apple,
     }
 }
@@ -1407,8 +1404,10 @@ mod tests {
     }
 
     #[test]
-    fn with_no_preference_iterm_is_used_only_when_installed() {
-        assert_eq!(choose_macos_terminal("", true), MacTerminal::ITerm);
+    fn with_no_preference_the_system_terminal_is_used() {
+        // Rinne's own narration promises the "system Terminal"; defaulting to
+        // whatever else happens to be installed contradicts it.
+        assert_eq!(choose_macos_terminal("", true), MacTerminal::Apple);
         assert_eq!(choose_macos_terminal("", false), MacTerminal::Apple);
     }
 
