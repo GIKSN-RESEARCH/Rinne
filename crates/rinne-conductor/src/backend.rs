@@ -20,14 +20,6 @@ use rinne_core::worker::{
 use rinne_core::{Result, RinneError};
 use rinne_workers::transport::http::{ChatMessage, ChatRequest, OpenAiClient};
 
-/// Whether Stage visibility is requested (set by CLI/GUI via env).
-fn stage_visible_from_env() -> bool {
-    matches!(
-        std::env::var("RINNE_HARNESS_STAGE_VISIBLE").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
-}
-
 /// A backend that completes a planning prompt and returns the raw model text.
 #[async_trait]
 pub trait PlanBackend: Send + Sync {
@@ -94,8 +86,9 @@ impl PlanBackend for OpenAiBackend {
 /// A harness worker pressed into service as the conductor — the §7 fallback when
 /// no API backend is configured ("the user's cheapest installed harness").
 ///
-/// When Stage is visible, this opens the same PTY/session path as generator
-/// nodes so the planner harness is leveraged and shown on the Stage (`plan.md`).
+/// Runs headless on the cheapest rung of the harness's ladder: a plan is one
+/// small JSON document, so neither a visible Terminal session nor a frontier
+/// model earns its cost here (see `complete` and [`planner_rung`]).
 pub struct HarnessBackend {
     worker: Arc<dyn Worker>,
     workspace: PathBuf,
@@ -126,7 +119,12 @@ impl PlanBackend for HarnessBackend {
     }
 
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let visible = stage_visible_from_env();
+        // Planning is always headless, even when the Stage is on. A planner
+        // emits one JSON object nobody reads live, so opening a Terminal window
+        // and booting the harness's full product UI to produce it cost minutes
+        // of wall-clock per run for visibility nobody wanted. Generators stay
+        // visible — watching those work is the point of the Stage.
+        const VISIBLE: bool = false;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // Remap SessionOpened so Stage can key the pane as `conductor` (planner).
         let forward = self.events.clone();
@@ -152,25 +150,18 @@ impl PlanBackend for HarnessBackend {
                 }
             }
         });
-        // Prefer a stronger model from the harness ladder when available.
-        let model = self
-            .worker
-            .descriptor()
-            .models
-            .last()
-            .cloned()
-            .or_else(|| self.worker.descriptor().models.first().cloned());
-        // Single-turn planner in Terminal (when Stage is on). Needs enough time
-        // for a real plan — 90s was killing grok mid-run and falling through.
-        // Auth failures still fail-fast via non-zero exit / login text below.
+        let model = planner_rung(&self.worker.descriptor().models);
+        // Needs enough time for a real plan — 90s was killing grok mid-run and
+        // falling through. Auth failures still fail-fast via non-zero exit /
+        // login text below.
         let request = ExecuteRequest {
             role: Role::Planner,
             instruction: format!("{system}\n\n{user}"),
             context: ContextPacket::default(),
             workspace: self.workspace.clone(),
             constraints: Constraints {
-                timeout_secs: Some(if visible { 600 } else { 300 }),
-                visible_stage: visible,
+                timeout_secs: Some(300),
+                visible_stage: VISIBLE,
                 model,
                 ..Default::default()
             },
@@ -314,6 +305,17 @@ pub fn resolve_openai(config: &ConductorConfig) -> Result<Option<OpenAiBackend>>
     )))
 }
 
+/// Which rung of a harness's model ladder plans on.
+///
+/// Ladders are cheap→strong, and a plan is one small structured document, so
+/// start at the cheapest rung. `ConductorLadder` already escalates on parse or
+/// routing-validation failure, which is the honest signal that a goal needs a
+/// stronger planner — taking the top rung up front spent frontier tokens on
+/// every goal however trivial.
+fn planner_rung(models: &[String]) -> Option<String> {
+    models.first().cloned()
+}
+
 /// Like [`resolve_openai`] but pins the model id (planner ladder rung).
 pub fn resolve_openai_model(
     config: &ConductorConfig,
@@ -325,4 +327,33 @@ pub fn resolve_openai_model(
     };
     backend.set_model(model);
     Ok(Some(backend))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planning_starts_on_the_cheapest_rung() {
+        // Ladders are cheap→strong. Planning is one small structured document,
+        // so taking the top rung spent frontier tokens on every goal however
+        // trivial — "explain this codebase" planned on opus.
+        let claude = [
+            "haiku".to_string(),
+            "sonnet".to_string(),
+            "opus".to_string(),
+        ];
+        assert_eq!(planner_rung(&claude).as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn a_single_rung_ladder_still_resolves() {
+        let one = ["grok-4.5".to_string()];
+        assert_eq!(planner_rung(&one).as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn an_empty_ladder_pins_no_model() {
+        assert_eq!(planner_rung(&[]), None);
+    }
 }
