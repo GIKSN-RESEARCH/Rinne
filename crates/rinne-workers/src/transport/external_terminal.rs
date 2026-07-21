@@ -448,87 +448,11 @@ fn write_launcher(
     script.push_str("  printf '\\033]2;%s\\007' \"$TAG\" 2>/dev/null || true\n");
     script.push_str("}\n");
 
-    // Close THIS window — try every strategy so nothing is left open.
-    script.push_str("close_window() {\n");
-    script.push_str("  TTY_NAME=$(tty 2>/dev/null | sed 's|^/dev/||' || true)\n");
-    script.push_str(&format!("  TAG={tag_q}\n"));
-    script.push_str(&format!(
-        "  [ -n \"${{TTY_NAME:-}}\" ] && echo \"$TTY_NAME\" > {tty_q} 2>/dev/null || true\n"
-    ));
-    script.push_str("  if [ \"$(uname -s 2>/dev/null)\" != Darwin ]; then\n");
-    // Linux: try wmctrl/xdotool by window title.
-    script.push_str("    if command -v wmctrl >/dev/null 2>&1; then\n");
-    script.push_str("      wmctrl -c \"$TAG\" 2>/dev/null || true\n");
-    script.push_str("    fi\n");
-    script.push_str("    if command -v xdotool >/dev/null 2>&1; then\n");
-    script.push_str("      xdotool search --name \"$TAG\" windowclose %@ 2>/dev/null || true\n");
-    script.push_str("    fi\n");
-    script.push_str("    return 0\n");
-    script.push_str("  fi\n");
-    // --- macOS Terminal.app: by tty ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"Terminal\"\n");
-    script.push_str("  repeat with w in windows\n");
-    script.push_str("    try\n");
-    script.push_str("      set t to tty of selected tab of w\n");
-    script.push_str("      if t is \"$TTY_NAME\" or t is \"/dev/$TTY_NAME\" then\n");
-    script.push_str("        close w saving no\n");
-    script.push_str("      end if\n");
-    script.push_str("    end try\n");
-    script.push_str("  end repeat\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    // --- macOS Terminal.app: by unique title tag (reliable fallback) ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"Terminal\"\n");
-    script.push_str("  set wins to windows whose name contains \"$TAG\"\n");
-    script.push_str("  repeat with w in wins\n");
-    script.push_str("    try\n");
-    script.push_str("      close w saving no\n");
-    script.push_str("    end try\n");
-    script.push_str("  end repeat\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    // --- iTerm2: by tty + by name ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"iTerm\"\n");
-    script.push_str("  repeat with w in windows\n");
-    script.push_str("    repeat with t in tabs of w\n");
-    script.push_str("      repeat with s in sessions of t\n");
-    script.push_str("        try\n");
-    script.push_str("          set st to tty of s\n");
-    script.push_str("          set nm to name of s\n");
-    script.push_str("          if st contains \"$TTY_NAME\" or nm contains \"$TAG\" then\n");
-    script.push_str("            close s\n");
-    script.push_str("          end if\n");
-    script.push_str("        end try\n");
-    script.push_str("      end repeat\n");
-    script.push_str("    end repeat\n");
-    script.push_str("  end repeat\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    // --- System Events: Cmd+W if front window title matches (last resort) ---
-    script.push_str("  osascript >/dev/null 2>&1 <<OSA || true\n");
-    script.push_str("tell application \"System Events\"\n");
-    script.push_str("  if exists process \"Terminal\" then\n");
-    script.push_str("    tell process \"Terminal\"\n");
-    script.push_str("      repeat with w in windows\n");
-    script.push_str("        try\n");
-    script.push_str("          if name of w contains \"$TAG\" then\n");
-    script.push_str("            set frontmost to true\n");
-    script.push_str("            perform action \"AXRaise\" of w\n");
-    script.push_str("            keystroke \"w\" using command down\n");
-    script.push_str("            delay 0.15\n");
-    script.push_str("            -- dismiss \"do you want to terminate\" if any\n");
-    script.push_str("            keystroke return\n");
-    script.push_str("          end if\n");
-    script.push_str("        end try\n");
-    script.push_str("      end repeat\n");
-    script.push_str("    end tell\n");
-    script.push_str("  end if\n");
-    script.push_str("end tell\n");
-    script.push_str("OSA\n");
-    script.push_str("}\n");
+    // NOTE: the launcher deliberately does not close its own window. AppleScript
+    // run from inside the session makes Terminal.app prompt "Closing this window
+    // will terminate the running processes: bash, osascript" on every session.
+    // Rinne closes the window from outside via `ensure_stage_window_closed`,
+    // once the launcher has exited and nothing is left running in it.
 
     script.push_str("on_exit() {\n");
     script.push_str("  ec=$?\n");
@@ -542,10 +466,8 @@ fn write_launcher(
     script.push_str(&format!(
         "  echo \"{LAUNCHER_MARKER} harness exit $ec\" >> {log_q} 2>/dev/null || true\n"
     ));
-    // Multiple close attempts from inside the session (most reliable).
-    script.push_str("  close_window\n");
-    script.push_str("  sleep 0.2\n");
-    script.push_str("  close_window\n");
+    // Exiting is all this shell should do: once it is gone the window holds no
+    // running processes, so Rinne can close it silently from outside.
     script.push_str("}\n");
     script.push_str("trap on_exit EXIT\n");
     script.push_str("trap 'exit 143' TERM\n");
@@ -1147,19 +1069,18 @@ async fn soft_stop(pid_path: &Path, exit_path: &Path) {
 
         let deadline = Instant::now() + TERM_GRACE;
         while Instant::now() < deadline {
-            if exit_path.exists() {
-                return;
-            }
-            // Process gone?
+            // Wait for the launcher to actually be gone, not merely for its
+            // exit file: `on_exit` writes that file and then keeps running for
+            // a moment. Closing the window while the shell is still alive is
+            // what makes Terminal.app ask to terminate running processes.
             #[cfg(unix)]
             {
                 let alive = unsafe { libc::kill(pid, 0) == 0 };
-                if !alive && exit_path.exists() {
-                    return;
-                }
                 if !alive {
-                    // Write a synthetic exit if trap did not run (hard crash).
-                    let _ = std::fs::write(exit_path, b"143");
+                    if !exit_path.exists() {
+                        // Trap did not run (hard crash) — synthesize an exit.
+                        let _ = std::fs::write(exit_path, b"143");
+                    }
                     return;
                 }
             }
@@ -1417,6 +1338,49 @@ mod tests {
     }
 
     #[test]
+    fn launcher_never_closes_its_own_window_from_inside() {
+        let dir = std::env::temp_dir().join(format!("rinne-ext-noclose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.command");
+        let spec = SubprocessSpec {
+            program: "claude".into(),
+            args: vec!["hello".into()],
+            workspace: dir.clone(),
+            stdin: None,
+            timeout: None,
+            env: vec![],
+            result_file: Some(dir.join("result.txt")),
+        };
+        write_launcher(
+            &script,
+            &spec,
+            &dir.join("h.log"),
+            &dir.join("e.code"),
+            &dir.join("w.pid"),
+            &dir.join("tty.name"),
+            "rinne-stage-noclose-tag",
+            TerminalMode::Interactive,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+
+        // Closing the window from a process *inside* it makes Terminal.app ask
+        // "Closing this window will terminate the running processes: bash,
+        // osascript" on every session. Rinne closes the window from outside,
+        // after the launcher has exited, where nothing is left running.
+        assert!(
+            !body.contains("osascript"),
+            "launcher must not run AppleScript inside its own window: {body}"
+        );
+        assert!(
+            !body.contains("close_window"),
+            "window closing belongs to Rinne, not the launcher: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn launcher_reaps_the_harness_when_rinne_dies() {
         let dir = std::env::temp_dir().join(format!("rinne-ext-wd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1584,7 +1548,6 @@ mod tests {
         let body = std::fs::read_to_string(&script).unwrap();
         assert!(body.contains("reset_tty"), "must reset mouse tracking");
         assert!(body.contains("1000l"), "must disable mouse mode 1000");
-        assert!(body.contains("close_window"), "must close Terminal on exit");
         assert!(
             body.contains("set_stage_title"),
             "must title window for close-by-name"
@@ -1634,7 +1597,6 @@ mod tests {
         let body = std::fs::read_to_string(&script).unwrap();
         assert!(body.contains("tee"));
         assert!(!body.contains("script -q"));
-        assert!(body.contains("close_window"));
         assert!(body.contains("rinne-stage-cap-tag"));
         let _ = std::fs::remove_dir_all(&dir);
     }
