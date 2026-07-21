@@ -444,13 +444,14 @@ already 1298 lines.
 
 ---
 
-## 9. `external_terminal.rs` deprecation
+## 9. `external_terminal.rs` deprecation — ATTEMPTED AND REVERTED
 
-Kept, unreferenced by default, behind existing config:
+Deprecation was shipped, then reverted when §11 failed. `external_terminal.rs`
+is once again the default transport for visible sessions:
 
 ```toml
 [harness_stage]
-external_terminal = false   # NEW; deprecated, removal targeted next release
+external_terminal = true    # default; the PTY Stage is opt-in until §11 passes
 needs_input_after = "4s"    # NEW
 ```
 
@@ -498,6 +499,49 @@ confirmed readable against each target harness, run interactively through Rinne:
 "Readable" means: output legible, colours sane, no escape-sequence litter, progress
 bars not duplicated per redraw. If any harness fails, it keeps the external-terminal
 flag and the failure is documented here rather than worked around.
+
+### Result: FAILED (all three), recorded per the rule above
+
+The gate was never run before `external_terminal` was defaulted off. Running it
+afterwards: **every harness fails, and the causes are structural, not cosmetic.**
+
+Method: spawn each harness under `portable-pty` with the transport's exact
+parameters (40×120), capture raw bytes for 6s, replay through `TermSink` in
+4096-byte chunks as `transport::pty` feeds it.
+
+| Harness | Raw capture | Through `TermSink` |
+|---|---|---|
+| Grok Build (`--fullscreen`) | 18,335 B, **0 newlines**, `?1049h` alt-screen, **266× `CSI H`**, 454× SGR | **0 finished rows**; one 6,121-char pending smear |
+| Claude Code | 1,519 B, 100+ `CSI <n>G`, `CSI r`, `CSI A`, `CSI c` (DA1) | 18 rows, **every space eaten**: `Quicksafetycheck:Isthisaproject…` |
+| Codex | same family as Claude Code (positional prompt → interactive UI) | same failure mode |
+
+Four independent defects, any one of which blocks the gate:
+
+1. **`TermSink` is a line-transcript model, not a screen emulator.** It ignores
+   `?1049h`, `CSI H`/`f`, `CSI J`, and `CSI A`/`B`/`C`/`D`. A full-screen harness
+   emits no newlines at all, so `newline()` never fires and the whole UI
+   accumulates into a single row.
+2. **`CSI <n>G` (CHA) does not pad.** `Row::write` → `overwrite` walks the chunks,
+   never matches when `cursor > width`, and appends instead of filling the gap
+   with spaces. Column-positioned text concatenates. This breaks the *line-mode*
+   path too — the damage is not limited to full-screen UIs.
+3. **`MAX_COLS` freezes the pane.** Once the single ever-growing row reaches 8,192
+   chars, `Row::write` early-returns and all further output is silently dropped
+   forever. Grok reached 6,121 in six seconds.
+4. **The PTY is deaf.** `pty.rs` drops the master writer after initial stdin, and
+   no input-forwarding path exists anywhere in the workspace. Interactive
+   harnesses cannot be answered — Claude Code sits on its trust prompt
+   (`Enter to confirm · Esc to cancel`) until the 600s timeout. Terminal queries
+   (DA1 `CSI c`, XTVERSION) also go unanswered, an independent hang vector.
+
+Defects 1–3 mean the sink needs replacing with a real grid-based emulator
+(`vt100` / `wezterm-term`), not patching. Defect 4 is a separate feature: a
+retained writer plus key routing from the focused rail row.
+
+Secondary (does not block the gate, but fix alongside): `pty.rs` calls blocking
+`std::sync::mpsc::recv_timeout` inside an `async fn` on the `#[tokio::main]`
+runtime, pinning a worker thread for the session's lifetime. `subprocess.rs` uses
+`tokio::process` + async IO and is the model to follow.
 
 ---
 
