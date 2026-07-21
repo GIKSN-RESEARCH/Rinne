@@ -141,6 +141,10 @@ pub struct StageBoard {
     pub focus: usize,
     /// User can hide the Stage with `/stage` or ctrl+y while keeping sessions.
     pub visible: bool,
+    /// Whether focus tracks the newest session, the way `StageSession::scroll`
+    /// tracks the tail. Cleared once the user picks a session themselves, so a
+    /// node starting mid-run cannot yank them off what they are reading.
+    follow: bool,
 }
 
 impl StageBoard {
@@ -150,6 +154,7 @@ impl StageBoard {
             focus: 0,
             // Show Stage automatically when the first session opens.
             visible: true,
+            follow: true,
         }
     }
 
@@ -173,7 +178,9 @@ impl StageBoard {
         }
         self.sessions
             .push(StageSession::open(node_id, worker, model, backend));
-        self.focus = self.sessions.len() - 1;
+        if self.follow {
+            self.focus = self.sessions.len() - 1;
+        }
         self.visible = true;
     }
 
@@ -200,6 +207,8 @@ impl StageBoard {
             return;
         }
         self.focus = (self.focus + 1) % self.sessions.len();
+        // An explicit choice outranks following the newest session.
+        self.follow = false;
     }
 
     pub fn focused_mut(&mut self) -> Option<&mut StageSession> {
@@ -214,11 +223,16 @@ impl StageBoard {
     pub fn clear(&mut self) {
         self.sessions.clear();
         self.focus = 0;
+        self.follow = true;
     }
 
     pub fn toggle_visible(&mut self) -> bool {
         self.visible = !self.visible;
         self.visible
+    }
+
+    fn position_of(&self, node_id: &str) -> Option<usize> {
+        self.sessions.iter().position(|s| s.node_id == node_id)
     }
 
     /// Drop finished sessions older than keep_running; keep last N finished for glanceback.
@@ -235,12 +249,22 @@ impl StageBoard {
         }
         let drop_n = finished.len() - keep_finished;
         let drop_idx: Vec<usize> = finished.into_iter().take(drop_n).collect();
+        // `focus` is a positional index, so removing any session below it would
+        // silently re-point it at an unrelated one. Resolve by identity instead,
+        // falling back to the last session only if the focused one was dropped.
+        let focused_id = self.sessions.get(self.focus).map(|s| s.node_id.clone());
         for i in drop_idx.into_iter().rev() {
             self.sessions.remove(i);
         }
-        if self.focus >= self.sessions.len() {
-            self.focus = self.sessions.len().saturating_sub(1);
-        }
+        self.focus = match focused_id.and_then(|id| self.position_of(&id)) {
+            Some(i) => i,
+            None => {
+                // The session the user pinned is gone, so there is no choice
+                // left to respect — resume following the newest.
+                self.follow = true;
+                self.focus.min(self.sessions.len().saturating_sub(1))
+            }
+        };
     }
 }
 
@@ -278,6 +302,76 @@ mod tests {
             s.push_line(format!("line {i}"));
         }
         assert_eq!(s.lines.len(), STAGE_SCROLLBACK);
+    }
+
+    #[test]
+    fn new_sessions_are_followed_until_the_user_picks_one() {
+        let mut board = StageBoard::new();
+        board.open_session("a".into(), "codex".into(), None, "headless".into());
+        board.open_session("b".into(), "codex".into(), None, "headless".into());
+        // No manual selection yet — follow the newest, like tailing a log.
+        assert_eq!(board.sessions[board.focus].node_id, "b");
+    }
+
+    #[test]
+    fn a_new_session_does_not_steal_focus_the_user_chose() {
+        let mut board = StageBoard::new();
+        board.open_session("a".into(), "codex".into(), None, "headless".into());
+        board.open_session("b".into(), "codex".into(), None, "headless".into());
+        board.cycle_focus(); // user pins "a"
+        assert_eq!(board.sessions[board.focus].node_id, "a");
+
+        board.open_session("c".into(), "codex".into(), None, "headless".into());
+
+        assert_eq!(
+            board.sessions[board.focus].node_id, "a",
+            "a session opening mid-run must not yank the user off what they chose"
+        );
+    }
+
+    #[test]
+    fn pruning_the_pinned_session_resumes_following() {
+        let mut board = StageBoard::new();
+        for id in ["f0", "f1", "f2", "f3", "f4", "live"] {
+            board.open_session(id.into(), "codex".into(), None, "headless".into());
+        }
+        for id in ["f0", "f1", "f2", "f3", "f4"] {
+            board.finish(id, NodeStatus::Succeeded);
+        }
+        // Following put focus on the newest (index 5); one Tab wraps to index 0,
+        // pinning the oldest finished session.
+        board.cycle_focus();
+        assert_eq!(board.sessions[board.focus].node_id, "f0");
+        board.prune_finished(4); // drops "f0" — the pinned one
+
+        board.open_session("next".into(), "codex".into(), None, "headless".into());
+        assert_eq!(
+            board.sessions[board.focus].node_id, "next",
+            "once the pinned session is gone there is no choice left to respect"
+        );
+    }
+
+    #[test]
+    fn prune_finished_keeps_focus_on_the_same_session() {
+        let mut board = StageBoard::new();
+        for id in ["f0", "live", "f2", "f3", "f4", "f5"] {
+            board.open_session(id.into(), "codex".into(), None, "headless".into());
+        }
+        // Five finished, one still running — the call site prunes with keep=4,
+        // so exactly one finished session gets dropped.
+        for id in ["f0", "f2", "f3", "f4", "f5"] {
+            board.finish(id, NodeStatus::Succeeded);
+        }
+        // The user is watching the live session.
+        board.focus = 1;
+        assert_eq!(board.sessions[board.focus].node_id, "live");
+
+        board.prune_finished(4);
+
+        assert_eq!(
+            board.sessions[board.focus].node_id, "live",
+            "dropping a finished session below the focused one must not re-point focus"
+        );
     }
 
     #[test]

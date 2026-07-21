@@ -803,7 +803,12 @@ impl App {
         // When Stage is active: Tab cycles panes; PgUp/PgDn scroll the focused pane.
         if self.stage.is_active() && self.picker.is_none() && self.completion.is_none() {
             match code {
-                KeyCode::Tab if !mods.contains(KeyModifiers::SHIFT) => {
+                // Sessions linger after a run, so the Stage would otherwise own
+                // Tab for the rest of the session and Tab could never re-summon
+                // a dismissed completion. An editable line outranks pane cycling.
+                KeyCode::Tab
+                    if !mods.contains(KeyModifiers::SHIFT) && !self.input_is_completable() =>
+                {
                     self.stage.cycle_focus();
                     return;
                 }
@@ -1048,6 +1053,12 @@ impl App {
             let draft = std::mem::take(&mut self.draft);
             self.set_input(draft);
         }
+    }
+
+    /// Whether the prompt holds something Tab could complete — a slash command
+    /// or an `@`-mention. Mirrors the two branches of [`Self::refresh_completions`].
+    fn input_is_completable(&self) -> bool {
+        self.input.starts_with('/') || current_token(&self.input).starts_with('@')
     }
 
     fn refresh_completions(&mut self) {
@@ -2290,6 +2301,44 @@ mod tests {
     fn app_for(dir: &std::path::Path) -> App {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         App::new(FileIndex::build(dir), tx, false)
+    }
+
+    #[test]
+    fn tab_resummons_completion_on_a_slash_line_even_with_the_stage_active() {
+        let dir = temp_dir("tab-stage-completion");
+        let mut app = app_for(&dir);
+        // A finished harness session lingers on the Stage long after the run,
+        // so `stage.is_active()` stays true for the rest of the session.
+        app.stage
+            .open_session("n1".into(), "codex".into(), None, "headless".into());
+        assert!(app.stage.is_active());
+
+        for c in "/mo".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        // Esc dismisses the popup; Tab is the documented way to bring it back.
+        app.completion = None;
+        app.on_key(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            app.completion.is_some(),
+            "Tab on a completable line must re-summon completion, not cycle Stage panes"
+        );
+    }
+
+    #[test]
+    fn tab_still_cycles_stage_panes_when_there_is_nothing_to_complete() {
+        let dir = temp_dir("tab-stage-cycle");
+        let mut app = app_for(&dir);
+        app.stage
+            .open_session("a".into(), "codex".into(), None, "headless".into());
+        app.stage
+            .open_session("b".into(), "codex".into(), None, "headless".into());
+        assert_eq!(app.stage.sessions[app.stage.focus].node_id, "b");
+
+        app.on_key(KeyCode::Tab, KeyModifiers::NONE); // empty prompt
+
+        assert_eq!(app.stage.sessions[app.stage.focus].node_id, "a");
     }
 
     #[test]
