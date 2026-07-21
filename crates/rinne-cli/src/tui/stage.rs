@@ -260,9 +260,11 @@ impl StageBoard {
             Some(i) => i,
             None => {
                 // The session the user pinned is gone, so there is no choice
-                // left to respect — resume following the newest.
+                // left to respect — resume following the newest. Reusing the
+                // stale positional index would land on the *oldest* remaining
+                // pane instead, since everything below it just shifted down.
                 self.follow = true;
-                self.focus.min(self.sessions.len().saturating_sub(1))
+                self.sessions.len().saturating_sub(1)
             }
         };
     }

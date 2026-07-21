@@ -1055,10 +1055,16 @@ impl App {
         }
     }
 
-    /// Whether the prompt holds something Tab could complete — a slash command
-    /// or an `@`-mention. Mirrors the two branches of [`Self::refresh_completions`].
+    /// Whether Tab would actually produce a completion on the current line — a
+    /// resolvable slash command or an `@`-mention. Mirrors the two branches of
+    /// [`Self::refresh_completions`].
+    ///
+    /// A bare `/` prefix is not enough: `complete::suggest` returns `None` for
+    /// most slash lines past the first token, so `/steer fix the thing` + Tab
+    /// would skip pane cycling *and* complete nothing, leaving Tab a dead key.
     fn input_is_completable(&self) -> bool {
-        self.input.starts_with('/') || current_token(&self.input).starts_with('@')
+        current_token(&self.input).starts_with('@')
+            || (self.input.starts_with('/') && complete::suggest(&self.input).is_some())
     }
 
     fn refresh_completions(&mut self) {
@@ -2058,9 +2064,15 @@ async fn do_run(
         let conductor = conductor
             .clone()
             .ok_or_else(|| anyhow!("no conductor backend available"))?;
+        // Read the digest before `save_plan` overwrites `plan.json`. Without it
+        // a follow-up typed in the TUI — the one place follow-ups happen —
+        // reached the planner as a bare "do it for me" and became a "too vague,
+        // ask the user" node.
+        let digest = runner::last_run_digest(&bb);
         let input = ConductorInput {
             goal: goal.clone(),
             mentioned,
+            digest,
             ..template
         };
         let plan = conductor.plan(&input).await?;

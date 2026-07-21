@@ -960,11 +960,21 @@ impl<'a> Engine<'a> {
                     ))?;
                     return Ok(None);
                 }
-                // Answering a checkpoint's question is consent to proceed. The
-                // gate re-checks this meta on the next pass, so without it the
-                // node parks again and steering can never release the gate —
+                // Answering a *before* checkpoint's question is consent to run.
+                // The gate re-checks this meta on the next pass, so without it
+                // the node parks again and steering can never release the gate —
                 // leaving a "tell me what you meant" node unanswerable.
-                if kind == "checkpoint" {
+                //
+                // An *after* checkpoint is the opposite: steering it means the
+                // human rejected the output. Releasing the gate here would let
+                // the re-run sail past the review they just asked for, so the
+                // key stays unset and the node parks again with fresh output.
+                if kind == "checkpoint"
+                    && self
+                        .plan
+                        .node(&parked)
+                        .is_none_or(|n| n.checkpoint != Some(Checkpoint::After))
+                {
                     state.set_meta(&ckpt_key(&parked), "ok")?;
                 }
                 // The user's words become the critique that flows into the loop.

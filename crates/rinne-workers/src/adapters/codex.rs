@@ -99,10 +99,15 @@ fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
         args.push(m.into());
     }
     // Nobody is watching a Stage session, so an approval prompt burns the
-    // node's whole timeout. Matches `--full-auto` on the headless `exec` path.
+    // node's whole timeout. `--ask-for-approval never` alone is only half of
+    // `--full-auto`: the sandbox still defaults to read-only in a workspace the
+    // user has not trusted, and with approvals off the model cannot escalate —
+    // every edit is rejected and the node burns its budget failing silently.
     if approvals_are_auto() {
         args.push("--ask-for-approval".into());
         args.push("never".into());
+        args.push("--sandbox".into());
+        args.push("workspace-write".into());
     }
     args.push(prompt.into());
     args

@@ -31,7 +31,7 @@ impl PlanBackend for MockBackend {
     fn name(&self) -> &str {
         &self.name
     }
-    async fn complete(&self, _system: &str, _user: &str) -> Result<String> {
+    async fn complete(&self, _system: &str, _user: &str, _rung: usize) -> Result<String> {
         match self.responses.lock().unwrap().pop_front() {
             Some(Ok(s)) => Ok(s),
             Some(Err(e)) => Err(RinneError::Conductor(e)),

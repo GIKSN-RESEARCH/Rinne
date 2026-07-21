@@ -11,7 +11,7 @@ use rinne_core::worker::{
     WorkerFamily,
 };
 
-use super::common::{parse_raw, HarnessAdapter};
+use super::common::{approvals_are_auto, parse_raw, HarnessAdapter};
 
 pub fn worker() -> HarnessAdapter {
     HarnessAdapter {
@@ -61,11 +61,16 @@ fn plan_args(prompt: &str, model: Option<&str>) -> Vec<String> {
 }
 
 fn interactive_args(prompt: &str, model: Option<&str>) -> Vec<String> {
-    // Interactive aider chat (no --yes-always / --message one-shot).
-    let mut args = Vec::new();
+    // Interactive aider chat (no --message one-shot).
+    let mut args: Vec<String> = Vec::new();
     if let Some(m) = model {
         args.push("--model".into());
         args.push(m.into());
+    }
+    // Without this an unattended Stage node sits on aider's own confirm prompt
+    // until the node times out — the same failure the other adapters wire round.
+    if approvals_are_auto() {
+        args.push("--yes-always".into());
     }
     args.push(prompt.into());
     args

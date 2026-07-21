@@ -53,20 +53,35 @@ pub fn active_count() -> usize {
 mod tests {
     use super::*;
 
+    /// Serializes the tests below: the gate's counter and `RINNE_HARNESS_STAGE_MAX`
+    /// are process-global, so concurrent tests would see each other's slots.
+    static GATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn gate_enforces_cap() {
+        let _guard = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("RINNE_HARNESS_STAGE_MAX", "2");
-        // Drain any leftover from other tests
-        while active_count() > 0 {
-            // can't force drop others; just check acquire logic with fresh process count
-            break;
-        }
+        assert_eq!(active_count(), 0, "another test leaked a slot");
+
         let a = try_acquire_visible();
         let b = try_acquire_visible();
-        // May already have slots from parallel tests — only assert structure
-        assert!(a.is_some() || active_count() >= 2);
+        assert!(a.is_some() && b.is_some(), "both slots must be grantable");
+        assert_eq!(active_count(), 2);
+
+        // The cap is the point: the third caller runs headless instead.
+        assert!(
+            try_acquire_visible().is_none(),
+            "a third visible session must be refused at max = 2"
+        );
+
         drop(a);
+        assert_eq!(active_count(), 1, "dropping a slot must release it");
+        let c = try_acquire_visible();
+        assert!(c.is_some(), "a freed slot must be reusable");
+
         drop(b);
-        let _ = try_acquire_visible();
+        drop(c);
+        assert_eq!(active_count(), 0, "every slot must be returned");
+        std::env::remove_var("RINNE_HARNESS_STAGE_MAX");
     }
 }

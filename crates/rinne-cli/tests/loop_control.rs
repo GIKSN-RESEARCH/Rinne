@@ -885,6 +885,74 @@ async fn steering_a_before_checkpoint_releases_the_gate() {
         "steering re-parked at the same gate instead of releasing it: {:?}",
         second.stop_reason
     );
+    // `!NeedsHuman` alone also passes for Blocked / Cancelled / NoCapableWorker,
+    // so a change that released the gate but then failed to dispatch would keep
+    // this test green. The gate is only actually released if the run finishes.
+    assert!(
+        second.completed,
+        "gate released but the run did not finish: {:?}",
+        second.stop_reason
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Steering a `checkpoint: after` gate must NOT release it.
+///
+/// Regression: the `Steer` handler wrote `ckpt_ok:` for any park whose kind was
+/// `"checkpoint"`, but that kind covers both the before-node and after-node
+/// parks. Steering an *after* checkpoint means the human rejected the output —
+/// releasing the gate let the re-run sail straight past the review they had
+/// just asked for. T4 generators get `checkpoint: after` automatically, so this
+/// silently disarmed the mandatory human gate on the highest-risk plans.
+#[tokio::test]
+async fn steering_an_after_checkpoint_re_parks_for_review() {
+    let ws = temp_ws("ckpt-steer-after");
+    let bb = Blackboard::open(&ws).unwrap();
+    let plan: Plan = serde_json::from_value(serde_json::json!({
+        "goal": "write the migration",
+        "nodes": [
+            {"id":"n1","role":"generator","instruction":"write the migration",
+             "needs":["code-edit"],"checkpoint":"after"}
+        ]
+    }))
+    .unwrap();
+    bb.save_plan(&plan).unwrap();
+
+    let mut reg = WorkerRegistry::new();
+    reg.register(Arc::new(MockWorker::success("gen", "done")) as Arc<dyn Worker>);
+
+    let mut engine = Engine::new(&bb, plan.clone(), &reg, opts(3));
+    let first = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(first.stop_reason, StopReason::NeedsHuman { ref node, .. } if node == "n1"),
+        "an after-checkpoint node must park for review: {:?}",
+        first.stop_reason
+    );
+
+    // The user rejects the output by steering ("rewrite it, this drops a column").
+    let mut engine2 = Engine::new(&bb, plan, &reg, opts(3));
+    let second = engine2
+        .run(
+            CancellationToken::new(),
+            None,
+            Some(ResumeInput {
+                node: None,
+                decision: HumanDecision::Steer("rewrite it, this drops a column".into()),
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(second.stop_reason, StopReason::NeedsHuman { ref node, .. } if node == "n1"),
+        "steering an after-checkpoint released the review gate — the revised \
+         output was never shown to the human: {:?}",
+        second.stop_reason
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }

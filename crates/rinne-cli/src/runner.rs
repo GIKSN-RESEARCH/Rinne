@@ -502,10 +502,6 @@ fn prefer_label(p: PreferFamily) -> &'static str {
     }
 }
 
-/// The reusable planning context (everything but the per-call goal/mentioned):
-/// the worker pool, the tool/skill catalog, the family preference, and budgets.
-/// Captured on the conductor via `with_context` so replans stay pool- and
-/// catalog-aware, and spread into each `plan()` call's input.
 /// How much of the previous deliverable is worth showing the planner. Enough to
 /// resolve "do it for me"; not so much that planning re-reads a whole report.
 const DIGEST_MAX_CHARS: usize = 1_200;
@@ -541,17 +537,30 @@ fn previous_run_digest(prev_goal: &str, deliverable: Option<&str>) -> Option<Str
 
 /// Read the previous run's goal and deliverable from the blackboard, if any.
 /// Must be called before the new plan overwrites `plan.json`.
-fn last_run_digest(bb: &Blackboard) -> Option<String> {
+pub fn last_run_digest(bb: &Blackboard) -> Option<String> {
     let plan = bb.load_plan().ok()?;
-    let deliverable = plan
-        .nodes
-        .iter()
-        .rev()
-        .flat_map(|n| n.outputs.iter())
-        .find_map(|out| bb.read_artifact(out).ok());
+    let deliverable = plan.nodes.iter().rev().find_map(|n| {
+        // Mirror `engine::persist_outputs`, which does NOT write under the
+        // literal names in `outputs`: a `"diff"` output lands at `<id>.diff`,
+        // and a node that declares no outputs at all lands at `<id>.out.md`.
+        // Reading `outputs` verbatim missed both — i.e. most nodes — and the
+        // digest silently carried the goal line with no content.
+        let named = n
+            .outputs
+            .iter()
+            .filter(|o| *o != "diff")
+            .find_map(|out| bb.read_artifact(out).ok());
+        named
+            .or_else(|| bb.read_artifact(&format!("{}.out.md", n.id)).ok())
+            .or_else(|| bb.read_artifact(&format!("{}.diff", n.id)).ok())
+    });
     previous_run_digest(&plan.goal, deliverable.as_deref())
 }
 
+/// The reusable planning context (everything but the per-call goal/mentioned):
+/// the worker pool, the tool/skill catalog, the family preference, and budgets.
+/// Captured on the conductor via `with_context` so replans stay pool- and
+/// catalog-aware, and spread into each `plan()` call's input.
 pub fn plan_template(
     config: &Config,
     registry: &WorkerRegistry,
@@ -1092,7 +1101,6 @@ mod tests {
         assert!(previous_run_digest("   ", None).is_none());
     }
 
-    use super::*;
     use rinne_core::dag::EvaluatorKind;
     use rinne_core::HumanSession;
 

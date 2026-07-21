@@ -21,7 +21,12 @@ impl PlanBackend for CannedBackend {
     fn name(&self) -> &str {
         "canned"
     }
-    async fn complete(&self, _system: &str, _user: &str) -> rinne_core::Result<String> {
+    async fn complete(
+        &self,
+        _system: &str,
+        _user: &str,
+        _rung: usize,
+    ) -> rinne_core::Result<String> {
         Ok(self.0.clone())
     }
 }

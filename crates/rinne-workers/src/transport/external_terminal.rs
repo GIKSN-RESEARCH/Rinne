@@ -427,6 +427,13 @@ fn write_launcher(
     let log_q = sh_quote(&log_path.display().to_string());
     let tty_q = sh_quote(&tty_path.display().to_string());
     let tag_q = sh_quote(stage_tag);
+    // Where the watchdog parks its current `sleep` pid so `on_exit` can reap it.
+    let sleep_pid_q = sh_quote(
+        &pid_path
+            .with_file_name("watchdog-sleep.pid")
+            .display()
+            .to_string(),
+    );
 
     // ── TTY reset (start + end) — critical for mouse-tracking cleanup ─────
     script.push_str("reset_tty() {\n");
@@ -457,9 +464,21 @@ fn write_launcher(
     script.push_str("on_exit() {\n");
     script.push_str("  ec=$?\n");
     // Started later; `set -u` means it must be referenced defensively.
-    script.push_str(
-        "  [ -n \"${RINNE_WATCHDOG:-}\" ] && kill \"$RINNE_WATCHDOG\" 2>/dev/null || true\n",
-    );
+    //
+    // Kill the watchdog's inner `sleep` too, not just the subshell: SIGTERM to
+    // a non-interactive bash does not forward to or reap its foreground child,
+    // so the `sleep` would outlive the launcher for up to WATCHDOG_POLL_SECS.
+    // Rinne closes the window within one 100ms poll of seeing `exit.code`, so
+    // that orphan is exactly what makes Terminal.app ask "terminate the running
+    // processes?" — the prompt this design removes.
+    script.push_str(&format!(
+        "  if [ -n \"${{RINNE_WATCHDOG:-}}\" ]; then\n\
+         \x20   kill \"$RINNE_WATCHDOG\" 2>/dev/null || true\n\
+         \x20   kill \"$(cat {} 2>/dev/null)\" 2>/dev/null || true\n\
+         \x20   wait \"$RINNE_WATCHDOG\" 2>/dev/null || true\n\
+         \x20 fi\n",
+        sleep_pid_q
+    ));
     script.push_str("  reset_tty\n");
     script.push_str("  set_stage_title\n");
     script.push_str(&format!("  echo \"$ec\" > {exit_q}\n"));
@@ -480,15 +499,25 @@ fn write_launcher(
     // the user's subscription with the Terminal window still open. Poll the
     // Rinne pid and, once it is gone, signal only *children* — killing this
     // shell directly would skip `on_exit` and leave mouse tracking enabled.
+    //
+    // The subshell's stdio is detached from the tty: an orphaned `sleep` still
+    // holding this window's terminal is what makes Terminal.app ask "terminate
+    // the running processes?" when Rinne closes the window. It records the
+    // `sleep`'s pid so `on_exit` can reap that too — SIGTERM to the subshell
+    // alone does not forward to its foreground child. No `set -m`: job control
+    // here caused pgid races (see `interactive_launcher_resets_tty_…`).
     script.push_str(&format!(
         "RINNE_PID={}\n\
          (\n\
-         \x20 while kill -0 \"$RINNE_PID\" 2>/dev/null; do sleep {}; done\n\
+         \x20 while kill -0 \"$RINNE_PID\" 2>/dev/null; do\n\
+         \x20   sleep {} & echo $! > {}; wait $!\n\
+         \x20 done\n\
          \x20 pkill -TERM -P $$ 2>/dev/null || true\n\
-         ) &\n\
+         ) </dev/null >/dev/null 2>&1 &\n\
          RINNE_WATCHDOG=$!\n",
         std::process::id(),
-        WATCHDOG_POLL_SECS
+        WATCHDOG_POLL_SECS,
+        sleep_pid_q
     ));
 
     // Record tty early so Rinne can close the window even if the trap is skipped.
@@ -585,8 +614,10 @@ fn open_system_terminal(
 
     #[cfg(target_os = "macos")]
     {
-        let iterm_installed = which("iTerm") || app_exists("iTerm");
-        if choose_macos_terminal(&prefer, iterm_installed) == MacTerminal::ITerm {
+        // No installed-check: an explicit `RINNE_EXTERNAL_TERMINAL=iterm` is
+        // honoured either way (see `choose_macos_terminal`), so probing for the
+        // app only cost a `which` fork per window open.
+        if choose_macos_terminal(&prefer) == MacTerminal::ITerm {
             return open_iterm(&script, &cwd, stage_tag, win_path);
         }
         // Prefer osascript so we can capture the window id for forced close.
@@ -733,26 +764,6 @@ end tell"#,
     } else {
         open_macos_terminal_capture_id(script, stage_tag, win_path)
     }
-}
-
-#[cfg(target_os = "macos")]
-fn app_exists(name: &str) -> bool {
-    Path::new(&format!("/Applications/{name}.app")).exists()
-        || Path::new(&format!(
-            "{}/Applications/{name}.app",
-            std::env::var("HOME").unwrap_or_default()
-        ))
-        .exists()
-}
-
-fn which(bin: &str) -> bool {
-    StdCommand::new("which")
-        .arg(bin)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1149,7 +1160,7 @@ enum MacTerminal {
 /// matching the "opening … in system Terminal" narration; iTerm is opt-in even
 /// when installed. An explicit preference always wins, so having iTerm present
 /// can never override a user asking for Terminal.app.
-fn choose_macos_terminal(prefer: &str, _iterm_installed: bool) -> MacTerminal {
+fn choose_macos_terminal(prefer: &str) -> MacTerminal {
     match prefer.trim().to_ascii_lowercase().as_str() {
         "iterm" | "iterm2" => MacTerminal::ITerm,
         _ => MacTerminal::Apple,
@@ -1315,26 +1326,23 @@ mod tests {
     fn an_explicit_terminal_preference_beats_an_installed_iterm() {
         // Having iTerm installed must not override an explicit choice, or the
         // RINNE_EXTERNAL_TERMINAL escape hatch cannot select Terminal.app.
-        assert_eq!(choose_macos_terminal("terminal", true), MacTerminal::Apple);
-        assert_eq!(
-            choose_macos_terminal("terminal.app", true),
-            MacTerminal::Apple
-        );
-        assert_eq!(choose_macos_terminal("iterm", true), MacTerminal::ITerm);
-        assert_eq!(choose_macos_terminal("iterm2", false), MacTerminal::ITerm);
+        assert_eq!(choose_macos_terminal("terminal"), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal("terminal.app"), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal("iterm"), MacTerminal::ITerm);
+        assert_eq!(choose_macos_terminal("iterm2"), MacTerminal::ITerm);
     }
 
     #[test]
     fn with_no_preference_the_system_terminal_is_used() {
         // Rinne's own narration promises the "system Terminal"; defaulting to
         // whatever else happens to be installed contradicts it.
-        assert_eq!(choose_macos_terminal("", true), MacTerminal::Apple);
-        assert_eq!(choose_macos_terminal("", false), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal(""), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal("   "), MacTerminal::Apple);
     }
 
     #[test]
     fn an_unrecognised_preference_falls_back_to_terminal_app() {
-        assert_eq!(choose_macos_terminal("wezterm", true), MacTerminal::Apple);
+        assert_eq!(choose_macos_terminal("wezterm"), MacTerminal::Apple);
     }
 
     #[test]
@@ -1433,6 +1441,18 @@ mod tests {
         assert!(
             body.contains("pkill -TERM -P $$"),
             "watchdog must signal children so on_exit still resets the TTY"
+        );
+        // The watchdog's own `sleep` must not be left on this window's tty:
+        // killing the subshell does not reap its foreground child, and an
+        // orphan holding the terminal is what makes Terminal.app ask
+        // "terminate the running processes?" when Rinne closes the window.
+        assert!(
+            body.contains("watchdog-sleep.pid"),
+            "watchdog must record its sleep pid so on_exit can reap it: {body}"
+        );
+        assert!(
+            body.contains("</dev/null >/dev/null 2>&1 &"),
+            "watchdog stdio must be detached from the window's tty: {body}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

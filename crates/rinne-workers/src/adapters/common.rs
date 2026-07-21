@@ -73,10 +73,29 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// (`crates/rinne-cli/src/runner.rs::apply_harness_stage_env`). Defaults to
 /// auto, matching the config default: a Stage session nobody is watching
 /// blocks forever on a permission prompt otherwise.
+///
+/// Unset means auto, but any recognised *negative* spelling means human — this
+/// is a permission switch, so `RINNE_HARNESS_APPROVALS=off` must not fail open
+/// into auto-approving every tool call. The vocabulary matches the sibling
+/// `RINNE_HARNESS_INTERACTIVE_TUI` parse below.
 pub fn approvals_are_auto() -> bool {
-    std::env::var("RINNE_HARNESS_APPROVALS")
-        .map(|v| !v.eq_ignore_ascii_case("human"))
-        .unwrap_or(true)
+    match std::env::var("RINNE_HARNESS_APPROVALS") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "human"
+                | "manual"
+                | "ask"
+                | "prompt"
+                | "never"
+                | "none"
+                | "no"
+                | "off"
+                | "false"
+                | "0"
+                | ""
+        ),
+        Err(_) => true,
+    }
 }
 
 /// Default interactive argv: model flag (if any) + prompt as a positional arg.
@@ -762,6 +781,24 @@ mod tests {
         assert!(!approvals_are_auto());
         std::env::set_var("RINNE_HARNESS_APPROVALS", "auto");
         assert!(approvals_are_auto());
+        std::env::remove_var("RINNE_HARNESS_APPROVALS");
+    }
+
+    #[test]
+    fn approvals_do_not_fail_open_on_negative_spellings() {
+        // A permission switch must not auto-approve because the user wrote
+        // `off` instead of the one blessed spelling.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for v in [
+            "off", "0", "false", "no", "never", "none", "manual", "ASK", " human ",
+        ] {
+            std::env::set_var("RINNE_HARNESS_APPROVALS", v);
+            assert!(!approvals_are_auto(), "`{v}` must not mean auto-approve");
+        }
+        for v in ["auto", "AUTO", "yes", "1"] {
+            std::env::set_var("RINNE_HARNESS_APPROVALS", v);
+            assert!(approvals_are_auto(), "`{v}` must mean auto-approve");
+        }
         std::env::remove_var("RINNE_HARNESS_APPROVALS");
     }
 
