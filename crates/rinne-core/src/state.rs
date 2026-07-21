@@ -160,7 +160,8 @@ impl State {
             [node_id],
             |r| r.get(0),
         ))?;
-        Ok(s.map(|s| NodeStatus::from_str(&s)).unwrap_or(NodeStatus::Pending))
+        Ok(s.map(|s| NodeStatus::from_str(&s))
+            .unwrap_or(NodeStatus::Pending))
     }
 
     /// The worker last assigned to a node, if any.
@@ -286,11 +287,12 @@ impl State {
     }
 
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
-        optional(self.conn.query_row(
-            "SELECT value FROM run_meta WHERE key = ?1",
-            [key],
-            |r| r.get(0),
-        ))
+        optional(
+            self.conn
+                .query_row("SELECT value FROM run_meta WHERE key = ?1", [key], |r| {
+                    r.get(0)
+                }),
+        )
     }
 }
 

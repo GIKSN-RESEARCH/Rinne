@@ -128,12 +128,29 @@ fn config_keyword_floor(goal: &str, keywords: &BTreeMap<String, String>) -> Comp
 
 fn risk_keyword_floor(goal: &str) -> ComplexityTier {
     const T4: &[&str] = &[
-        "security", "audit", "soc2", "hipaa", "incident", "breach", "exploit",
-        "zero-downtime", "production migration", "mainnet", "disaster",
+        "security",
+        "audit",
+        "soc2",
+        "hipaa",
+        "incident",
+        "breach",
+        "exploit",
+        "zero-downtime",
+        "production migration",
+        "mainnet",
+        "disaster",
     ];
     const T3: &[&str] = &[
-        "refactor", "migrate", "architecture", "multi-tenant", "monolith",
-        "microservice", "performance", "optimize", "upgrade react", "event bus",
+        "refactor",
+        "migrate",
+        "architecture",
+        "multi-tenant",
+        "monolith",
+        "microservice",
+        "performance",
+        "optimize",
+        "upgrade react",
+        "event bus",
     ];
     for k in T4 {
         if goal.contains(k) {
@@ -149,13 +166,25 @@ fn risk_keyword_floor(goal: &str) -> ComplexityTier {
 }
 
 fn max_tier(a: ComplexityTier, b: ComplexityTier) -> ComplexityTier {
-    if a >= b { a } else { b }
+    if a >= b {
+        a
+    } else {
+        b
+    }
 }
 
 fn looks_text_only(goal: &str) -> bool {
     const MARKERS: &[&str] = &[
-        "summarize", "summary", "explain", "what does", "commit message",
-        "release notes", "faq", "draft", "list env", "reformat",
+        "summarize",
+        "summary",
+        "explain",
+        "what does",
+        "commit message",
+        "release notes",
+        "faq",
+        "draft",
+        "list env",
+        "reformat",
     ];
     MARKERS.iter().any(|m| goal.contains(m))
         && !goal.contains("implement")

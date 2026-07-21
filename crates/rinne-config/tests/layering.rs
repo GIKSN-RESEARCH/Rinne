@@ -104,6 +104,8 @@ fn non_config_env_flags_do_not_break_load() {
     std::env::remove_var("RINNE_STREAM_JSON");
     std::env::remove_var("RINNE_NO_UPDATE_CHECK");
     std::env::remove_var("RINNE_BIN");
-    let cfg = result.expect("load must not panic").expect("load must succeed with protocol flags set");
+    let cfg = result
+        .expect("load must not panic")
+        .expect("load must succeed with protocol flags set");
     assert_eq!(cfg.conductor.backend, ConductorBackend::Cloudflare);
 }

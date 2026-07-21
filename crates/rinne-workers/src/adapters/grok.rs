@@ -274,7 +274,13 @@ mod tests {
 }
 
 fn tool_event(name: &str, input: &serde_json::Value) -> WorkerEvent {
-    let s = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| {
+        input
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     match name {
         "Read" => WorkerEvent::Reading(s("file_path")),
         "Write" => WorkerEvent::Editing(format!("writing {}", s("file_path"))),

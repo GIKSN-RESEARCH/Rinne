@@ -3,11 +3,11 @@
 
 use anyhow::Result;
 
+use rinne_conductor::{format_routing_report, load_user_exemplars, resolve_openai};
 use rinne_config::{
     probe::{WorkerFamily, WorkerStatus},
     Config, DoctorReport,
 };
-use rinne_conductor::{format_routing_report, load_user_exemplars, resolve_openai};
 
 /// Run the probe and print a human-readable report.
 pub async fn run(refresh: bool, routing: bool) -> Result<()> {

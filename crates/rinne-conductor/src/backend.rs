@@ -45,7 +45,12 @@ pub struct OpenAiBackend {
 }
 
 impl OpenAiBackend {
-    pub fn new(name: impl Into<String>, base_url: &str, api_key: Option<String>, model: &str) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        base_url: &str,
+        api_key: Option<String>,
+        model: &str,
+    ) -> Self {
         Self {
             name: name.into(),
             client: OpenAiClient::new(base_url, api_key),
@@ -220,7 +225,12 @@ fn tail(s: &str, max: usize) -> &str {
     if s.chars().count() <= max {
         return s;
     }
-    let start = s.char_indices().rev().nth(max - 1).map(|(i, _)| i).unwrap_or(0);
+    let start = s
+        .char_indices()
+        .rev()
+        .nth(max - 1)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     &s[start..]
 }
 
@@ -268,8 +278,9 @@ pub fn conductor_base_url(config: &ConductorConfig) -> Option<String> {
             .map(|id| format!("https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1")),
         ConductorBackend::Groq => Some("https://api.groq.com/openai/v1".into()),
         ConductorBackend::Nvidia => Some("https://integrate.api.nvidia.com/v1".into()),
-        other => rinne_config::known::known_api_provider(other.as_str())
-            .map(|p| p.base_url.to_string()),
+        other => {
+            rinne_config::known::known_api_provider(other.as_str()).map(|p| p.base_url.to_string())
+        }
     }
 }
 
@@ -304,7 +315,10 @@ pub fn resolve_openai(config: &ConductorConfig) -> Result<Option<OpenAiBackend>>
 }
 
 /// Like [`resolve_openai`] but pins the model id (planner ladder rung).
-pub fn resolve_openai_model(config: &ConductorConfig, model: &str) -> Result<Option<OpenAiBackend>> {
+pub fn resolve_openai_model(
+    config: &ConductorConfig,
+    model: &str,
+) -> Result<Option<OpenAiBackend>> {
     let mut backend = match resolve_openai(config)? {
         Some(b) => b,
         None => return Ok(None),

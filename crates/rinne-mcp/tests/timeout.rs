@@ -36,7 +36,10 @@ async fn list_tools_times_out_instead_of_hanging() {
     let result = client.list_tools().await;
     let elapsed = started.elapsed();
 
-    assert!(result.is_err(), "a silent server must surface an error, not hang");
+    assert!(
+        result.is_err(),
+        "a silent server must surface an error, not hang"
+    );
     assert!(
         result.unwrap_err().to_string().contains("timed out"),
         "the error should name the timeout"

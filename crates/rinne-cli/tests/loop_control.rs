@@ -99,7 +99,11 @@ impl Worker for AppendWorker {
             file_diff: None,
             transcript: "appended a line".into(),
             status: ExecStatus::Success,
-            usage: Usage { prompt_tokens: 1, completion_tokens: 1, wall_ms: 0 },
+            usage: Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                wall_ms: 0,
+            },
             session_id: None,
         })
     }
@@ -120,16 +124,24 @@ async fn tool_eval_loops_back_until_it_passes() {
              "acceptance":{"command":"test \"$(wc -l < counter.txt)\" -ge 2","must_exit":0},
              "on_fail":"loop_back(n1)"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     bb.save_plan(&plan).unwrap();
 
     let mut reg = WorkerRegistry::new();
     reg.register(Arc::new(AppendWorker::new()) as Arc<dyn Worker>);
 
     let mut engine = Engine::new(&bb, plan, &reg, opts(3));
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
-    assert!(report.completed, "should pass after loop-back: {:?}", report.stop_reason);
+    assert!(
+        report.completed,
+        "should pass after loop-back: {:?}",
+        report.stop_reason
+    );
     // n1 ran exactly twice (first fail, second pass).
     let state = rinne_core::state::State::open(&bb.state_db_path()).unwrap();
     assert_eq!(state.iterations("n1").unwrap(), 2);
@@ -158,21 +170,25 @@ async fn test_ratchet_blocks_test_deleting_diff() {
     // The generator keeps producing a diff that deletes a test.
     let bad_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@\n-    #[test]\n-    fn it_works() {}\n";
     let mut reg = WorkerRegistry::new();
-    reg.register(
-        Arc::new(MockWorker::new(
-            rinne_workers::mock::MockScript::success("gen", "done").with_diff(bad_diff),
-        )) as Arc<dyn Worker>,
-    );
+    reg.register(Arc::new(MockWorker::new(
+        rinne_workers::mock::MockScript::success("gen", "done").with_diff(bad_diff),
+    )) as Arc<dyn Worker>);
 
     let mut engine = Engine::new(&bb, plan, &reg, opts(2));
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
     // The command `true` would pass, but the ratchet blocks the diff, so the run
     // never completes — it loops then parks on the repeated ratchet failure.
     assert!(!report.completed);
     assert!(matches!(report.stop_reason, StopReason::NeedsHuman { .. }));
     let critique = bb.read_artifact("eval-n2.md").unwrap();
-    assert!(critique.contains("RATCHET"), "critique should cite the ratchet: {critique}");
+    assert!(
+        critique.contains("RATCHET"),
+        "critique should cite the ratchet: {critique}"
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -192,7 +208,8 @@ async fn stuck_detector_parks_without_burning_budget() {
              "acceptance":{"command":"false","must_exit":0},
              "on_fail":"loop_back(n1)"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     bb.save_plan(&plan).unwrap();
 
     let mut reg = WorkerRegistry::new();
@@ -201,12 +218,19 @@ async fn stuck_detector_parks_without_burning_budget() {
     // Big per-node budget (8) but a stuck threshold of 2: it must park at ~2
     // loops, not grind to the iteration cap.
     let mut engine = Engine::new(&bb, plan, &reg, opts(2));
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
     assert!(matches!(report.stop_reason, StopReason::NeedsHuman { .. }));
     assert!(!report.completed);
     // n1 ran ~2 times, far below the per-node cap of 8 — budget preserved.
-    assert!(report.total_iterations <= 6, "burned too much: {}", report.total_iterations);
+    assert!(
+        report.total_iterations <= 6,
+        "burned too much: {}",
+        report.total_iterations
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -224,7 +248,8 @@ async fn human_critique_flows_into_next_iteration() {
             {"id":"n2","role":"evaluator","evaluator":"human","instruction":"is this right?",
              "depends_on":["n1"],"on_fail":"loop_back(n1)"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     bb.save_plan(&plan).unwrap();
 
     let mut reg = WorkerRegistry::new();
@@ -232,7 +257,10 @@ async fn human_critique_flows_into_next_iteration() {
 
     // First run parks at the human evaluator.
     let mut engine = Engine::new(&bb, plan.clone(), &reg, opts(3));
-    let first = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let first = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
     assert!(matches!(first.stop_reason, StopReason::NeedsHuman { .. }));
 
     // Resume with the user's steering; it must reach the generator's next run.
@@ -242,7 +270,10 @@ async fn human_critique_flows_into_next_iteration() {
         .run(
             CancellationToken::new(),
             None,
-            Some(ResumeInput { node: None, decision: HumanDecision::Steer(steer.into()) }),
+            Some(ResumeInput {
+                node: None,
+                decision: HumanDecision::Steer(steer.into()),
+            }),
         )
         .await
         .unwrap();
@@ -250,7 +281,10 @@ async fn human_critique_flows_into_next_iteration() {
     // The critique was captured and flowed into n1's assembled context.
     assert_eq!(bb.read_artifact("eval-human.md").unwrap(), steer);
     let ctx = std::fs::read_to_string(bb.root().join("context/n1.json")).unwrap();
-    assert!(ctx.contains("hash tag"), "generator did not receive the critique: {ctx}");
+    assert!(
+        ctx.contains("hash tag"),
+        "generator did not receive the critique: {ctx}"
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -330,14 +364,25 @@ async fn independent_evaluators_run_concurrently() {
     }) as Arc<dyn Worker>);
 
     let mut engine = Engine::new(&bb, plan, &reg, opts(3));
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
-    assert!(report.completed, "should complete: {:?}", report.stop_reason);
+    assert!(
+        report.completed,
+        "should complete: {:?}",
+        report.stop_reason
+    );
     for (id, status) in &report.node_statuses {
         assert_eq!(*status, NodeStatus::Succeeded, "node {id}");
     }
     // n2 and n3 (independent read-only evaluators) overlapped → peak concurrency 2.
-    assert_eq!(*max.lock().unwrap(), 2, "evaluators did not run concurrently");
+    assert_eq!(
+        *max.lock().unwrap(),
+        2,
+        "evaluators did not run concurrently"
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -361,7 +406,11 @@ impl Worker for RecordingWorker {
         _events: EventSink,
         _cancel: CancellationToken,
     ) -> rinne_core::Result<ExecuteResult> {
-        let model = request.constraints.model.clone().unwrap_or_else(|| "default".into());
+        let model = request
+            .constraints
+            .model
+            .clone()
+            .unwrap_or_else(|| "default".into());
         self.log.lock().unwrap().push(model);
         Ok(ExecuteResult {
             result: "done".into(),
@@ -388,7 +437,8 @@ async fn cascade_escalates_model_on_evaluator_failure() {
              "acceptance":{"command":"false","must_exit":0},
              "on_fail":"loop_back(n1)"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     bb.save_plan(&plan).unwrap();
 
     let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -408,7 +458,10 @@ async fn cascade_escalates_model_on_evaluator_failure() {
     }) as Arc<dyn Worker>);
 
     let mut ladders = std::collections::HashMap::new();
-    ladders.insert("recorder".to_string(), vec!["cheap".to_string(), "mid".to_string(), "strong".to_string()]);
+    ladders.insert(
+        "recorder".to_string(),
+        vec!["cheap".to_string(), "mid".to_string(), "strong".to_string()],
+    );
     let options = EngineOptions {
         stuck_loop_threshold: 3,
         model_ladders: ladders,
@@ -416,7 +469,10 @@ async fn cascade_escalates_model_on_evaluator_failure() {
     };
 
     let mut engine = Engine::new(&bb, plan, &reg, options);
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
     // The generator started cheap and climbed the ladder on each eval failure,
     // then parked when stuck rather than burning budget on one model.
@@ -472,7 +528,11 @@ async fn role_model_pin_overrides_node_model() {
         .await
         .unwrap();
 
-    assert!(report.completed, "should complete: {:?}", report.stop_reason);
+    assert!(
+        report.completed,
+        "should complete: {:?}",
+        report.stop_reason
+    );
     assert_eq!(
         *log.lock().unwrap(),
         vec!["grok-4.5".to_string()],
@@ -532,7 +592,12 @@ struct CannedReplanner;
 
 #[async_trait]
 impl Replanner for CannedReplanner {
-    async fn replan(&self, _goal: &str, _digest: &str, _current: &Plan) -> rinne_core::Result<Plan> {
+    async fn replan(
+        &self,
+        _goal: &str,
+        _digest: &str,
+        _current: &Plan,
+    ) -> rinne_core::Result<Plan> {
         // A simpler plan that just succeeds — proves the DAG was amended.
         Ok(serde_json::from_value(serde_json::json!({
             "goal": "amended",
@@ -554,17 +619,25 @@ async fn replanner_amends_dag_on_replan_verdict() {
              "acceptance":{"command":"false","must_exit":0},
              "on_fail":"replan"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     bb.save_plan(&plan).unwrap();
 
     let mut reg = WorkerRegistry::new();
     reg.register(Arc::new(MockWorker::success("gen", "done")) as Arc<dyn Worker>);
 
-    let mut engine = Engine::new(&bb, plan, &reg, opts(3))
-        .with_replanner(Arc::new(CannedReplanner));
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let mut engine =
+        Engine::new(&bb, plan, &reg, opts(3)).with_replanner(Arc::new(CannedReplanner));
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
-    assert!(report.completed, "amended plan should complete: {:?}", report.stop_reason);
+    assert!(
+        report.completed,
+        "amended plan should complete: {:?}",
+        report.stop_reason
+    );
     // The DAG on disk was replaced by the amended one.
     let amended = bb.load_plan().unwrap();
     assert_eq!(amended.nodes.len(), 1);
@@ -595,9 +668,7 @@ async fn named_gate_parks_and_resumes() {
 
     let gate = NamedCheckpoint {
         name: "review".into(),
-        trigger: CheckpointTrigger::AfterNode {
-            node: "n1".into(),
-        },
+        trigger: CheckpointTrigger::AfterNode { node: "n1".into() },
     };
     let options = EngineOptions {
         gates: vec![gate],
@@ -629,7 +700,11 @@ async fn named_gate_parks_and_resumes() {
         .run(CancellationToken::new(), None, Some(resume))
         .await
         .unwrap();
-    assert!(second.completed, "should finish after gate approve: {:?}", second.stop_reason);
+    assert!(
+        second.completed,
+        "should finish after gate approve: {:?}",
+        second.stop_reason
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -653,10 +728,7 @@ impl Worker for NamedRecorder {
         _events: EventSink,
         _cancel: CancellationToken,
     ) -> rinne_core::Result<ExecuteResult> {
-        self.log
-            .lock()
-            .unwrap()
-            .push(self.descriptor.name.clone());
+        self.log.lock().unwrap().push(self.descriptor.name.clone());
         Ok(ExecuteResult {
             result: "done".into(),
             file_diff: None,

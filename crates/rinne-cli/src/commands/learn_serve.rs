@@ -103,7 +103,10 @@ fn shell_html(topics: &[String], project: &str) -> String {
          then reload.</p></div>"
             .to_string()
     } else {
-        format!("<iframe id=\"view\" src=\"/p/{}\" title=\"explainer\"></iframe>", esc(&first))
+        format!(
+            "<iframe id=\"view\" src=\"/p/{}\" title=\"explainer\"></iframe>",
+            esc(&first)
+        )
     };
 
     format!(
@@ -321,7 +324,9 @@ async fn handle(mut stream: TcpStream, learn_dir: PathBuf) {
     let path = match read_request_path(&mut stream).await {
         Some(p) => p,
         None => {
-            let _ = stream.write_all(&response("400 Bad Request", "text/plain", b"bad request")).await;
+            let _ = stream
+                .write_all(&response("400 Bad Request", "text/plain", b"bad request"))
+                .await;
             return;
         }
     };
@@ -386,7 +391,11 @@ fn percent_decode(s: &str) -> String {
 
 /// Open `url` in the default browser (best-effort, non-blocking).
 fn open_browser(url: &str) {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     let _ = std::process::Command::new(opener).arg(url).spawn();
 }
 
@@ -596,10 +605,7 @@ async fn claim_port(cwd: &Path, port: u16) -> Result<Claim> {
                         .file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or("other-project");
-                    let note = format!(
-                        "taking over :{port} from {old} (pid {})",
-                        lock.pid
-                    );
+                    let note = format!("taking over :{port} from {old} (pid {})", lock.pid);
                     terminate_pid(lock.pid);
                     clear_lock(port);
                     // Retry bind after the port frees.
@@ -629,14 +635,12 @@ async fn claim_port(cwd: &Path, port: u16) -> Result<Claim> {
                 }
                 // Stale lock — drop and retry once.
                 clear_lock(port);
-                let listener = TcpListener::bind(&addr)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to bind {addr} (port in use by a non-rinne process? \
+                let listener = TcpListener::bind(&addr).await.with_context(|| {
+                    format!(
+                        "failed to bind {addr} (port in use by a non-rinne process? \
                              lsof -nP -iTCP:{port} -sTCP:LISTEN)"
-                        )
-                    })?;
+                    )
+                })?;
                 return Ok(Claim::Bound {
                     learn_dir,
                     topics,
@@ -718,7 +722,9 @@ pub fn status_lines(url: &str, topics: &[String]) -> Vec<String> {
 /// Like [`status_lines`], optionally tagging the project folder name.
 pub fn status_lines_for(url: &str, topics: &[String], project: Option<&str>) -> Vec<String> {
     let mut lines = vec![match project {
-        Some(p) if !p.is_empty() => format!("serving {} · {} explainer(s) at {url}", p, topics.len()),
+        Some(p) if !p.is_empty() => {
+            format!("serving {} · {} explainer(s) at {url}", p, topics.len())
+        }
         _ => format!("serving {} explainer(s) at {url}", topics.len()),
     }];
     if topics.is_empty() {
@@ -797,11 +803,7 @@ pub async fn run(cwd: PathBuf, port: u16, open: bool, stop: bool) -> Result<()> 
 
     match claim_port(&cwd, port).await? {
         Claim::Already(live) => {
-            for line in status_lines_for(
-                &live.url,
-                &live.topics,
-                Some(&live.project),
-            ) {
+            for line in status_lines_for(&live.url, &live.topics, Some(&live.project)) {
                 println!("{line}");
             }
             println!(
@@ -878,10 +880,16 @@ mod tests {
     #[test]
     fn shell_lists_topics_and_frames_first() {
         let html = shell_html(&["harness".to_string(), "engine".to_string()], "my-app");
-        assert!(html.contains("data-topic=\"harness\""), "topic link missing");
+        assert!(
+            html.contains("data-topic=\"harness\""),
+            "topic link missing"
+        );
         assert!(html.contains("data-topic=\"engine\""));
         // First topic is framed by default.
-        assert!(html.contains("src=\"/p/harness\""), "first topic not framed");
+        assert!(
+            html.contains("src=\"/p/harness\""),
+            "first topic not framed"
+        );
         assert!(html.contains("rinne learn"), "brand missing");
         assert!(html.contains("my-app"), "project label missing from shell");
     }
@@ -891,7 +899,10 @@ mod tests {
         let html = shell_html(&[], "demo");
         assert!(html.contains("No explainers yet"), "empty state missing");
         assert!(html.contains("rinne learn explain"), "no generation hint");
-        assert!(!html.contains("<iframe"), "should not frame anything when empty");
+        assert!(
+            !html.contains("<iframe"),
+            "should not frame anything when empty"
+        );
     }
 
     #[test]
@@ -935,12 +946,15 @@ mod tests {
         // to kill it which is bad. Use a high unlikely-alive pid instead.
         std::fs::write(
             &path,
-            serde_json::json!({"pid": 999_999_999u32, "port": port, "cwd": cwd.to_string_lossy()}).to_string(),
+            serde_json::json!({"pid": 999_999_999u32, "port": port, "cwd": cwd.to_string_lossy()})
+                .to_string(),
         )
         .unwrap();
         let lines = stop_port(port);
         assert!(
-            lines.iter().any(|l| l.contains("stale") || l.contains("stopped")),
+            lines
+                .iter()
+                .any(|l| l.contains("stale") || l.contains("stopped")),
             "unexpected: {lines:?}"
         );
         assert!(read_lock(port).is_none(), "lock should be cleared");

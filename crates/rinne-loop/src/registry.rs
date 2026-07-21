@@ -48,7 +48,10 @@ impl WorkerRegistry {
     /// Clones of all worker descriptors, for handing the conductor the worker
     /// registry (`CONTEXT.md` §7).
     pub fn descriptors(&self) -> Vec<crate::worker::WorkerDescriptor> {
-        self.workers.iter().map(|w| w.descriptor().clone()).collect()
+        self.workers
+            .iter()
+            .map(|w| w.descriptor().clone())
+            .collect()
     }
 
     /// The first registered (most-preferred) worker, if any. Used as the
@@ -75,9 +78,11 @@ impl WorkerRegistry {
     pub fn resolve(&self, needs: &[Capability], prefer: Option<&str>) -> Option<Arc<dyn Worker>> {
         if let Some(pref) = prefer {
             let want = parse_prefer(pref);
-            if let Some(w) = self.workers.iter().find(|w| {
-                w.descriptor().name == want && w.descriptor().satisfies(needs)
-            }) {
+            if let Some(w) = self
+                .workers
+                .iter()
+                .find(|w| w.descriptor().name == want && w.descriptor().satisfies(needs))
+            {
                 return Some(Arc::clone(w));
             }
         }
@@ -104,7 +109,9 @@ impl WorkerRegistry {
         prefer: Option<&str>,
         needs_tools: bool,
     ) -> Option<(Arc<dyn Worker>, bool)> {
-        self.resolve_candidates(needs, prefer, needs_tools).into_iter().next()
+        self.resolve_candidates(needs, prefer, needs_tools)
+            .into_iter()
+            .next()
     }
 
     /// All compatible workers in dispatch order, used when a worker's
@@ -132,7 +139,11 @@ impl WorkerRegistry {
                     push(worker, true);
                 }
             }
-            for worker in self.workers.iter().filter(|worker| worker.descriptor().satisfies(needs)) {
+            for worker in self
+                .workers
+                .iter()
+                .filter(|worker| worker.descriptor().satisfies(needs))
+            {
                 push(worker, true);
             }
             return candidates;
@@ -172,7 +183,10 @@ impl WorkerRegistry {
 /// `api:gpt-5.5`, or a bare `claude-code`. The family prefix is a hint; the name
 /// is what resolution matches on.
 pub fn parse_prefer(prefer: &str) -> &str {
-    prefer.split_once(':').map(|(_, name)| name).unwrap_or(prefer)
+    prefer
+        .split_once(':')
+        .map(|(_, name)| name)
+        .unwrap_or(prefer)
 }
 
 #[cfg(test)]

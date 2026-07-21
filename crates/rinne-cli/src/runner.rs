@@ -53,9 +53,11 @@ async fn build_registry_inner(
     let report = rinne_config::doctor(config, false).await?;
 
     let mut reg = WorkerRegistry::new();
-    for w in report.workers.iter().filter(|w| {
-        w.family == WorkerFamily::Harness && w.enabled && w.status.is_available()
-    }) {
+    for w in report
+        .workers
+        .iter()
+        .filter(|w| w.family == WorkerFamily::Harness && w.enabled && w.status.is_available())
+    {
         let adapter = match w.name.as_str() {
             "claude-code" => Some(claude_code::worker()),
             "codex" => Some(codex::worker()),
@@ -292,10 +294,7 @@ fn order_harnesses_for_conductor(
     let Some(want) = preferred_conductor_harness(config) else {
         return harnesses;
     };
-    if let Some(i) = harnesses
-        .iter()
-        .position(|w| w.descriptor().name == want)
-    {
+    if let Some(i) = harnesses.iter().position(|w| w.descriptor().name == want) {
         let preferred = harnesses.remove(i);
         harnesses.insert(0, preferred);
         tracing::info!(
@@ -393,7 +392,11 @@ fn stop_reason_parts(s: &rinne_core::StopReason) -> (&'static str, Option<String
         BudgetIterations => ("budget_iterations", None),
         Cancelled => ("cancelled", None),
         NoCapableWorker(n) => ("no_capable_worker", Some(n.clone())),
-        NeedsHuman { node, question, gate } => {
+        NeedsHuman {
+            node,
+            question,
+            gate,
+        } => {
             let detail = if let Some(g) = gate {
                 format!("{node} (gate {g}): {question}")
             } else {
@@ -444,7 +447,10 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
         if let Some(g) = rinne_types::Blackboard::code_graph(blackboard) {
             let known = g.symbol_names();
             let picked = rinne_loop::assembler::resolve_symbols(g, goal, &[], &known);
-            picked.iter().filter_map(|name| g.neighborhood(name)).collect()
+            picked
+                .iter()
+                .filter_map(|name| g.neighborhood(name))
+                .collect()
         } else {
             Vec::new()
         };
@@ -461,7 +467,11 @@ pub async fn plan_goal(blackboard: &Blackboard, goal: &str) -> Result<()> {
     // clock) so a leftover `.rinne/` does not trip budgets or skip nodes.
     blackboard.reset_run()?;
 
-    println!("\nplan ({} node{}):", plan.nodes.len(), if plan.nodes.len() == 1 { "" } else { "s" });
+    println!(
+        "\nplan ({} node{}):",
+        plan.nodes.len(),
+        if plan.nodes.len() == 1 { "" } else { "s" }
+    );
     for n in &plan.nodes {
         let dep = if n.depends_on.is_empty() {
             String::new()
@@ -560,10 +570,7 @@ fn apply_evaluator_pin(pin: &str, opts: &mut EngineOptions) {
         opts.evaluator_kind_override = Some(EvaluatorKind::Ai);
         return;
     }
-    if let Some(rest) = pin
-        .strip_prefix("ai:")
-        .or_else(|| pin.strip_prefix("AI:"))
-    {
+    if let Some(rest) = pin.strip_prefix("ai:").or_else(|| pin.strip_prefix("AI:")) {
         opts.evaluator_kind_override = Some(EvaluatorKind::Ai);
         // `worker` or `worker:model` (model ids rarely contain `:`; first segment
         // is the worker name, remainder is the model if present).
@@ -572,26 +579,27 @@ fn apply_evaluator_pin(pin: &str, opts: &mut EngineOptions) {
         }
         match rest.split_once(':') {
             Some((worker, model)) if !worker.is_empty() => {
-                opts.role_prefers.insert("evaluator".into(), worker.to_string());
+                opts.role_prefers
+                    .insert("evaluator".into(), worker.to_string());
                 if !model.is_empty() {
-                    opts.role_models.insert("evaluator".into(), model.to_string());
+                    opts.role_models
+                        .insert("evaluator".into(), model.to_string());
                 }
             }
             _ => {
-                opts.role_prefers.insert("evaluator".into(), rest.to_string());
+                opts.role_prefers
+                    .insert("evaluator".into(), rest.to_string());
             }
         }
         return;
     }
     // Bare worker name (config-style role pin).
-    opts.role_prefers.insert("evaluator".into(), pin.to_string());
+    opts.role_prefers
+        .insert("evaluator".into(), pin.to_string());
 }
 
 /// Apply conductor pins from a human session onto a config clone.
-pub fn conductor_config_with_session(
-    config: &Config,
-    session: &HumanSession,
-) -> ConductorConfig {
+pub fn conductor_config_with_session(config: &Config, session: &HumanSession) -> ConductorConfig {
     let mut c = config.conductor.clone();
     if !session.active {
         return c;
@@ -737,7 +745,11 @@ async fn server_spec(name: &str, s: &rinne_config::model::McpServer) -> rinne_co
         args: s.args.clone(),
         env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         url: s.url.clone(),
-        headers: s.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        headers: s
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         token_env: s.key_env.clone(),
         token,
         auth: s.auth.clone(),

@@ -4,7 +4,10 @@
 /// Returns true when `model_id` may serve as the conductor (planner).
 pub fn is_conductor_eligible(model_id: &str, user_allowlist: &[String]) -> bool {
     let m = model_id.to_lowercase();
-    if user_allowlist.iter().any(|a| a.eq_ignore_ascii_case(model_id)) {
+    if user_allowlist
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(model_id))
+    {
         return true;
     }
     if m.contains("fable") {
@@ -35,7 +38,11 @@ pub fn is_conductor_eligible(model_id: &str, user_allowlist: &[String]) -> bool 
 }
 
 /// Filter a ladder to conductor-eligible models only.
-pub fn filter_eligible_ladder(ladder: &[String], only_eligible: bool, allowlist: &[String]) -> Vec<String> {
+pub fn filter_eligible_ladder(
+    ladder: &[String],
+    only_eligible: bool,
+    allowlist: &[String],
+) -> Vec<String> {
     if !only_eligible {
         return ladder.to_vec();
     }
@@ -62,11 +69,11 @@ fn version_at_least(m: &str, family: &str, major: u32, minor: u32) -> bool {
         // Named tier without a parsed version (e.g. bare "sonnet") — conservative pass for 5+ families.
         return major <= 5;
     }
-    let parts: Vec<u32> = digits
-        .split('.')
-        .filter_map(|p| p.parse().ok())
-        .collect();
-    let (maj, min) = (parts.first().copied().unwrap_or(0), parts.get(1).copied().unwrap_or(0));
+    let parts: Vec<u32> = digits.split('.').filter_map(|p| p.parse().ok()).collect();
+    let (maj, min) = (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+    );
     maj > major || (maj == major && min >= minor)
 }
 
@@ -86,7 +93,10 @@ mod tests {
 
     #[test]
     fn allowlist_overrides() {
-        assert!(is_conductor_eligible("my-custom-planner", &["my-custom-planner".into()]));
+        assert!(is_conductor_eligible(
+            "my-custom-planner",
+            &["my-custom-planner".into()]
+        ));
     }
 
     #[test]

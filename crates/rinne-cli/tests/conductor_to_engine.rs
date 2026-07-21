@@ -61,7 +61,11 @@ async fn conductor_plan_runs_through_engine() {
         .await
         .unwrap();
     // Routing may inject a tool evaluator for T1+ goals.
-    assert!(plan.nodes.len() >= 3, "expected at least 3 nodes, got {}", plan.nodes.len());
+    assert!(
+        plan.nodes.len() >= 3,
+        "expected at least 3 nodes, got {}",
+        plan.nodes.len()
+    );
     let mut plan = plan;
     for n in &mut plan.nodes {
         if n.evaluator == Some(EvaluatorKind::Tool) {
@@ -82,9 +86,16 @@ async fn conductor_plan_runs_through_engine() {
     reg.register(Arc::new(MockWorker::success("writer", "summary")) as Arc<dyn Worker>);
 
     let mut engine = Engine::new(&bb, plan.clone(), &reg, EngineOptions::default());
-    let report = engine.run(CancellationToken::new(), None, None).await.unwrap();
+    let report = engine
+        .run(CancellationToken::new(), None, None)
+        .await
+        .unwrap();
 
-    assert!(report.completed, "generated plan should run to completion: {:?}", report.stop_reason);
+    assert!(
+        report.completed,
+        "generated plan should run to completion: {:?}",
+        report.stop_reason
+    );
     for (id, status) in &report.node_statuses {
         assert_eq!(*status, NodeStatus::Succeeded, "node {id}");
     }

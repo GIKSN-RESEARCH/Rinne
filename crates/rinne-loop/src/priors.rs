@@ -164,7 +164,11 @@ mod tests {
     #[test]
     fn ladder_preserves_given_order() {
         // The ladder is the order as given (cheap→strong) — not re-sorted.
-        let models = vec!["haiku".to_string(), "sonnet".to_string(), "opus".to_string()];
+        let models = vec![
+            "haiku".to_string(),
+            "sonnet".to_string(),
+            "opus".to_string(),
+        ];
         assert_eq!(tier_ladder(&models), models);
     }
 

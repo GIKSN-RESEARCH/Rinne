@@ -43,7 +43,10 @@ pub struct UpdateAvailable {
 /// Returns `Ok(None)` when up to date, disabled, or the check could not run —
 /// this is best-effort and must never surface an error to the caller.
 pub async fn check(current: &str) -> Option<UpdateAvailable> {
-    if std::env::var(DISABLE_ENV).map(|v| !v.is_empty()).unwrap_or(false) {
+    if std::env::var(DISABLE_ENV)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
         return None;
     }
 
@@ -147,10 +150,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
 /// Parse `major.minor.patch` into a comparable tuple, ignoring any pre-release
 /// or build suffix after the first `-` or `+`.
 fn parse(version: &str) -> Option<(u64, u64, u64)> {
-    let core = version
-        .split(['-', '+'])
-        .next()
-        .unwrap_or(version);
+    let core = version.split(['-', '+']).next().unwrap_or(version);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().unwrap_or("0").parse().ok()?;

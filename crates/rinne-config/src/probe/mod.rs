@@ -144,11 +144,7 @@ async fn detect_installation(harness: &KnownHarness) -> WorkerStatus {
 
 /// The cheap, always-fresh half: classify auth mode and footgun warnings from
 /// the live environment, combining with an already-known installation status.
-fn classify_harness(
-    harness: &KnownHarness,
-    enabled: bool,
-    status: WorkerStatus,
-) -> WorkerProbe {
+fn classify_harness(harness: &KnownHarness, enabled: bool, status: WorkerStatus) -> WorkerProbe {
     let override_active = harness
         .override_env
         .map(|env| std::env::var_os(env).is_some())

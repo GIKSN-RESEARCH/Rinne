@@ -240,10 +240,7 @@ Available models:
         // Cheap first, default (frontier) last.
         assert_eq!(
             d.ladder,
-            vec![
-                "grok-composer-2.5-fast".to_string(),
-                "grok-4.5".to_string()
-            ]
+            vec!["grok-composer-2.5-fast".to_string(), "grok-4.5".to_string()]
         );
     }
 

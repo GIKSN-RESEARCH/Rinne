@@ -56,10 +56,7 @@ fn strip_code_fence(s: &str) -> &str {
     };
     // Drop the optional language tag on the opening fence line.
     let rest = rest.split_once('\n').map(|x| x.1).unwrap_or("");
-    rest.trim_end()
-        .strip_suffix("```")
-        .unwrap_or(rest)
-        .trim()
+    rest.trim_end().strip_suffix("```").unwrap_or(rest).trim()
 }
 
 /// Extract the substring from the first `{` to its matching closing `}`,

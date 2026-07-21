@@ -130,7 +130,10 @@ pub fn has_api_key(provider: &str, key_env: &str) -> bool {
 
 /// Where a resolved key came from, for honest reporting.
 pub fn key_source(provider: &str, key_env: &str) -> Option<&'static str> {
-    if std::env::var(key_env).map(|k| !k.is_empty()).unwrap_or(false) {
+    if std::env::var(key_env)
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
+    {
         Some("env")
     } else if keychain_key(provider).is_some() {
         Some("keychain")

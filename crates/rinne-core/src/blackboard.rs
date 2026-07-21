@@ -105,7 +105,10 @@ impl Blackboard {
     /// number of files indexed. Powers `rinne graph index`. Returns `0` when the
     /// graph is disabled (`--no-graph`).
     pub fn index_repo(&self) -> usize {
-        self.indexer.as_ref().map(|idx| idx.index_all()).unwrap_or(0)
+        self.indexer
+            .as_ref()
+            .map(|idx| idx.index_all())
+            .unwrap_or(0)
     }
 
     /// Whether a blackboard already exists for a repo (i.e. there is a plan to
@@ -316,7 +319,9 @@ impl rinne_types::Blackboard for Blackboard {
         Blackboard::meta(self, key)
     }
     fn code_graph(&self) -> Option<&dyn rinne_types::graph::CodeGraph> {
-        self.graph.as_deref().map(|g| g as &dyn rinne_types::graph::CodeGraph)
+        self.graph
+            .as_deref()
+            .map(|g| g as &dyn rinne_types::graph::CodeGraph)
     }
     fn reindex_file(&self, abs: &Path) {
         Blackboard::reindex_file(self, abs)
@@ -360,7 +365,9 @@ mod graph_wiring {
         // graph disabled: must return None, never panic.
         let bb_no_graph = Blackboard::open_with(&dir, false).unwrap();
         assert!(!bb_no_graph.graph_enabled());
-        assert!((&bb_no_graph as &dyn rinne_types::Blackboard).code_graph().is_none());
+        assert!((&bb_no_graph as &dyn rinne_types::Blackboard)
+            .code_graph()
+            .is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

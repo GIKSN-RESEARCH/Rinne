@@ -98,12 +98,36 @@ mod tests {
     #[test]
     fn resolves_intra_file_calls_and_keeps_unresolved() {
         let raw_symbols = vec![
-            RawSymbol { name: "a".into(), kind: SymbolKind::Function, start_line: 1, end_line: 1, signature: None, container: None },
-            RawSymbol { name: "b".into(), kind: SymbolKind::Function, start_line: 2, end_line: 2, signature: None, container: None },
+            RawSymbol {
+                name: "a".into(),
+                kind: SymbolKind::Function,
+                start_line: 1,
+                end_line: 1,
+                signature: None,
+                container: None,
+            },
+            RawSymbol {
+                name: "b".into(),
+                kind: SymbolKind::Function,
+                start_line: 2,
+                end_line: 2,
+                signature: None,
+                container: None,
+            },
         ];
         let raw_edges = vec![
-            RawEdge { src_name: Some("a".into()), dst_name: "b".into(), kind: EdgeKind::Calls, src_container: None },
-            RawEdge { src_name: Some("a".into()), dst_name: "external".into(), kind: EdgeKind::Calls, src_container: None },
+            RawEdge {
+                src_name: Some("a".into()),
+                dst_name: "b".into(),
+                kind: EdgeKind::Calls,
+                src_container: None,
+            },
+            RawEdge {
+                src_name: Some("a".into()),
+                dst_name: "external".into(),
+                kind: EdgeKind::Calls,
+                src_container: None,
+            },
         ];
         // Fake id assignment by position: symbol 0 (a) = 10, symbol 1 (b) = 11.
         let (symbols, edges) = resolve_file("f.rs", raw_symbols, raw_edges, |i| [10, 11][i]);

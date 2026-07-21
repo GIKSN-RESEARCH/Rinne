@@ -1,11 +1,11 @@
 //! `learn` module for knowledge synthesis and code narration.
 
 pub mod logic;
+pub mod markdown;
+pub mod render;
 pub mod resolve;
 pub mod source;
 pub mod translate;
-pub mod render;
-pub mod markdown;
 
 /// A symbol within a cluster: represents a function, type, or other named entity.
 #[derive(Debug, Clone)]

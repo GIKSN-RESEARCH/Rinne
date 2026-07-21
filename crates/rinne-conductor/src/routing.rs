@@ -10,14 +10,16 @@ use crate::classifier::Classification;
 use crate::prompt::ConductorInput;
 
 /// Apply routing rules to a parsed plan. Returns validation errors (empty = ok).
-pub fn apply_routing(plan: &mut Plan, input: &ConductorInput, classification: &Classification) -> Vec<String> {
+pub fn apply_routing(
+    plan: &mut Plan,
+    input: &ConductorInput,
+    classification: &Classification,
+) -> Vec<String> {
     let mut errors = Vec::new();
     let floor = classification.goal_tier_floor;
 
     for node in &mut plan.nodes {
-        let tier = node
-            .complexity_tier
-            .unwrap_or(infer_node_tier(node, floor));
+        let tier = node.complexity_tier.unwrap_or(infer_node_tier(node, floor));
         let tier = max_tier(tier, floor);
         node.complexity_tier = Some(tier);
 
@@ -36,9 +38,13 @@ pub fn apply_routing(plan: &mut Plan, input: &ConductorInput, classification: &C
 
 fn apply_tier_rules(plan: &mut Plan, routing: &RoutingConfig) {
     for node in &mut plan.nodes {
-        let Some(tier) = node.complexity_tier else { continue };
+        let Some(tier) = node.complexity_tier else {
+            continue;
+        };
         let key = tier.label().to_string();
-        let Some(rule) = routing.tiers.get(&key) else { continue };
+        let Some(rule) = routing.tiers.get(&key) else {
+            continue;
+        };
         if rule.require_human_checkpoint
             && node.checkpoint.is_none()
             && matches!(node.role, Role::Generator | Role::Synthesizer)
@@ -99,7 +105,10 @@ fn ensure_evaluators(plan: &mut Plan, floor: ComplexityTier, workspace: Option<&
     if floor < ComplexityTier::T1 {
         return;
     }
-    let has_eval = plan.nodes.iter().any(|n| n.evaluator.is_some() || n.role == Role::Evaluator);
+    let has_eval = plan
+        .nodes
+        .iter()
+        .any(|n| n.evaluator.is_some() || n.role == Role::Evaluator);
     if has_eval || floor == ComplexityTier::T0 {
         return;
     }
@@ -163,7 +172,10 @@ fn validate_plan_routing(plan: &Plan, workers: &[WorkerDescriptor]) -> Vec<Strin
                 && node.evaluator.is_none()
                 && !matches!(node.role, Role::Evaluator)
                 && node.acceptance.is_none()
-                && !plan.nodes.iter().any(|n| n.depends_on.contains(&node.id) && n.evaluator.is_some())
+                && !plan
+                    .nodes
+                    .iter()
+                    .any(|n| n.depends_on.contains(&node.id) && n.evaluator.is_some())
             {
                 errs.push(format!(
                     "node `{}` is {} but has no evaluator dependency",
@@ -193,7 +205,11 @@ fn parse_prefer_name(prefer: &str) -> &str {
 }
 
 fn max_tier(a: ComplexityTier, b: ComplexityTier) -> ComplexityTier {
-    if a >= b { a } else { b }
+    if a >= b {
+        a
+    } else {
+        b
+    }
 }
 
 trait MinTier {
@@ -202,7 +218,11 @@ trait MinTier {
 
 impl MinTier for ComplexityTier {
     fn min_tier(self, cap: ComplexityTier) -> ComplexityTier {
-        if self <= cap { self } else { cap }
+        if self <= cap {
+            self
+        } else {
+            cap
+        }
     }
 }
 
@@ -239,11 +259,8 @@ mod tests {
 
     #[test]
     fn detect_test_command_uses_workspace_not_cwd() {
-        let ws = std::env::temp_dir().join(format!(
-            "rinne-routing-{}-{}",
-            std::process::id(),
-            "ws"
-        ));
+        let ws =
+            std::env::temp_dir().join(format!("rinne-routing-{}-{}", std::process::id(), "ws"));
         let _ = fs::remove_dir_all(&ws);
         fs::create_dir_all(&ws).unwrap();
         fs::write(ws.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
@@ -275,14 +292,15 @@ mod tests {
         let input = ConductorInput::default();
         let errs = apply_routing(&mut plan, &input, &class);
         assert!(errs.is_empty() || !errs.is_empty()); // routing may warn
-        assert_eq!(plan.nodes[0].checkpoint, Some(rinne_core::dag::Checkpoint::After));
+        assert_eq!(
+            plan.nodes[0].checkpoint,
+            Some(rinne_core::dag::Checkpoint::After)
+        );
     }
 
     #[test]
     fn t2_model_is_below_t3_on_a_three_rung_ladder() {
-        use rinne_core::worker::{
-            AuthMode, LatencyProfile, QuotaModel, Transport, WorkerFamily,
-        };
+        use rinne_core::worker::{AuthMode, LatencyProfile, QuotaModel, Transport, WorkerFamily};
 
         let desc = vec![WorkerDescriptor {
             name: "w".into(),

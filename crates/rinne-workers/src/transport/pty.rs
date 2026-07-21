@@ -21,7 +21,11 @@ const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 enum PtyMsg {
     Chunk(Vec<u8>),
-    Exit { success: bool, timed_out: bool, cancelled: bool },
+    Exit {
+        success: bool,
+        timed_out: bool,
+        cancelled: bool,
+    },
     Err(String),
 }
 
@@ -78,13 +82,7 @@ pub async fn run(
                 let chunk = String::from_utf8_lossy(&bytes);
                 for ch in chunk.chars() {
                     if ch == '\n' {
-                        flush_line(
-                            &mut line_buf,
-                            &mut captured,
-                            &mut truncated,
-                            mapper,
-                            events,
-                        );
+                        flush_line(&mut line_buf, &mut captured, &mut truncated, mapper, events);
                     } else if ch != '\r' {
                         line_buf.push(ch);
                     }
@@ -96,13 +94,7 @@ pub async fn run(
                 cancelled,
             }) => {
                 if !line_buf.is_empty() {
-                    flush_line(
-                        &mut line_buf,
-                        &mut captured,
-                        &mut truncated,
-                        mapper,
-                        events,
-                    );
+                    flush_line(&mut line_buf, &mut captured, &mut truncated, mapper, events);
                 }
                 exit_success = success;
                 if cancelled {

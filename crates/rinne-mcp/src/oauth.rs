@@ -69,7 +69,10 @@ impl Pkce {
         let verifier = random_token(32)?; // 43-char base64url, within the 43–128 range
         let digest = Sha256::digest(verifier.as_bytes());
         let challenge = URL_SAFE_NO_PAD.encode(digest);
-        Ok(Self { verifier, challenge })
+        Ok(Self {
+            verifier,
+            challenge,
+        })
     }
 }
 
@@ -161,7 +164,10 @@ pub async fn discover(server_url: &str, www_authenticate: Option<&str>) -> Resul
                 v.push(u);
             }
         }
-        v.push(format!("{}/.well-known/oauth-protected-resource", origin(server_url)));
+        v.push(format!(
+            "{}/.well-known/oauth-protected-resource",
+            origin(server_url)
+        ));
         v
     };
     let mut resource = server_url.to_string();
@@ -199,7 +205,11 @@ pub async fn discover(server_url: &str, www_authenticate: Option<&str>) -> Resul
                         } else {
                             Some(meta.scopes_supported.join(" "))
                         };
-                        return Ok(Discovered { meta, resource, scope });
+                        return Ok(Discovered {
+                            meta,
+                            resource,
+                            scope,
+                        });
                     }
                 }
             }
@@ -219,7 +229,10 @@ struct ClientRegistration {
     client_secret: Option<String>,
 }
 
-async fn register_client(registration_endpoint: &str, redirect_uri: &str) -> Result<ClientRegistration> {
+async fn register_client(
+    registration_endpoint: &str,
+    redirect_uri: &str,
+) -> Result<ClientRegistration> {
     let body = serde_json::json!({
         "client_name": "Rinne",
         "redirect_uris": [redirect_uri],
@@ -236,7 +249,10 @@ async fn register_client(registration_endpoint: &str, redirect_uri: &str) -> Res
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(err(format!("client registration HTTP {status}: {}", snippet(&text))));
+        return Err(err(format!(
+            "client registration HTTP {status}: {}",
+            snippet(&text)
+        )));
     }
     resp.json::<ClientRegistration>()
         .await
@@ -296,7 +312,10 @@ async fn token_request(token_endpoint: &str, form: &[(&str, &str)]) -> Result<To
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(err(format!("token endpoint HTTP {status}: {}", snippet(&text))));
+        return Err(err(format!(
+            "token endpoint HTTP {status}: {}",
+            snippet(&text)
+        )));
     }
     resp.json::<TokenResponse>()
         .await
@@ -387,7 +406,10 @@ async fn await_code(listener: TcpListener, expected_state: &str) -> Result<Strin
     let (status, msg) = if code.is_some() && state.as_deref() == Some(expected_state) {
         ("200 OK", "Rinne is now connected. You can close this tab.")
     } else {
-        ("400 Bad Request", "Authorization failed. Return to Rinne and try again.")
+        (
+            "400 Bad Request",
+            "Authorization failed. Return to Rinne and try again.",
+        )
     };
     let body = format!("<html><body><p>{msg}</p></body></html>");
     let response = format!(
@@ -399,7 +421,9 @@ async fn await_code(listener: TcpListener, expected_state: &str) -> Result<Strin
 
     match (code, state) {
         (Some(c), Some(s)) if s == expected_state => Ok(c),
-        _ => Err(err("authorization was denied or the callback state did not match")),
+        _ => Err(err(
+            "authorization was denied or the callback state did not match",
+        )),
     }
 }
 
@@ -475,9 +499,13 @@ async fn login_inner<F: FnOnce(&str)>(
     let (client_id, client_secret) = match preset_client_id {
         Some(id) => (id, None),
         None => {
-            let reg_endpoint = discovered.meta.registration_endpoint.clone().ok_or_else(|| {
-                err("server needs a pre-registered client — pass one with --client-id")
-            })?;
+            let reg_endpoint = discovered
+                .meta
+                .registration_endpoint
+                .clone()
+                .ok_or_else(|| {
+                    err("server needs a pre-registered client — pass one with --client-id")
+                })?;
             let reg = register_client(&reg_endpoint, &redirect_uri).await?;
             (reg.client_id, reg.client_secret)
         }
@@ -553,7 +581,9 @@ mod tests {
         let expect = URL_SAFE_NO_PAD.encode(Sha256::digest(p.verifier.as_bytes()));
         assert_eq!(p.challenge, expect);
         // No padding / URL-unsafe chars.
-        assert!(!p.challenge.contains('=') && !p.challenge.contains('+') && !p.challenge.contains('/'));
+        assert!(
+            !p.challenge.contains('=') && !p.challenge.contains('+') && !p.challenge.contains('/')
+        );
     }
 
     #[test]
@@ -606,7 +636,10 @@ mod tests {
 
     #[test]
     fn origin_strips_path() {
-        assert_eq!(origin("https://api.example.com/mcp/v1"), "https://api.example.com");
+        assert_eq!(
+            origin("https://api.example.com/mcp/v1"),
+            "https://api.example.com"
+        );
         assert_eq!(origin("http://127.0.0.1:8080/x"), "http://127.0.0.1:8080");
     }
 
@@ -639,7 +672,10 @@ mod tests {
                     s.flush().unwrap();
                 };
                 if line.contains("/.well-known/oauth-protected-resource") {
-                    json(&mut s, format!(r#"{{"resource":"{b}","authorization_servers":["{b}"]}}"#));
+                    json(
+                        &mut s,
+                        format!(r#"{{"resource":"{b}","authorization_servers":["{b}"]}}"#),
+                    );
                 } else if line.contains("/.well-known/oauth-authorization-server") {
                     json(
                         &mut s,
@@ -659,7 +695,8 @@ mod tests {
                         .filter_map(|p| p.split_once('='))
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect();
-                    let redirect = percent_decode(q.get("redirect_uri").map(|s| s.as_str()).unwrap_or(""));
+                    let redirect =
+                        percent_decode(q.get("redirect_uri").map(|s| s.as_str()).unwrap_or(""));
                     let state = q.get("state").cloned().unwrap_or_default();
                     let loc = format!("{redirect}?code=test-code&state={state}");
                     let r = format!("HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -683,7 +720,9 @@ mod tests {
             });
         };
 
-        let session = login_inner(&server_url, None, None, 1000, opener).await.unwrap();
+        let session = login_inner(&server_url, None, None, 1000, opener)
+            .await
+            .unwrap();
         let _ = mock.join();
 
         assert_eq!(session.access_token, "acc-token");

@@ -91,12 +91,9 @@ impl Conductor {
 
             match self.run_once(&system, &user, &model).await {
                 Ok(mut plan) => {
-                    if plan.nodes.len() > 12
-                        && ladder.active_index == 0
-                        && ladder.can_escalate()
-                    {
-                        if let Some((from, to, why)) =
-                            ladder.escalate(EscalationReason::HighNodeCount(plan.nodes.len() as u32))
+                    if plan.nodes.len() > 12 && ladder.active_index == 0 && ladder.can_escalate() {
+                        if let Some((from, to, why)) = ladder
+                            .escalate(EscalationReason::HighNodeCount(plan.nodes.len() as u32))
                         {
                             let msg = format!("escalating planner {from} → {to}: {why}");
                             tracing::info!("conductor: {msg}");
@@ -180,10 +177,7 @@ impl Conductor {
         }
 
         for backend in &self.backends {
-            self.narrate(format!(
-                "trying conductor backend `{}`…",
-                backend.name()
-            ));
+            self.narrate(format!("trying conductor backend `{}`…", backend.name()));
             match self.try_backend(backend.as_ref(), system, user).await {
                 Ok(plan) => {
                     self.narrate(format!("conductor `{}` produced a plan", backend.name()));
@@ -211,9 +205,8 @@ impl Conductor {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            RinneError::Conductor("all conductor backends failed".into())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| RinneError::Conductor("all conductor backends failed".into())))
     }
 
     async fn try_backend(
@@ -314,8 +307,10 @@ mod tests {
         }
         async fn complete(&self, _system: &str, user: &str) -> Result<String> {
             *self.last_user.lock().unwrap() = user.to_string();
-            Ok(r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#
-                .to_string())
+            Ok(
+                r#"{"goal":"g","nodes":[{"id":"n1","role":"generator","instruction":"do"}]}"#
+                    .to_string(),
+            )
         }
     }
 
@@ -348,8 +343,17 @@ mod tests {
         assert!(!plan.nodes.is_empty(), "routing may inject evaluators");
 
         let prompt = recorded.lock().unwrap().clone();
-        assert!(prompt.contains("github.search_issues"), "tool catalog flowed into replan");
-        assert!(prompt.contains("pdf-forms"), "skill catalog flowed into replan");
-        assert!(prompt.contains("node n1 failed"), "digest flowed into replan");
+        assert!(
+            prompt.contains("github.search_issues"),
+            "tool catalog flowed into replan"
+        );
+        assert!(
+            prompt.contains("pdf-forms"),
+            "skill catalog flowed into replan"
+        );
+        assert!(
+            prompt.contains("node n1 failed"),
+            "digest flowed into replan"
+        );
     }
 }

@@ -10,17 +10,26 @@ use rinne_core::Blackboard;
 pub async fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
     if !Blackboard::exists(&cwd) {
-        return Err(anyhow!("no run in this directory (.rinne/plan.json not found)"));
+        return Err(anyhow!(
+            "no run in this directory (.rinne/plan.json not found)"
+        ));
     }
     let bb = Blackboard::open(&cwd)?;
     let state = State::open(&bb.state_db_path())?;
 
     let rows = state.usage_rows()?;
-    println!("TRAJECTORY  ({} invocation{})\n", rows.len(), if rows.len() == 1 { "" } else { "s" });
+    println!(
+        "TRAJECTORY  ({} invocation{})\n",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
     if rows.is_empty() {
         println!("  (no recorded worker invocations yet)");
     } else {
-        println!("  {:<6} {:<16} {:>8} {:>8} {:>9}", "node", "worker", "in_tok", "out_tok", "wall_ms");
+        println!(
+            "  {:<6} {:<16} {:>8} {:>8} {:>9}",
+            "node", "worker", "in_tok", "out_tok", "wall_ms"
+        );
         for r in &rows {
             println!(
                 "  {:<6} {:<16} {:>8} {:>8} {:>9}",

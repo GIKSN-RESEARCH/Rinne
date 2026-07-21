@@ -1,7 +1,9 @@
 //! Named checkpoint gate logic (`CONDUCTOR_LOOP_PLAN.md` §4.3).
 
 use rinne_types::dag::{Node, Plan};
-use rinne_types::human::{gate_iter_key, gate_ok_key, CheckpointTrigger, NamedCheckpoint, GATE_ACTIVE_KEY};
+use rinne_types::human::{
+    gate_iter_key, gate_ok_key, CheckpointTrigger, NamedCheckpoint, GATE_ACTIVE_KEY,
+};
 use rinne_types::Blackboard;
 
 /// Whether a named gate should fire before `node_id` runs.

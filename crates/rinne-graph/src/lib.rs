@@ -105,7 +105,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("state.db");
         let graph = Graph::open(&db, &dir).unwrap();
-        graph.ensure_current("m.rs", "fn helper() {}\nfn main() { helper(); }\n", 0).unwrap();
+        graph
+            .ensure_current("m.rs", "fn helper() {}\nfn main() { helper(); }\n", 0)
+            .unwrap();
         let nb = CodeGraph::neighborhood(&graph, "helper").unwrap();
         assert_eq!(nb.definition.name, "helper");
         let _ = std::fs::remove_dir_all(&dir);

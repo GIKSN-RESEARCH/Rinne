@@ -73,9 +73,13 @@ async fn main() -> Result<()> {
         None => run_interactive(no_graph).await,
         Some(Command::Doctor { routing }) => commands::doctor::run(false, routing).await,
         Some(Command::Run { plan }) => commands::run::run(&plan, no_graph).await,
-        Some(Command::Connect { backend, key, models, base_url, add }) => {
-            commands::connect::run(&backend, key, models, base_url, add).await
-        }
+        Some(Command::Connect {
+            backend,
+            key,
+            models,
+            base_url,
+            add,
+        }) => commands::connect::run(&backend, key, models, base_url, add).await,
         Some(Command::Forget { provider }) => commands::forget::run(&provider).await,
         Some(Command::Models {
             provider,
@@ -98,7 +102,9 @@ async fn main() -> Result<()> {
                 CliGraphCmd::Index => commands::graph::GraphCmd::Index,
                 CliGraphCmd::Stats => commands::graph::GraphCmd::Stats,
                 CliGraphCmd::Symbols { file } => commands::graph::GraphCmd::Symbols { file },
-                CliGraphCmd::Neighborhood { symbol } => commands::graph::GraphCmd::Neighborhood { symbol },
+                CliGraphCmd::Neighborhood { symbol } => {
+                    commands::graph::GraphCmd::Neighborhood { symbol }
+                }
             };
             commands::graph::run(graph_cmd, cwd).await
         }
@@ -143,9 +149,6 @@ async fn run_interactive(no_graph: bool) -> Result<()> {
 async fn run_oneshot(task: &str, json: bool, no_graph: bool) -> Result<()> {
     commands::run::oneshot(task, json, no_graph).await
 }
-
-
-
 
 async fn run_status() -> Result<()> {
     commands::status::run().await

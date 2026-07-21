@@ -1,7 +1,7 @@
 //! Rendering of learned documents and narrations.
 
-use crate::learn::{LearnDoc, Narration};
 use crate::learn::markdown::render_markdown;
+use crate::learn::{LearnDoc, Narration};
 
 fn esc(s: &str) -> String {
     // Escape & FIRST to avoid double-escaping subsequent substitutions.
@@ -74,7 +74,9 @@ fn flow_mermaid(flow: &[(String, String)], seeds: &[String]) -> String {
         .iter()
         .filter(|s| {
             !is_dunder(s)
-                && clean.iter().any(|(a, b)| *a == s.as_str() || *b == s.as_str())
+                && clean
+                    .iter()
+                    .any(|(a, b)| *a == s.as_str() || *b == s.as_str())
         })
         .cloned()
         .collect();
@@ -228,14 +230,18 @@ fn fde_panel(doc: &LearnDoc) -> String {
     let mut s = String::from("<section class=\"tab-panel\" data-panel=\"fde\">\n");
     s.push_str("<p class=\"section-label\">Start here</p>\n");
     if doc.fde.entry_points.is_empty() {
-        s.push_str("<p class=\"empty\">No external entry points — this reads as internal machinery.</p>\n");
+        s.push_str(
+            "<p class=\"empty\">No external entry points — this reads as internal machinery.</p>\n",
+        );
     } else {
         s.push_str("<ul class=\"fde-entries\">\n");
         for e in &doc.fde.entry_points {
             s.push_str(&format!(
                 "<li><code>{}</code> <span class=\"file\">{}</span> \
                  <span class=\"count\">{} external caller(s)</span></li>\n",
-                esc(&e.name), esc(&e.file), e.external_callers,
+                esc(&e.name),
+                esc(&e.file),
+                e.external_callers,
             ));
         }
         s.push_str("</ul>\n");
@@ -265,13 +271,20 @@ fn logic_panel(doc: &LearnDoc, flow_html: &str) -> String {
     let mut s = String::from("<section class=\"tab-panel hidden\" data-panel=\"logic\">\n");
     s.push_str("<p class=\"section-label\">Conditions &amp; guards</p>\n");
     if doc.rule_sites.is_empty() {
-        s.push_str("<p class=\"empty\">No branch conditions extracted for the cluster's languages.</p>\n");
+        s.push_str(
+            "<p class=\"empty\">No branch conditions extracted for the cluster's languages.</p>\n",
+        );
     } else {
-        s.push_str("<table class=\"rules\">\n<tr><th>where</th><th>kind</th><th>condition</th></tr>\n");
+        s.push_str(
+            "<table class=\"rules\">\n<tr><th>where</th><th>kind</th><th>condition</th></tr>\n",
+        );
         for r in &doc.rule_sites {
             s.push_str(&format!(
                 "<tr><td class=\"file\">{}:{}</td><td>{}</td><td><code>{}</code></td></tr>\n",
-                esc(&r.file), r.line, esc(&r.kind), esc(&r.condition),
+                esc(&r.file),
+                r.line,
+                esc(&r.kind),
+                esc(&r.condition),
             ));
         }
         s.push_str("</table>\n");
@@ -331,12 +344,18 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
     html.push_str("<p class=\"section-label\">Overview</p>\n");
     html.push_str(&overview);
     html.push('\n');
-    if let Some(dec) = narration.map(|n| n.decisions.trim()).filter(|d| !d.is_empty()) {
+    if let Some(dec) = narration
+        .map(|n| n.decisions.trim())
+        .filter(|d| !d.is_empty())
+    {
         html.push_str("<p class=\"section-label\">Business Rules</p>\n");
         html.push_str(&render_markdown(dec));
         html.push('\n');
     }
-    if let Some(con) = narration.map(|n| n.concepts.trim()).filter(|c| !c.is_empty()) {
+    if let Some(con) = narration
+        .map(|n| n.concepts.trim())
+        .filter(|c| !c.is_empty())
+    {
         html.push_str("<p class=\"section-label\">Domain Concepts</p>\n");
         html.push_str(&render_markdown(con));
         html.push('\n');
@@ -347,7 +366,8 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
             html.push_str("<article class=\"doc-section\">\n");
             html.push_str(&format!(
                 "<h3>{} <span class=\"source\">({})</span></h3>\n",
-                esc(&ds.heading), esc(&ds.source),
+                esc(&ds.heading),
+                esc(&ds.source),
             ));
             html.push_str(&render_markdown(&ds.body));
             html.push_str("</article>\n");
@@ -376,7 +396,8 @@ pub fn render_html(doc: &LearnDoc, narration: Option<&Narration>) -> String {
             logic.push_str(&format!("<h3>{}</h3>\n", esc(&s.symbol)));
             logic.push_str(&format!(
                 "<p class=\"file\">{} line {}</p>\n",
-                esc(&s.file), s.line,
+                esc(&s.file),
+                s.line,
             ));
             if !s.doc.is_empty() {
                 logic.push_str(&format!("<p class=\"doc\">{}</p>\n", esc(&s.doc)));
@@ -708,11 +729,17 @@ mod tests {
     #[test]
     fn flow_becomes_sanitized_mermaid_flowchart() {
         let flow = vec![
-            ("compose_prompt".to_string(), "render_symbol_map".to_string()),
+            (
+                "compose_prompt".to_string(),
+                "render_symbol_map".to_string(),
+            ),
             ("Foo::bar".to_string(), "baz".to_string()),
         ];
         let out = flow_mermaid(&flow, &[]);
-        assert!(out.contains("<div class=\"diagram\">"), "scroll shell missing: {out}");
+        assert!(
+            out.contains("<div class=\"diagram\">"),
+            "scroll shell missing: {out}"
+        );
         assert!(out.contains("<pre class=\"mermaid\">"), "got: {out}");
         // Always top-down (same as AI journey maps).
         assert!(out.contains("flowchart TD"), "got: {out}");
@@ -743,7 +770,10 @@ mod tests {
         let out = flow_mermaid(&flow, &["hub".into()]);
         assert!(out.contains("flowchart TD"), "expected TD: {out}");
         // Stadium shape marks seeds.
-        assert!(out.contains("([\"hub\"])") || out.contains("hub"), "hub dropped: {out}");
+        assert!(
+            out.contains("([\"hub\"])") || out.contains("hub"),
+            "hub dropped: {out}"
+        );
         // At most FLOW_MAX_NODES node declarations (quoted labels).
         let node_decls = out.matches("[\"").count();
         assert!(
@@ -772,8 +802,14 @@ mod tests {
         ];
         let out = flow_mermaid(&flow, &["topic_fn".into()]);
         assert!(out.contains("topic_fn"), "seed missing: {out}");
-        assert!(out.contains("caller") || out.contains("helper") || out.contains("sink"), "seed neighborhood missing: {out}");
-        assert!(!out.contains("noise_hub"), "noise component leaked in: {out}");
+        assert!(
+            out.contains("caller") || out.contains("helper") || out.contains("sink"),
+            "seed neighborhood missing: {out}"
+        );
+        assert!(
+            !out.contains("noise_hub"),
+            "noise component leaked in: {out}"
+        );
     }
 
     #[test]
@@ -810,7 +846,10 @@ mod tests {
     fn flow_mermaid_escapes_html_in_labels() {
         let flow = vec![("Vec<T>".to_string(), "a & b".to_string())];
         let out = flow_mermaid(&flow, &[]);
-        assert!(out.contains("Vec&lt;T&gt;"), "angle brackets not escaped: {out}");
+        assert!(
+            out.contains("Vec&lt;T&gt;"),
+            "angle brackets not escaped: {out}"
+        );
         assert!(out.contains("a &amp; b"), "ampersand not escaped: {out}");
         assert!(!out.contains("Vec<T>"), "raw < leaked into label: {out}");
     }
@@ -845,7 +884,10 @@ mod tests {
         // no <img>, no <script src>/<link href> http refs.
         assert!(!html.contains("<link"), "no external stylesheet");
         assert!(!html.contains("<img"), "no external images");
-        assert!(!html.contains("src=\"http"), "no <script src>/<img src> http refs");
+        assert!(
+            !html.contains("src=\"http"),
+            "no <script src>/<img src> http refs"
+        );
         assert!(!html.contains("href=\"http"), "no <link href> http refs");
         // The sole permitted remote dependency is the mermaid runtime, loaded
         // as an ES-module import (not an src=/href= attribute).
@@ -886,12 +928,26 @@ mod tests {
         // Understanding sections render from the narration parts, inside the
         // Product (PM) panel.
         let pm_at = html.find("data-panel=\"pm\"").expect("pm panel missing");
-        let logic_at = html.find("data-panel=\"logic\"").expect("logic panel missing");
+        let logic_at = html
+            .find("data-panel=\"logic\"")
+            .expect("logic panel missing");
         let pm_region = &html[pm_at..logic_at];
-        assert!(pm_region.contains("Business Rules"), "rules section missing from pm panel");
-        assert!(pm_region.contains("degrading"), "decisions body missing from pm panel");
-        assert!(pm_region.contains("Domain Concepts"), "concepts section missing from pm panel");
-        assert!(pm_region.contains("Graceful degradation"), "concepts body missing from pm panel");
+        assert!(
+            pm_region.contains("Business Rules"),
+            "rules section missing from pm panel"
+        );
+        assert!(
+            pm_region.contains("degrading"),
+            "decisions body missing from pm panel"
+        );
+        assert!(
+            pm_region.contains("Domain Concepts"),
+            "concepts section missing from pm panel"
+        );
+        assert!(
+            pm_region.contains("Graceful degradation"),
+            "concepts body missing from pm panel"
+        );
 
         // Source is demoted into a collapsed <details>, folded into the Logic panel.
         let logic_region = &html[logic_at..];
@@ -909,8 +965,11 @@ mod tests {
         let doc = LearnDoc {
             topic: "t".into(),
             snippets: vec![Snippet {
-                symbol: "Foo".into(), file: "f.rs".into(), line: 1,
-                code: "fn foo() {}".into(), doc: String::new(),
+                symbol: "Foo".into(),
+                file: "f.rs".into(),
+                line: 1,
+                code: "fn foo() {}".into(),
+                doc: String::new(),
             }],
             flow: vec![],
             flow_seeds: vec![],
@@ -921,10 +980,18 @@ mod tests {
         let html = render_html(&doc, None);
         // The PM panel exists but carries neither AI-only section.
         let pm_at = html.find("data-panel=\"pm\"").expect("pm panel missing");
-        let logic_at = html.find("data-panel=\"logic\"").expect("logic panel missing");
+        let logic_at = html
+            .find("data-panel=\"logic\"")
+            .expect("logic panel missing");
         let pm_region = &html[pm_at..logic_at];
-        assert!(!pm_region.contains("Business Rules"), "rules leaked without AI");
-        assert!(!pm_region.contains("Domain Concepts"), "concepts leaked without AI");
+        assert!(
+            !pm_region.contains("Business Rules"),
+            "rules leaked without AI"
+        );
+        assert!(
+            !pm_region.contains("Domain Concepts"),
+            "concepts leaked without AI"
+        );
         // Source reference is still present (structural), just collapsed.
         assert!(html.contains("source-ref"), "source ref missing");
     }
@@ -935,19 +1002,37 @@ mod tests {
         let doc = LearnDoc {
             topic: "checkout".into(),
             snippets: vec![Snippet {
-                symbol: "charge".into(), file: "pay.rs".into(), line: 1,
-                code: "fn charge() {}".into(), doc: String::new(),
+                symbol: "charge".into(),
+                file: "pay.rs".into(),
+                line: 1,
+                code: "fn charge() {}".into(),
+                doc: String::new(),
             }],
             flow: vec![("route".into(), "charge".into())],
             flow_seeds: vec!["charge".into()],
             doc_sections: vec![],
             fde: FdeFacts {
-                entry_points: vec![EntryPoint { name: "charge".into(), file: "pay.rs".into(), external_callers: 3 }],
-                ranked_files: vec![FileRank { file: "pay.rs".into(), symbols: 1, inbound: 3 }],
-                blast_radius: vec![Impact { name: "charge".into(), caller_count: 3, caller_files: 2 }],
+                entry_points: vec![EntryPoint {
+                    name: "charge".into(),
+                    file: "pay.rs".into(),
+                    external_callers: 3,
+                }],
+                ranked_files: vec![FileRank {
+                    file: "pay.rs".into(),
+                    symbols: 1,
+                    inbound: 3,
+                }],
+                blast_radius: vec![Impact {
+                    name: "charge".into(),
+                    caller_count: 3,
+                    caller_files: 2,
+                }],
             },
             rule_sites: vec![RuleSite {
-                file: "pay.rs".into(), line: 4, condition: "amount > limit".into(), kind: "if".into(),
+                file: "pay.rs".into(),
+                line: 4,
+                condition: "amount > limit".into(),
+                kind: "if".into(),
             }],
         };
         let html = render_html(&doc, None);
@@ -956,12 +1041,24 @@ mod tests {
         assert!(html.contains("data-tab=\"pm\""), "PM tab missing");
         assert!(html.contains("data-tab=\"logic\""), "Logic tab missing");
         // FDE facts render deterministically (no AI).
-        assert!(html.contains("charge") && html.contains("Start here"), "entry point missing");
-        assert!(html.contains("amount &gt; limit") || html.contains("amount > limit"), "rule condition missing (escaped)");
+        assert!(
+            html.contains("charge") && html.contains("Start here"),
+            "entry point missing"
+        );
+        assert!(
+            html.contains("amount &gt; limit") || html.contains("amount > limit"),
+            "rule condition missing (escaped)"
+        );
         // Tab switch is inline JS, not an external script src.
-        assert!(html.contains("data-tab") && !html.contains("<script src=\"http"), "tabs must be inline");
+        assert!(
+            html.contains("data-tab") && !html.contains("<script src=\"http"),
+            "tabs must be inline"
+        );
         // Source-ref snippet shows file:line so an FDE can see where a symbol lives.
-        assert!(html.contains("pay.rs"), "snippet file missing from source-ref: {html}");
+        assert!(
+            html.contains("pay.rs"),
+            "snippet file missing from source-ref: {html}"
+        );
         assert!(
             html.contains("<p class=\"file\">pay.rs line 1</p>"),
             "snippet file:line not rendered: {html}"
@@ -976,39 +1073,78 @@ mod tests {
         let doc = LearnDoc {
             topic: "checkout".into(),
             snippets: vec![Snippet {
-                symbol: "charge".into(), file: "pay.rs".into(), line: 1,
-                code: "fn charge() {}".into(), doc: String::new(),
+                symbol: "charge".into(),
+                file: "pay.rs".into(),
+                line: 1,
+                code: "fn charge() {}".into(),
+                doc: String::new(),
             }],
             flow: vec![("route".into(), "charge".into())],
             flow_seeds: vec!["charge".into()],
             doc_sections: vec![],
             fde: FdeFacts {
-                entry_points: vec![EntryPoint { name: "charge".into(), file: "pay.rs".into(), external_callers: 3 }],
-                ranked_files: vec![FileRank { file: "pay.rs".into(), symbols: 1, inbound: 3 }],
-                blast_radius: vec![Impact { name: "charge".into(), caller_count: 3, caller_files: 2 }],
+                entry_points: vec![EntryPoint {
+                    name: "charge".into(),
+                    file: "pay.rs".into(),
+                    external_callers: 3,
+                }],
+                ranked_files: vec![FileRank {
+                    file: "pay.rs".into(),
+                    symbols: 1,
+                    inbound: 3,
+                }],
+                blast_radius: vec![Impact {
+                    name: "charge".into(),
+                    caller_count: 3,
+                    caller_files: 2,
+                }],
             },
             rule_sites: vec![RuleSite {
-                file: "pay.rs".into(), line: 4, condition: "amount > limit".into(), kind: "if".into(),
+                file: "pay.rs".into(),
+                line: 4,
+                condition: "amount > limit".into(),
+                kind: "if".into(),
             }],
         };
         let html = render_html(&doc, None);
         assert!(html.contains("data-panel=\"fde\""));
-        assert!(html.contains("<section class=\"tab-panel hidden\" data-panel=\"pm\">"), "pm must be hidden");
-        assert!(html.contains("<section class=\"tab-panel hidden\" data-panel=\"logic\">"), "logic must be hidden on load");
+        assert!(
+            html.contains("<section class=\"tab-panel hidden\" data-panel=\"pm\">"),
+            "pm must be hidden"
+        );
+        assert!(
+            html.contains("<section class=\"tab-panel hidden\" data-panel=\"logic\">"),
+            "logic must be hidden on load"
+        );
         // The FDE panel must NOT be hidden.
-        assert!(!html.contains("<section class=\"tab-panel hidden\" data-panel=\"fde\">"), "fde must be visible");
+        assert!(
+            !html.contains("<section class=\"tab-panel hidden\" data-panel=\"fde\">"),
+            "fde must be visible"
+        );
     }
 
     #[test]
     fn logic_tab_escapes_rule_conditions() {
         use crate::learn::logic::{FdeFacts, RuleSite};
         let doc = LearnDoc {
-            topic: "t".into(), snippets: vec![], flow: vec![], flow_seeds: vec![], doc_sections: vec![],
+            topic: "t".into(),
+            snippets: vec![],
+            flow: vec![],
+            flow_seeds: vec![],
+            doc_sections: vec![],
             fde: FdeFacts::default(),
-            rule_sites: vec![RuleSite { file: "f.rs".into(), line: 1, condition: "x < 1 && y > 2".into(), kind: "if".into() }],
+            rule_sites: vec![RuleSite {
+                file: "f.rs".into(),
+                line: 1,
+                condition: "x < 1 && y > 2".into(),
+                kind: "if".into(),
+            }],
         };
         let html = render_html(&doc, None);
-        assert!(html.contains("x &lt; 1 &amp;&amp; y &gt; 2"), "condition not escaped: {html}");
+        assert!(
+            html.contains("x &lt; 1 &amp;&amp; y &gt; 2"),
+            "condition not escaped: {html}"
+        );
         assert!(!html.contains("x < 1 &&"), "raw condition leaked");
     }
 
@@ -1043,7 +1179,10 @@ mod tests {
             rule_sites: vec![],
         };
         let html2 = render_html(&no_flow, None);
-        assert!(!html2.contains("mermaid.initialize"), "init leaked: {html2}");
+        assert!(
+            !html2.contains("mermaid.initialize"),
+            "init leaked: {html2}"
+        );
         assert!(
             !html2.contains("cdn.jsdelivr.net"),
             "cdn leaked into diagram-free doc: {html2}"
@@ -1068,8 +1207,14 @@ mod tests {
         };
         let html = render_html(&doc, None);
         // Must NOT auto-run on load.
-        assert!(html.contains("startOnLoad:false"), "startOnLoad must be false: {html}");
-        assert!(!html.contains("startOnLoad:true"), "startOnLoad:true is the bug: {html}");
+        assert!(
+            html.contains("startOnLoad:false"),
+            "startOnLoad must be false: {html}"
+        );
+        assert!(
+            !html.contains("startOnLoad:true"),
+            "startOnLoad:true is the bug: {html}"
+        );
         // Must expose the lazy renderer and call it when a tab is shown.
         assert!(
             html.contains("window.__rinneRenderMermaid"),

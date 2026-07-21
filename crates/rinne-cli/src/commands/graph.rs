@@ -33,10 +33,7 @@ pub async fn run(cmd: GraphCmd, cwd: std::path::PathBuf) -> Result<()> {
         }
         GraphCmd::Stats => {
             let concrete = bb.concrete_graph();
-            let (files, symbols, edges) = concrete
-                .as_ref()
-                .map(|g| g.stats())
-                .unwrap_or((0, 0, 0));
+            let (files, symbols, edges) = concrete.as_ref().map(|g| g.stats()).unwrap_or((0, 0, 0));
             println!("{}", format_stats(files, symbols, edges));
             if files == 0 {
                 println!(
@@ -62,9 +59,7 @@ pub async fn run(cmd: GraphCmd, cwd: std::path::PathBuf) -> Result<()> {
         GraphCmd::Neighborhood { symbol } => {
             use rinne_types::graph::CodeGraph;
             let concrete = bb.concrete_graph();
-            let nb = concrete
-                .as_ref()
-                .and_then(|g| g.neighborhood(&symbol));
+            let nb = concrete.as_ref().and_then(|g| g.neighborhood(&symbol));
             match nb {
                 None => println!("(symbol `{symbol}` not found in index)"),
                 Some(nb) => println!("{}", format_neighborhood(&nb)),
@@ -185,9 +180,21 @@ mod tests {
     fn formats_neighborhood_lines() {
         use rinne_types::graph::{Neighborhood, SymbolRef};
         let nb = Neighborhood {
-            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1, end_line: 1 },
-            callers: vec![SymbolRef { name: "main".into(), file: "m.rs".into(), line: 2, end_line: 2 }],
-            callees: vec![], imports: vec![], stale: false,
+            definition: SymbolRef {
+                name: "helper".into(),
+                file: "m.rs".into(),
+                line: 1,
+                end_line: 1,
+            },
+            callers: vec![SymbolRef {
+                name: "main".into(),
+                file: "m.rs".into(),
+                line: 2,
+                end_line: 2,
+            }],
+            callees: vec![],
+            imports: vec![],
+            stale: false,
         };
         let out = format_neighborhood(&nb);
         assert!(out.contains("helper  m.rs:1"));

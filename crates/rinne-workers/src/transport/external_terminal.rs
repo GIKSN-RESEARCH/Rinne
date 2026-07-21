@@ -78,9 +78,8 @@ pub async fn run_with_mode(
     // matching or Automation permissions fail on the first try.
     let stage_tag = format!("rinne-stage-{}-{}", std::process::id(), suffix);
     let scratch = std::env::temp_dir().join(&stage_tag);
-    std::fs::create_dir_all(&scratch).map_err(|e| {
-        RinneError::Worker(format!("external terminal scratch dir: {e}"))
-    })?;
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| RinneError::Worker(format!("external terminal scratch dir: {e}")))?;
 
     let log_path = scratch.join("harness.log");
     let exit_path = scratch.join("exit.code");
@@ -109,12 +108,8 @@ pub async fn run_with_mode(
     emit(
         events,
         WorkerEvent::Message(match mode {
-            TerminalMode::Capture => {
-                "opening single-turn harness in system Terminal…".into()
-            }
-            TerminalMode::Interactive => {
-                "opening harness product UI in system Terminal…".into()
-            }
+            TerminalMode::Capture => "opening single-turn harness in system Terminal…".into(),
+            TerminalMode::Interactive => "opening harness product UI in system Terminal…".into(),
         }),
     );
 
@@ -160,8 +155,7 @@ pub async fn run_with_mode(
                     stream_result_to_stage(events, &partial, &mut stage_lines_emitted);
                 }
             }
-            if let Some(text) = stable_result(rf, &mut last_result_size, &mut result_stable_since)
-            {
+            if let Some(text) = stable_result(rf, &mut last_result_size, &mut result_stable_since) {
                 captured = text;
                 got_result_file = true;
                 // Finish streaming any remaining lines into Stage.
@@ -204,13 +198,7 @@ pub async fn run_with_mode(
 
         if exit_path.exists() {
             if !line_buf.is_empty() {
-                flush_line(
-                    &mut line_buf,
-                    &mut captured,
-                    &mut truncated,
-                    mapper,
-                    events,
-                );
+                flush_line(&mut line_buf, &mut captured, &mut truncated, mapper, events);
             }
             if let Some(ref rf) = spec.result_file {
                 if let Ok(text) = std::fs::read_to_string(rf) {
@@ -251,13 +239,7 @@ pub async fn run_with_mode(
                         }
                     }
                     if !line_buf.is_empty() {
-                        flush_line(
-                            &mut line_buf,
-                            &mut captured,
-                            &mut truncated,
-                            mapper,
-                            events,
-                        );
+                        flush_line(&mut line_buf, &mut captured, &mut truncated, mapper, events);
                     }
                 }
             }
@@ -330,10 +312,7 @@ fn stream_result_to_stage(events: &EventSink, text: &str, emitted: &mut usize) {
         return;
     }
     if *emitted == 0 {
-        emit(
-            events,
-            WorkerEvent::Message("── harness output ──".into()),
-        );
+        emit(events, WorkerEvent::Message("── harness output ──".into()));
     }
     while *emitted < lines.len() && *emitted < MAX_STAGE_LINES {
         let line = lines[*emitted];
@@ -398,12 +377,7 @@ fn looks_like_single_turn(spec: &SubprocessSpec) -> bool {
     spec.args.iter().any(|a| {
         matches!(
             a.as_str(),
-            "-p" | "--print"
-                | "--single"
-                | "--output-format"
-                | "--prompt-file"
-                | "exec"
-                | "run"
+            "-p" | "--print" | "--single" | "--output-format" | "--prompt-file" | "exec" | "run"
         ) || a.starts_with("--output-format=")
             || a.starts_with("--prompt-file=")
     })
@@ -439,10 +413,7 @@ fn write_launcher(
     script.push_str("export TERM=\"${TERM:-xterm-256color}\"\n");
     script.push_str("export COLORTERM=\"${COLORTERM:-truecolor}\"\n");
     script.push_str("export DISABLE_AUTO_UPDATE=true\n");
-    script.push_str(&format!(
-        "export RINNE_STAGE_TAG={}\n",
-        sh_quote(stage_tag)
-    ));
+    script.push_str(&format!("export RINNE_STAGE_TAG={}\n", sh_quote(stage_tag)));
 
     for (k, v) in &spec.env {
         script.push_str(&format!("export {}={}\n", k, sh_quote(v)));
@@ -487,9 +458,7 @@ fn write_launcher(
     script.push_str("      wmctrl -c \"$TAG\" 2>/dev/null || true\n");
     script.push_str("    fi\n");
     script.push_str("    if command -v xdotool >/dev/null 2>&1; then\n");
-    script.push_str(
-        "      xdotool search --name \"$TAG\" windowclose %@ 2>/dev/null || true\n",
-    );
+    script.push_str("      xdotool search --name \"$TAG\" windowclose %@ 2>/dev/null || true\n");
     script.push_str("    fi\n");
     script.push_str("    return 0\n");
     script.push_str("  fi\n");
@@ -526,9 +495,7 @@ fn write_launcher(
     script.push_str("        try\n");
     script.push_str("          set st to tty of s\n");
     script.push_str("          set nm to name of s\n");
-    script.push_str(
-        "          if st contains \"$TTY_NAME\" or nm contains \"$TAG\" then\n",
-    );
+    script.push_str("          if st contains \"$TTY_NAME\" or nm contains \"$TAG\" then\n");
     script.push_str("            close s\n");
     script.push_str("          end if\n");
     script.push_str("        end try\n");
@@ -634,19 +601,15 @@ fn write_launcher(
                     log_q
                 ));
             } else {
-                script.push_str(&format!(
-                    "\"${{cmd[@]}}\" 2>&1 | tee -a {}\n",
-                    log_q
-                ));
+                script.push_str(&format!("\"${{cmd[@]}}\" 2>&1 | tee -a {}\n", log_q));
             }
             script.push_str("ec=${PIPESTATUS[0]}\n");
             script.push_str("exit \"$ec\"\n");
         }
     }
 
-    std::fs::write(script_path, script).map_err(|e| {
-        RinneError::Worker(format!("write terminal launcher: {e}"))
-    })?;
+    std::fs::write(script_path, script)
+        .map_err(|e| RinneError::Worker(format!("write terminal launcher: {e}")))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -654,9 +617,8 @@ fn write_launcher(
             .map_err(|e| RinneError::Worker(format!("stat launcher: {e}")))?
             .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(script_path, perms).map_err(|e| {
-            RinneError::Worker(format!("chmod launcher: {e}"))
-        })?;
+        std::fs::set_permissions(script_path, perms)
+            .map_err(|e| RinneError::Worker(format!("chmod launcher: {e}")))?;
     }
     Ok(())
 }
@@ -858,11 +820,7 @@ fn run_detached(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_file(
-    path: &Path,
-    cancel: &CancellationToken,
-    deadline: Instant,
-) -> Result<()> {
+async fn wait_for_file(path: &Path, cancel: &CancellationToken, deadline: Instant) -> Result<()> {
     loop {
         if cancel.is_cancelled() {
             return Err(RinneError::Worker(
@@ -1106,10 +1064,7 @@ end tell
             ));
         }
         checks.push_str(r#"return "no""#);
-        let output = StdCommand::new("osascript")
-            .arg("-e")
-            .arg(&checks)
-            .output();
+        let output = StdCommand::new("osascript").arg("-e").arg(&checks).output();
         if let Ok(out) = output {
             let s = String::from_utf8_lossy(&out.stdout);
             return s.contains("yes");
@@ -1312,7 +1267,10 @@ mod tests {
         assert!(body.contains("reset_tty"), "must reset mouse tracking");
         assert!(body.contains("1000l"), "must disable mouse mode 1000");
         assert!(body.contains("close_window"), "must close Terminal on exit");
-        assert!(body.contains("set_stage_title"), "must title window for close-by-name");
+        assert!(
+            body.contains("set_stage_title"),
+            "must title window for close-by-name"
+        );
         assert!(body.contains("rinne-stage-test-tag"));
         assert!(body.contains("trap on_exit EXIT"));
         assert!(!body.contains("script -q"), "must not use script(1)");

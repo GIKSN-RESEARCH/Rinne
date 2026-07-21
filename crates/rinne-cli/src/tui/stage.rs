@@ -42,7 +42,6 @@ impl StageStatus {
             StageStatus::Cancelled => "cancel",
         }
     }
-
 }
 
 impl StageSession {

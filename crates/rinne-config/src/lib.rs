@@ -22,9 +22,7 @@ pub use limits::{
     DEFAULT_ALERT_THRESHOLDS,
 };
 pub use load::{load, load_cwd};
-pub use model::{
-    Config, HarnessApprovals, HarnessStageConfig, HarnessStageMode, LimitsConfig,
-};
+pub use model::{Config, HarnessApprovals, HarnessStageConfig, HarnessStageMode, LimitsConfig};
 pub use probe::{AuthMode, DoctorReport, WorkerFamily, WorkerProbe, WorkerStatus};
 
 use rinne_core::Result;

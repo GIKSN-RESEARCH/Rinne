@@ -308,9 +308,7 @@ impl Worker for HarnessAdapter {
                 .map(|v| v.to_ascii_lowercase())
                 .unwrap_or_default();
             let force_plain = matches!(interactive_env.as_str(), "0" | "false" | "no" | "off");
-            let want_interactive_tui = visible
-                && !force_plain
-                && self.interactive_args.is_some();
+            let want_interactive_tui = visible && !force_plain && self.interactive_args.is_some();
 
             let builder = if want_interactive_tui {
                 self.interactive_args.unwrap_or(default_interactive_args)
@@ -462,14 +460,8 @@ impl Worker for HarnessAdapter {
                 };
                 // Real Terminal window. Prefer system Terminal; on failure try
                 // embedded PTY, then in-process headless as last resort.
-                match external_terminal::run_with_mode(
-                    spec.clone(),
-                    &events,
-                    &cancel,
-                    mapper,
-                    mode,
-                )
-                .await
+                match external_terminal::run_with_mode(spec.clone(), &events, &cancel, mapper, mode)
+                    .await
                 {
                     Ok(out) => Ok(out),
                     Err(e) => {
@@ -526,37 +518,42 @@ impl Worker for HarnessAdapter {
                     let timed_out = matches!(out.status, ExecStatus::TimedOut);
                     // Never re-open another Terminal window on timeout — that is
                     // what produced the double grok/claude Stage spam.
-                    if timed_out
-                        && !visible
-                        && attempt < MAX_ATTEMPTS
-                        && !cancel.is_cancelled()
-                    {
-                        emit(&events, WorkerEvent::Message(format!(
-                            "{} timed out — retrying ({attempt}/{MAX_ATTEMPTS})",
-                            self.program
-                        )));
+                    if timed_out && !visible && attempt < MAX_ATTEMPTS && !cancel.is_cancelled() {
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "{} timed out — retrying ({attempt}/{MAX_ATTEMPTS})",
+                                self.program
+                            )),
+                        );
                         continue;
                     }
                     // Rich invocation failed with nothing usable on stdout, and a
                     // lean plain invocation is available → fall back to it once.
-                    let empty_fail = !matches!(out.status, ExecStatus::Success)
-                        && out.stdout.trim().is_empty();
+                    let empty_fail =
+                        !matches!(out.status, ExecStatus::Success) && out.stdout.trim().is_empty();
                     if empty_fail && !lean && has_lean && !cancel.is_cancelled() {
                         lean = true;
-                        emit(&events, WorkerEvent::Message(format!(
-                            "{} failed in streaming mode — retrying in plain mode",
-                            self.program
-                        )));
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "{} failed in streaming mode — retrying in plain mode",
+                                self.program
+                            )),
+                        );
                         continue;
                     }
                     break out;
                 }
                 Err(e) => {
                     if attempt < MAX_ATTEMPTS && !cancel.is_cancelled() {
-                        emit(&events, WorkerEvent::Message(format!(
-                            "{} failed to start ({e}) — retrying ({attempt}/{MAX_ATTEMPTS})",
-                            self.program
-                        )));
+                        emit(
+                            &events,
+                            WorkerEvent::Message(format!(
+                                "{} failed to start ({e}) — retrying ({attempt}/{MAX_ATTEMPTS})",
+                                self.program
+                            )),
+                        );
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         continue;
                     }
@@ -642,7 +639,11 @@ impl HarnessAdapter {
             .join("mcp");
         match provisioner(&request.mcp_servers, &scratch) {
             Ok(p) => {
-                let names: Vec<&str> = request.mcp_servers.iter().map(|s| s.name.as_str()).collect();
+                let names: Vec<&str> = request
+                    .mcp_servers
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect();
                 emit(
                     events,
                     WorkerEvent::Message(format!("provisioned MCP: {}", names.join(", "))),
@@ -652,7 +653,9 @@ impl HarnessAdapter {
             Err(e) => {
                 emit(
                     events,
-                    WorkerEvent::Message(format!("MCP provisioning failed ({e}) — running without tools")),
+                    WorkerEvent::Message(format!(
+                        "MCP provisioning failed ({e}) — running without tools"
+                    )),
                 );
                 empty
             }
@@ -726,7 +729,7 @@ pub fn compose_prompt(request: &ExecuteRequest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rinne_core::worker::{ContextPacket, Constraints};
+    use rinne_core::worker::{Constraints, ContextPacket};
     use std::path::PathBuf;
 
     fn req(skill_text: &str) -> ExecuteRequest {
@@ -748,8 +751,18 @@ mod tests {
     fn symbol_map_is_rendered_into_harness_prompt() {
         use rinne_types::graph::{Neighborhood, SymbolRef};
         let nb = Neighborhood {
-            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1, end_line: 1 },
-            callers: vec![SymbolRef { name: "main".into(), file: "main.rs".into(), line: 5, end_line: 5 }],
+            definition: SymbolRef {
+                name: "helper".into(),
+                file: "m.rs".into(),
+                line: 1,
+                end_line: 1,
+            },
+            callers: vec![SymbolRef {
+                name: "main".into(),
+                file: "main.rs".into(),
+                line: 5,
+                end_line: 5,
+            }],
             callees: vec![],
             imports: vec![],
             stale: false,
@@ -757,7 +770,10 @@ mod tests {
         let mut r = req("");
         r.context.symbol_map = vec![nb];
         let prompt = compose_prompt(&r);
-        assert!(prompt.contains("## Relevant code structure"), "section header missing");
+        assert!(
+            prompt.contains("## Relevant code structure"),
+            "section header missing"
+        );
         assert!(prompt.contains("helper"), "definition name missing");
         assert!(prompt.contains("m.rs:1"), "definition file:line missing");
         assert!(prompt.contains("main"), "caller name missing");
@@ -841,7 +857,10 @@ mod tests {
     fn no_provisioner_yields_empty_provision_and_narrates() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let p = harness(None).provision(&tool_request(), &tx);
-        assert!(p.args.is_empty(), "no flags when the harness can't provision");
+        assert!(
+            p.args.is_empty(),
+            "no flags when the harness can't provision"
+        );
         assert!(p.env.is_empty());
         // The gap is surfaced, not silent.
         let mut narrated = false;

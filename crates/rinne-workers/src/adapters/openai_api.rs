@@ -55,7 +55,10 @@ impl OpenAiWorker {
         capabilities: Vec<Capability>,
         extra_body: Option<serde_json::Value>,
     ) -> Self {
-        let default_model = models.first().cloned().unwrap_or_else(|| "gpt-4o-mini".to_string());
+        let default_model = models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "gpt-4o-mini".to_string());
         Self {
             extra_body,
             tool_executor: None,
@@ -70,7 +73,11 @@ impl OpenAiWorker {
                 models,
             },
             base_url: base_url.to_string(),
-            keys: if keys.is_empty() { vec![String::new()] } else { keys },
+            keys: if keys.is_empty() {
+                vec![String::new()]
+            } else {
+                keys
+            },
             default_model,
             system_prompt: "You are a focused worker inside an orchestration system. \
                 Follow the instruction precisely and return only the requested result."
@@ -89,7 +96,10 @@ impl OpenAiWorker {
 /// Whether an error looks like a rate-limit/quota condition worth rotating keys.
 fn is_rate_limited(err: &rinne_core::RinneError) -> bool {
     let s = err.to_string().to_lowercase();
-    s.contains("429") || s.contains("rate limit") || s.contains("quota") || s.contains("too many requests")
+    s.contains("429")
+        || s.contains("rate limit")
+        || s.contains("quota")
+        || s.contains("too many requests")
 }
 
 #[async_trait]
@@ -171,9 +181,11 @@ impl Worker for OpenAiWorker {
         }
         let resp = match resp {
             Some(r) => r,
-            None => return Err(last_err.unwrap_or_else(|| {
-                rinne_core::RinneError::Worker("no API key available".into())
-            })),
+            None => {
+                return Err(last_err.unwrap_or_else(|| {
+                    rinne_core::RinneError::Worker("no API key available".into())
+                }))
+            }
         };
 
         let status = if cancel.is_cancelled() {
@@ -232,7 +244,9 @@ impl OpenAiWorker {
                 temperature: None,
                 extra: self.extra_body.clone(),
             };
-            let turn = self.chat_tools_rotating(&chat, &request.tools, events).await?;
+            let turn = self
+                .chat_tools_rotating(&chat, &request.tools, events)
+                .await?;
             usage.prompt_tokens += turn.usage.prompt_tokens;
             usage.completion_tokens += turn.usage.completion_tokens;
 
@@ -267,7 +281,10 @@ impl OpenAiWorker {
                 let trimmed = call.function.arguments.trim();
                 let result = if trimmed.is_empty() {
                     executor
-                        .call(&call.function.name, serde_json::Value::Object(Default::default()))
+                        .call(
+                            &call.function.name,
+                            serde_json::Value::Object(Default::default()),
+                        )
                         .await
                         .unwrap_or_else(|e| format!("tool error: {e}"))
                 } else {
@@ -401,7 +418,7 @@ fn compose_message(request: &ExecuteRequest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rinne_core::worker::{ContextPacket, Constraints, Role};
+    use rinne_core::worker::{Constraints, ContextPacket, Role};
     use std::path::PathBuf;
 
     fn req(instruction: &str) -> ExecuteRequest {
@@ -420,8 +437,18 @@ mod tests {
     fn symbol_map_is_rendered_into_api_message() {
         use rinne_types::graph::{Neighborhood, SymbolRef};
         let nb = Neighborhood {
-            definition: SymbolRef { name: "helper".into(), file: "m.rs".into(), line: 1, end_line: 1 },
-            callers: vec![SymbolRef { name: "main".into(), file: "main.rs".into(), line: 5, end_line: 5 }],
+            definition: SymbolRef {
+                name: "helper".into(),
+                file: "m.rs".into(),
+                line: 1,
+                end_line: 1,
+            },
+            callers: vec![SymbolRef {
+                name: "main".into(),
+                file: "main.rs".into(),
+                line: 5,
+                end_line: 5,
+            }],
             callees: vec![],
             imports: vec![],
             stale: false,
@@ -429,7 +456,10 @@ mod tests {
         let mut r = req("do the task");
         r.context.symbol_map = vec![nb];
         let msg = compose_message(&r);
-        assert!(msg.contains("## Relevant code structure"), "section header missing");
+        assert!(
+            msg.contains("## Relevant code structure"),
+            "section header missing"
+        );
         assert!(msg.contains("helper"), "definition name missing");
         assert!(msg.contains("m.rs:1"), "definition file:line missing");
         assert!(msg.contains("main"), "caller name missing");

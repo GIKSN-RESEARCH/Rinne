@@ -208,7 +208,10 @@ mod tests {
 
     #[test]
     fn capability_serializes_as_kebab_string() {
-        assert_eq!(serde_json::to_string(&Capability::CodeEdit).unwrap(), "\"code-edit\"");
+        assert_eq!(
+            serde_json::to_string(&Capability::CodeEdit).unwrap(),
+            "\"code-edit\""
+        );
         assert_eq!(
             serde_json::to_string(&Capability::Custom("database".into())).unwrap(),
             "\"database\""
@@ -237,7 +240,10 @@ mod tests {
             family: WorkerFamily::Api,
             capabilities: vec![Capability::Reasoning, Capability::Custom("database".into())],
             auth_mode: AuthMode::ApiKey,
-            quota: QuotaModel { capacity: 1.0, refill_per_minute: 1.0 },
+            quota: QuotaModel {
+                capacity: 1.0,
+                refill_per_minute: 1.0,
+            },
             latency: LatencyProfile::Medium,
             transport: Transport::Http,
             models: vec![],

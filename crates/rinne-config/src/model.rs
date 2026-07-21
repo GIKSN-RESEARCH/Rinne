@@ -569,7 +569,9 @@ impl McpServer {
     pub fn http_auth(&self) -> (String, String) {
         match self.auth.as_deref() {
             Some("apikey") => (
-                self.auth_header.clone().unwrap_or_else(|| "X-API-Key".into()),
+                self.auth_header
+                    .clone()
+                    .unwrap_or_else(|| "X-API-Key".into()),
                 String::new(),
             ),
             // "bearer" or unset → Authorization: Bearer <token>

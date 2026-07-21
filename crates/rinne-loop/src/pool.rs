@@ -143,7 +143,11 @@ pub fn eval_key_recommendation(profile: &PoolProfile) -> Option<String> {
     if !profile.recommend_eval_key {
         return None;
     }
-    let fam = profile.families.first().map(String::as_str).unwrap_or("one family");
+    let fam = profile
+        .families
+        .first()
+        .map(String::as_str)
+        .unwrap_or("one family");
     let _ = priors::CostClass::Cheap; // priors seed this recommendation
     Some(format!(
         "Single-family pool ({fam}). For blind-spot independence on the highest-leverage role, \
@@ -173,7 +177,11 @@ mod tests {
     #[test]
     fn only_claude_is_single_family_with_a_ladder() {
         // Models are declared cheap→strong; the ladder preserves that order.
-        let p = profile(&[desc("claude-code", AuthMode::Subscription, &["haiku", "sonnet", "opus"])]);
+        let p = profile(&[desc(
+            "claude-code",
+            AuthMode::Subscription,
+            &["haiku", "sonnet", "opus"],
+        )]);
         assert_eq!(p.shape, PoolShape::SingleFamily);
         assert!(p.recommend_eval_key);
         assert!(!has_cross_family(&p));
@@ -184,7 +192,11 @@ mod tests {
     fn claude_plus_grok_is_multi_vendor() {
         let p = profile(&[
             desc("claude-code", AuthMode::Subscription, &["sonnet", "opus"]),
-            desc("grok", AuthMode::Subscription, &["grok-composer-2.5-fast", "grok-build"]),
+            desc(
+                "grok",
+                AuthMode::Subscription,
+                &["grok-composer-2.5-fast", "grok-build"],
+            ),
         ]);
         assert_eq!(p.shape, PoolShape::MultiVendor);
         assert!(!p.recommend_eval_key);

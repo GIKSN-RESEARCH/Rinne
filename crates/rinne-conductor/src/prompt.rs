@@ -203,8 +203,10 @@ pub fn user_prompt(input: &ConductorInput) -> String {
     s.push('\n');
 
     if !input.mentioned.is_empty() {
-        s.push_str("\nMENTIONED FILES (their CONTENTS are inlined into the worker's context — an \
-                    API worker can use these without repo-aware):\n");
+        s.push_str(
+            "\nMENTIONED FILES (their CONTENTS are inlined into the worker's context — an \
+                    API worker can use these without repo-aware):\n",
+        );
         for m in &input.mentioned {
             s.push_str("- ");
             s.push_str(&m.display().to_string());
@@ -236,7 +238,9 @@ pub fn user_prompt(input: &ConductorInput) -> String {
         s.push_str(&format!("(note: {rec})\n"));
     }
 
-    s.push_str("\nAVAILABLE WORKERS (name · auth · family · capabilities · ladder cheap→strong):\n");
+    s.push_str(
+        "\nAVAILABLE WORKERS (name · auth · family · capabilities · ladder cheap→strong):\n",
+    );
     if profile.workers.is_empty() {
         s.push_str("- (none reported)\n");
     } else {
@@ -346,9 +350,21 @@ mod tests {
         let input = ConductorInput {
             goal: "add retry".into(),
             structure: vec![Neighborhood {
-                definition: SymbolRef { name: "HttpTransport".into(), file: "t.rs".into(), line: 10, end_line: 10 },
-                callers: vec![SymbolRef { name: "send".into(), file: "s.rs".into(), line: 3, end_line: 3 }],
-                callees: vec![], imports: vec![], stale: false,
+                definition: SymbolRef {
+                    name: "HttpTransport".into(),
+                    file: "t.rs".into(),
+                    line: 10,
+                    end_line: 10,
+                },
+                callers: vec![SymbolRef {
+                    name: "send".into(),
+                    file: "s.rs".into(),
+                    line: 3,
+                    end_line: 3,
+                }],
+                callees: vec![],
+                imports: vec![],
+                stale: false,
             }],
             ..Default::default()
         };
@@ -382,7 +398,10 @@ mod tests {
         let out = user_prompt(&with);
         assert!(out.contains("AVAILABLE TOOLS"));
         assert!(out.contains("- github.search_issues — Search issues"));
-        assert!(!out.contains("second line ignored"), "description collapsed to one line");
+        assert!(
+            !out.contains("second line ignored"),
+            "description collapsed to one line"
+        );
         assert!(out.contains("AVAILABLE SKILLS"));
         assert!(out.contains("- pdf-forms — Fill PDF forms"));
     }

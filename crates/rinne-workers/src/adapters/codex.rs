@@ -202,10 +202,7 @@ fn parse(out: &SubprocessOutput) -> ParsedHarness {
             result: plain,
             session_id: None,
             usage: Usage::default(),
-            is_error: !matches!(
-                out.status,
-                rinne_core::worker::ExecStatus::Success
-            ),
+            is_error: !matches!(out.status, rinne_core::worker::ExecStatus::Success),
         }
     }
 }

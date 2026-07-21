@@ -130,7 +130,10 @@ fn parse(out: &SubprocessOutput) -> ParsedHarness {
             .get("session_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let is_error = value.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_error = value
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let usage = value
             .get("usage")
             .map(|u| Usage {
@@ -165,7 +168,10 @@ fn line_mapper(line: &str) -> Vec<WorkerEvent> {
         Some("system") => {
             if value.get("subtype").and_then(|s| s.as_str()) == Some("init") {
                 if let Some(model) = value.get("model").and_then(|m| m.as_str()) {
-                    return vec![WorkerEvent::Message(format!("model: {}", short_model(model)))];
+                    return vec![WorkerEvent::Message(format!(
+                        "model: {}",
+                        short_model(model)
+                    ))];
                 }
             }
             return Vec::new();
@@ -193,7 +199,10 @@ fn line_mapper(line: &str) -> Vec<WorkerEvent> {
             }
             Some("tool_use") => {
                 let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                let input = block.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                let input = block
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 events.push(tool_event(name, &input));
             }
             _ => {}
@@ -204,7 +213,13 @@ fn line_mapper(line: &str) -> Vec<WorkerEvent> {
 
 /// Render a Claude tool call as a friendly, harness-style line.
 fn tool_event(name: &str, input: &serde_json::Value) -> WorkerEvent {
-    let s = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| {
+        input
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     match name {
         "Read" => WorkerEvent::Reading(short_path(&s("file_path"))),
         "Write" => WorkerEvent::Editing(format!("writing {}", short_path(&s("file_path")))),
@@ -214,7 +229,11 @@ fn tool_event(name: &str, input: &serde_json::Value) -> WorkerEvent {
         "Bash" => {
             let desc = s("description");
             let cmd = s("command");
-            WorkerEvent::ToolUse(if desc.is_empty() { truncate(&cmd, 80) } else { desc })
+            WorkerEvent::ToolUse(if desc.is_empty() {
+                truncate(&cmd, 80)
+            } else {
+                desc
+            })
         }
         "Glob" => WorkerEvent::ToolUse(format!("glob {}", s("pattern"))),
         "Grep" => WorkerEvent::ToolUse(format!("grep {}", s("pattern"))),
@@ -379,22 +398,40 @@ mod tests {
 
         // Tokens travel via the subprocess environment, never the file. The
         // var names are index-prefixed to stay unique across servers.
-        assert!(p.env.iter().any(|(k, v)| k == "RINNE_MCP_0_FS_TOKEN" && v == "secret123"));
-        assert!(p.env.iter().any(|(k, v)| k == "RINNE_MCP_1_REMOTE_TOKEN" && v == "bearer456"));
+        assert!(p
+            .env
+            .iter()
+            .any(|(k, v)| k == "RINNE_MCP_0_FS_TOKEN" && v == "secret123"));
+        assert!(p
+            .env
+            .iter()
+            .any(|(k, v)| k == "RINNE_MCP_1_REMOTE_TOKEN" && v == "bearer456"));
 
         let content = std::fs::read_to_string(p.cleanup.as_ref().unwrap()).unwrap();
-        assert!(!content.contains("secret123"), "stdio token must not be on disk");
-        assert!(!content.contains("bearer456"), "http token must not be on disk");
+        assert!(
+            !content.contains("secret123"),
+            "stdio token must not be on disk"
+        );
+        assert!(
+            !content.contains("bearer456"),
+            "http token must not be on disk"
+        );
         assert!(content.contains("${RINNE_MCP_0_FS_TOKEN}"));
         assert!(content.contains("Bearer ${RINNE_MCP_1_REMOTE_TOKEN}"));
 
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(v["mcpServers"]["fs"]["command"], "npx");
-        assert_eq!(v["mcpServers"]["fs"]["env"]["GITHUB_TOKEN"], "${RINNE_MCP_0_FS_TOKEN}");
+        assert_eq!(
+            v["mcpServers"]["fs"]["env"]["GITHUB_TOKEN"],
+            "${RINNE_MCP_0_FS_TOKEN}"
+        );
         assert_eq!(v["mcpServers"]["remote"]["type"], "http");
         assert_eq!(v["mcpServers"]["remote"]["url"], "https://x/mcp");
         // The api-key server uses its custom header (no `Bearer ` prefix).
-        assert!(!content.contains("apikey789"), "api-key token must not be on disk");
+        assert!(
+            !content.contains("apikey789"),
+            "api-key token must not be on disk"
+        );
         assert_eq!(
             v["mcpServers"]["keyed"]["headers"]["X-Custom-Key"],
             "${RINNE_MCP_2_KEYED_TOKEN}"
@@ -408,7 +445,8 @@ mod tests {
         // A regular file standing where the scratch directory's parent should be:
         // `create_dir_all` under it fails, and provisioning must return an error
         // (the adapter then runs the node without tools) rather than panic.
-        let blocker = std::env::temp_dir().join(format!("rinne-prov-blocker-{}", std::process::id()));
+        let blocker =
+            std::env::temp_dir().join(format!("rinne-prov-blocker-{}", std::process::id()));
         let _ = std::fs::remove_file(&blocker);
         std::fs::write(&blocker, b"x").unwrap();
         let scratch = blocker.join("mcp");

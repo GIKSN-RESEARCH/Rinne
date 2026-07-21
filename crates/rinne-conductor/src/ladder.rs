@@ -21,11 +21,12 @@ impl EscalationReason {
         match self {
             EscalationReason::GoalTier(t) => format!("goal tier floor is {}", t.label()),
             EscalationReason::ParseFailure => "previous plan could not be parsed as JSON".into(),
-            EscalationReason::ValidationFailure(errs) => format!(
-                "routing validation failed: {}",
-                errs.join("; ")
-            ),
-            EscalationReason::HighNodeCount(n) => format!("plan has {n} nodes — workhorse planner may over-split"),
+            EscalationReason::ValidationFailure(errs) => {
+                format!("routing validation failed: {}", errs.join("; "))
+            }
+            EscalationReason::HighNodeCount(n) => {
+                format!("plan has {n} nodes — workhorse planner may over-split")
+            }
             EscalationReason::LowConfidence => "tier classification confidence was low".into(),
         }
     }

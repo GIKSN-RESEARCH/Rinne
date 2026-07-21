@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::assembler::ContextAssembler;
-use crate::gate::{approve_gate, before_gate_for_node, gate_for_node, mark_active, write_review};
 use crate::dag::{Checkpoint, EvaluatorKind, Node, OnFail, Plan};
 use crate::evaluator::{self, AiEvaluator, HumanEvaluator, ToolEvaluator};
+use crate::gate::{approve_gate, before_gate_for_node, gate_for_node, mark_active, write_review};
 use crate::ratchet;
 use crate::registry::WorkerRegistry;
 use crate::worker::{
@@ -142,8 +142,14 @@ pub struct RunReport {
 /// Engine events for the interface / `status` to render.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
-    NodeStarted { id: String, worker: String },
-    NodeStream { id: String, event: WorkerEvent },
+    NodeStarted {
+        id: String,
+        worker: String,
+    },
+    NodeStream {
+        id: String,
+        event: WorkerEvent,
+    },
     NodeFinished {
         id: String,
         status: NodeStatus,
@@ -152,7 +158,10 @@ pub enum EngineEvent {
     },
     Narration(String),
     /// A node parked awaiting the user, with the sharp question to answer.
-    Parked { id: String, question: String },
+    Parked {
+        id: String,
+        question: String,
+    },
 }
 
 pub type EngineSink = tokio::sync::mpsc::UnboundedSender<EngineEvent>;
@@ -262,7 +271,11 @@ impl<'a> Engine<'a> {
             }
         }
 
-        let effective_minutes = self.plan.budget.minutes.or(self.options.global_budget_minutes);
+        let effective_minutes = self
+            .plan
+            .budget
+            .minutes
+            .or(self.options.global_budget_minutes);
         let effective_max_iters = self
             .plan
             .budget
@@ -281,7 +294,9 @@ impl<'a> Engine<'a> {
             // The configured cap (if any), plus an always-on absolute backstop so
             // a run with no budget configured still cannot loop forever.
             let total_iters = state.total_iterations()?;
-            if effective_max_iters.map(|max| total_iters >= max).unwrap_or(false)
+            if effective_max_iters
+                .map(|max| total_iters >= max)
+                .unwrap_or(false)
                 || total_iters >= HARD_ITERATION_CEILING
             {
                 break StopReason::BudgetIterations;
@@ -325,10 +340,14 @@ impl<'a> Engine<'a> {
             if node.checkpoint == Some(Checkpoint::Before)
                 && state.meta(&ckpt_key(&node.id))?.is_none()
             {
-                self.park(state, &sink, &node.id, "checkpoint", &node.id, &format!(
-                    "approve before running {}?",
-                    node.id
-                ))?;
+                self.park(
+                    state,
+                    &sink,
+                    &node.id,
+                    "checkpoint",
+                    &node.id,
+                    &format!("approve before running {}?", node.id),
+                )?;
                 break StopReason::NeedsHuman {
                     node: node.id.clone(),
                     question: format!("approve before running {}?", node.id),
@@ -337,10 +356,7 @@ impl<'a> Engine<'a> {
             }
 
             if let Some(gate) = before_gate_for_node(&self.options.gates, &node.id, state) {
-                if let Some(stop) = self
-                    .park_named_gate(&node, state, &sink, gate)
-                    .await?
-                {
+                if let Some(stop) = self.park_named_gate(&node, state, &sink, gate).await? {
                     break stop;
                 }
             }
@@ -350,12 +366,18 @@ impl<'a> Engine<'a> {
 
             if is_evaluator {
                 let gate = self.grade(&node, state, &sink, &cancel).await?;
-                if let Some(stop) = self.apply_gate(&node, gate, state, &mut tracker, &sink).await? {
+                if let Some(stop) = self
+                    .apply_gate(&node, gate, state, &mut tracker, &sink)
+                    .await?
+                {
                     break stop;
                 }
             } else {
                 // A normal worker node.
-                if let Some(stop) = self.run_worker_node(&node, state, &mut tracker, &sink, &cancel).await? {
+                if let Some(stop) = self
+                    .run_worker_node(&node, state, &mut tracker, &sink, &cancel)
+                    .await?
+                {
                     break stop;
                 }
             }
@@ -377,9 +399,9 @@ impl<'a> Engine<'a> {
         // prefers a worker that can actually serve them.
         let needs_tools = !node.tools.is_empty();
         let prefer = self.effective_prefer(node);
-        let candidates = self
-            .registry
-            .resolve_candidates(&node.needs, prefer.as_deref(), needs_tools);
+        let candidates =
+            self.registry
+                .resolve_candidates(&node.needs, prefer.as_deref(), needs_tools);
         let Some(_) = candidates.first() else {
             // Unsatisfiable node: never silently assign an incapable worker —
             // park for the human instead (`CONTEXT.md` §7).
@@ -400,25 +422,25 @@ impl<'a> Engine<'a> {
 
         let mut prev_family: Option<WorkerFamily> = None;
         for (attempt, (worker, tools_servable)) in candidates.into_iter().enumerate() {
-        let worker_name = worker.descriptor().name.clone();
-        let family = worker.descriptor().family;
+            let worker_name = worker.descriptor().name.clone();
+            let family = worker.descriptor().family;
 
-        // A tool node landed on a worker that can't run its tools (no
-        // tool-capable worker satisfied its needs). Surface it rather than
-        // dropping the tools silently.
-        if needs_tools && !tools_servable {
-            narrate(
-                sink,
-                format!(
+            // A tool node landed on a worker that can't run its tools (no
+            // tool-capable worker satisfied its needs). Surface it rather than
+            // dropping the tools silently.
+            if needs_tools && !tools_servable {
+                narrate(
+                    sink,
+                    format!(
                     "{} attaches tools but fallback {} can't run them — proceeding without tools \
                      (add an API worker or claude-code to serve them)",
                     node.id, worker_name
                 ),
-            );
-        }
+                );
+            }
 
-        if attempt == 0 {
-            match family {
+            if attempt == 0 {
+                match family {
                 WorkerFamily::Harness => narrate(
                     sink,
                     format!(
@@ -434,163 +456,183 @@ impl<'a> Engine<'a> {
                     ),
                 ),
             }
-        } else if let Some(error) = &last_error {
-            let lost = matches!(prev_family, Some(WorkerFamily::Harness))
-                && matches!(family, WorkerFamily::Api);
-            if lost {
-                narrate(
-                    sink,
-                    format!(
-                        "{node_id} failed on {error}; falling back to {worker_name} [api] — \
+            } else if let Some(error) = &last_error {
+                let lost = matches!(prev_family, Some(WorkerFamily::Harness))
+                    && matches!(family, WorkerFamily::Api);
+                if lost {
+                    narrate(
+                        sink,
+                        format!(
+                            "{node_id} failed on {error}; falling back to {worker_name} [api] — \
                          harness power lost (model-only path)",
-                        node_id = node.id
-                    ),
-                );
-            } else {
-                narrate(
-                    sink,
-                    format!(
-                        "{} failed on {error}; switching to {} [{}]",
-                        node.id,
-                        worker_name,
-                        family_label(family)
-                    ),
-                );
+                            node_id = node.id
+                        ),
+                    );
+                } else {
+                    narrate(
+                        sink,
+                        format!(
+                            "{} failed on {error}; switching to {} [{}]",
+                            node.id,
+                            worker_name,
+                            family_label(family)
+                        ),
+                    );
+                }
             }
-        }
-        prev_family = Some(family);
-        emit_engine(sink, EngineEvent::NodeStarted {
-            id: node.id.clone(),
-            worker: worker_name.clone(),
-        });
+            prev_family = Some(family);
+            emit_engine(
+                sink,
+                EngineEvent::NodeStarted {
+                    id: node.id.clone(),
+                    worker: worker_name.clone(),
+                },
+            );
 
-        state.set_status(&node.id, NodeStatus::Running)?;
-        state.set_worker(&node.id, &worker_name)?;
-        let iteration = state.incr_iteration(&node.id)?;
+            state.set_status(&node.id, NodeStatus::Running)?;
+            state.set_worker(&node.id, &worker_name)?;
+            let iteration = state.incr_iteration(&node.id)?;
 
-        // Reuse the same critique for every transport retry.
-        self.blackboard.append_progress(&format!(
-            "node {} → {} (iteration {iteration}){}",
-            node.id,
-            worker_name,
-            if critique.is_some() { " [with critique]" } else { "" }
-        ))?;
+            // Reuse the same critique for every transport retry.
+            self.blackboard.append_progress(&format!(
+                "node {} → {} (iteration {iteration}){}",
+                node.id,
+                worker_name,
+                if critique.is_some() {
+                    " [with critique]"
+                } else {
+                    ""
+                }
+            ))?;
 
-        // Reindex-on-read: bring the graph up-to-date for every pinned mention
-        // before building the packet so the assembler sees fresh symbol data.
-        let workspace = self.blackboard.workspace();
-        for m in &self.plan.mentioned {
-            let abs = if m.is_absolute() { m.clone() } else { workspace.join(m) };
-            self.blackboard.reindex_file(&abs);
-        }
-
-        // Also reindex files backing symbols the assembler resolves from the
-        // node instruction, so mid-run edits to instruction-referenced files are
-        // visible before the packet is built.
-        if let Some(g) = self.blackboard.code_graph() {
-            let sym_files = resolved_symbol_files(g, &node.instruction, workspace);
-            for abs in sym_files {
+            // Reindex-on-read: bring the graph up-to-date for every pinned mention
+            // before building the packet so the assembler sees fresh symbol data.
+            let workspace = self.blackboard.workspace();
+            for m in &self.plan.mentioned {
+                let abs = if m.is_absolute() {
+                    m.clone()
+                } else {
+                    workspace.join(m)
+                };
                 self.blackboard.reindex_file(&abs);
             }
-        }
 
-        let graph = self.blackboard.code_graph();
-        let assembler = ContextAssembler::new(self.blackboard, &self.plan, graph);
-        let mut packet = assembler.build(node, family, critique.clone())?;
-        packet.skill_text = self.skill_text(node);
-        if let Ok(json) = serde_json::to_string_pretty(&packet) {
-            let _ = self.blackboard.write_context(&node.id, &json);
-        }
-
-        // A cascade escalation (from a prior evaluator failure) overrides the
-        // node's assigned model. Validate against the worker that actually runs
-        // the node: a model belongs to one worker, so if the scheduler resolved
-        // a different worker than the conductor intended, drop the stale model
-        // rather than passing e.g. an NVIDIA model id to Claude.
-        let candidate = tracker
-            .escalated_models
-            .get(&node.id)
-            .cloned()
-            .or_else(|| self.resolve_model(node, &worker_name));
-        let model = self.valid_model_for(candidate, worker.descriptor(), &worker_name, sink);
-        if let Some(m) = &model {
-            narrate(sink, format!("{} on {worker_name}:{m}", node.id));
-        }
-        let request = ExecuteRequest {
-            role: node.role,
-            instruction: node.instruction.clone(),
-            context: packet,
-            workspace: self.blackboard.workspace().to_path_buf(),
-            constraints: Constraints {
-                model,
-                // Stage mode is resolved by the CLI/GUI and passed via env for
-                // now; engine sets false here and runner may overlay before
-                // dispatch when wiring config (see `RINNE_HARNESS_STAGE_VISIBLE`).
-                visible_stage: stage_visible_from_env(),
-                ..Default::default()
-            },
-            tools: self.tool_specs_for(node),
-            mcp_servers: self.mcp_servers_for(node),
-        };
-
-        let result = match self.dispatch(worker.as_ref(), &node.id, request, sink, cancel).await {
-            Ok(result) => result,
-            Err(error) => {
-                last_error = Some(format!("{worker_name}: {error}"));
-                self.blackboard.append_progress(&format!(
-                    "node {} transport failed on {} ({error})", node.id, worker_name
-                ))?;
-                narrate(sink, format!(
-                    "{} transport failed on {} ({error})", node.id, worker_name
-                ));
-                continue;
+            // Also reindex files backing symbols the assembler resolves from the
+            // node instruction, so mid-run edits to instruction-referenced files are
+            // visible before the packet is built.
+            if let Some(g) = self.blackboard.code_graph() {
+                let sym_files = resolved_symbol_files(g, &node.instruction, workspace);
+                for abs in sym_files {
+                    self.blackboard.reindex_file(&abs);
+                }
             }
-        };
-        self.blackboard.write_transcript(&node.id, &result.transcript)?;
-        self.persist_outputs(node, &result)?;
-        state.record_usage(&node.id, &worker_name, &result.usage)?;
 
-        let status = match &result.status {
-            ExecStatus::Success => NodeStatus::Succeeded,
-            ExecStatus::Cancelled => NodeStatus::Pending,
-            ExecStatus::Failed(_) | ExecStatus::TimedOut => NodeStatus::Failed,
-        };
-        state.set_status(&node.id, status)?;
-        self.blackboard.append_progress(&format!(
-            "node {} {} ({} tok, {} ms)",
-            node.id, status.label(), result.usage.total_tokens(), result.usage.wall_ms
-        ))?;
-        emit_engine(
-            sink,
-            EngineEvent::NodeFinished {
-                id: node.id.clone(),
-                status,
-                tokens: result.usage.total_tokens(),
-            },
-        );
+            let graph = self.blackboard.code_graph();
+            let assembler = ContextAssembler::new(self.blackboard, &self.plan, graph);
+            let mut packet = assembler.build(node, family, critique.clone())?;
+            packet.skill_text = self.skill_text(node);
+            if let Ok(json) = serde_json::to_string_pretty(&packet) {
+                let _ = self.blackboard.write_context(&node.id, &json);
+            }
 
-        if result.status == ExecStatus::Cancelled {
-            return Ok(Some(StopReason::Cancelled));
-        }
+            // A cascade escalation (from a prior evaluator failure) overrides the
+            // node's assigned model. Validate against the worker that actually runs
+            // the node: a model belongs to one worker, so if the scheduler resolved
+            // a different worker than the conductor intended, drop the stale model
+            // rather than passing e.g. an NVIDIA model id to Claude.
+            let candidate = tracker
+                .escalated_models
+                .get(&node.id)
+                .cloned()
+                .or_else(|| self.resolve_model(node, &worker_name));
+            let model = self.valid_model_for(candidate, worker.descriptor(), &worker_name, sink);
+            if let Some(m) = &model {
+                narrate(sink, format!("{} on {worker_name}:{m}", node.id));
+            }
+            let request = ExecuteRequest {
+                role: node.role,
+                instruction: node.instruction.clone(),
+                context: packet,
+                workspace: self.blackboard.workspace().to_path_buf(),
+                constraints: Constraints {
+                    model,
+                    // Stage mode is resolved by the CLI/GUI and passed via env for
+                    // now; engine sets false here and runner may overlay before
+                    // dispatch when wiring config (see `RINNE_HARNESS_STAGE_VISIBLE`).
+                    visible_stage: stage_visible_from_env(),
+                    ..Default::default()
+                },
+                tools: self.tool_specs_for(node),
+                mcp_servers: self.mcp_servers_for(node),
+            };
 
-        if status == NodeStatus::Succeeded
-            && node.checkpoint == Some(Checkpoint::After)
-            && state.meta(&ckpt_key(&node.id))?.is_none()
-        {
-            let question = format!("review output of {} before continuing?", node.id);
-            self.park(state, sink, &node.id, "checkpoint", &node.id, &question)?;
-            return Ok(Some(StopReason::NeedsHuman {
-                node: node.id.clone(),
-                question,
-                gate: None,
-            }));
-        }
+            let result = match self
+                .dispatch(worker.as_ref(), &node.id, request, sink, cancel)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    last_error = Some(format!("{worker_name}: {error}"));
+                    self.blackboard.append_progress(&format!(
+                        "node {} transport failed on {} ({error})",
+                        node.id, worker_name
+                    ))?;
+                    narrate(
+                        sink,
+                        format!("{} transport failed on {} ({error})", node.id, worker_name),
+                    );
+                    continue;
+                }
+            };
+            self.blackboard
+                .write_transcript(&node.id, &result.transcript)?;
+            self.persist_outputs(node, &result)?;
+            state.record_usage(&node.id, &worker_name, &result.usage)?;
 
-        if let Some(gate) = gate_for_node(&self.options.gates, &self.plan, &node.id, state) {
-            return self.park_named_gate(node, state, sink, gate).await;
-        }
+            let status = match &result.status {
+                ExecStatus::Success => NodeStatus::Succeeded,
+                ExecStatus::Cancelled => NodeStatus::Pending,
+                ExecStatus::Failed(_) | ExecStatus::TimedOut => NodeStatus::Failed,
+            };
+            state.set_status(&node.id, status)?;
+            self.blackboard.append_progress(&format!(
+                "node {} {} ({} tok, {} ms)",
+                node.id,
+                status.label(),
+                result.usage.total_tokens(),
+                result.usage.wall_ms
+            ))?;
+            emit_engine(
+                sink,
+                EngineEvent::NodeFinished {
+                    id: node.id.clone(),
+                    status,
+                    tokens: result.usage.total_tokens(),
+                },
+            );
 
-        return Ok(None);
+            if result.status == ExecStatus::Cancelled {
+                return Ok(Some(StopReason::Cancelled));
+            }
+
+            if status == NodeStatus::Succeeded
+                && node.checkpoint == Some(Checkpoint::After)
+                && state.meta(&ckpt_key(&node.id))?.is_none()
+            {
+                let question = format!("review output of {} before continuing?", node.id);
+                self.park(state, sink, &node.id, "checkpoint", &node.id, &question)?;
+                return Ok(Some(StopReason::NeedsHuman {
+                    node: node.id.clone(),
+                    question,
+                    gate: None,
+                }));
+            }
+
+            if let Some(gate) = gate_for_node(&self.options.gates, &self.plan, &node.id, state) {
+                return self.park_named_gate(node, state, sink, gate).await;
+            }
+
+            return Ok(None);
         }
 
         state.set_status(&node.id, NodeStatus::Failed)?;
@@ -599,11 +641,14 @@ impl<'a> Engine<'a> {
             node.id,
             last_error.unwrap_or_else(|| "no worker could be dispatched".into())
         ))?;
-        emit_engine(sink, EngineEvent::NodeFinished {
-            id: node.id.clone(),
-            status: NodeStatus::Failed,
-            tokens: 0,
-        });
+        emit_engine(
+            sink,
+            EngineEvent::NodeFinished {
+                id: node.id.clone(),
+                status: NodeStatus::Failed,
+                tokens: 0,
+            },
+        );
         Ok(Some(StopReason::NoCapableWorker(node.id.clone())))
     }
 
@@ -639,7 +684,11 @@ impl<'a> Engine<'a> {
             }
         }
 
-        let ctx = GradeCtx { engine: self, sink, cancel };
+        let ctx = GradeCtx {
+            engine: self,
+            sink,
+            cancel,
+        };
         let evaluator: Box<dyn Evaluator> = match kind {
             EvaluatorKind::Tool => Box::new(ToolEvaluator),
             EvaluatorKind::Ai => Box::new(AiEvaluator),
@@ -661,7 +710,9 @@ impl<'a> Engine<'a> {
     ) -> Result<Option<StopReason>> {
         // Persist the critique artifact for visibility / resume.
         let critique_name = match &policy {
-            OnFail::LoopBack { critique: Some(p), .. } => p.clone(),
+            OnFail::LoopBack {
+                critique: Some(p), ..
+            } => p.clone(),
             _ => format!("eval-{}.md", node.id),
         };
         self.blackboard.write_artifact(&critique_name, &critique)?;
@@ -673,10 +724,12 @@ impl<'a> Engine<'a> {
             OnFail::Fixer => {
                 // Route the fix to the evaluated generator (first dependency).
                 let target = node.depends_on.first().cloned();
-                self.loop_back(node, state, tracker, sink, target, critique).await
+                self.loop_back(node, state, tracker, sink, target, critique)
+                    .await
             }
             OnFail::LoopBack { node: target, .. } | OnFail::LoopWith { node: target } => {
-                self.loop_back(node, state, tracker, sink, Some(target), critique).await
+                self.loop_back(node, state, tracker, sink, Some(target), critique)
+                    .await
             }
         }
     }
@@ -744,7 +797,12 @@ impl<'a> Engine<'a> {
     /// Climb the target node's cascade ladder by one tier (or jump to the top if
     /// its starting model is unknown). No-op when there's no ladder or it's
     /// already at the frontier.
-    fn escalate_model(&self, target_id: &str, tracker: &mut LoopTracker, sink: &Option<EngineSink>) {
+    fn escalate_model(
+        &self,
+        target_id: &str,
+        tracker: &mut LoopTracker,
+        sink: &Option<EngineSink>,
+    ) {
         let Some(node) = self.plan.node(target_id) else {
             return;
         };
@@ -764,15 +822,21 @@ impl<'a> Engine<'a> {
             .get(target_id)
             .cloned()
             .or_else(|| self.resolve_model(node, &name));
-        let next = match current.as_deref().and_then(|c| ladder.iter().position(|m| m == c)) {
+        let next = match current
+            .as_deref()
+            .and_then(|c| ladder.iter().position(|m| m == c))
+        {
             Some(idx) if idx + 1 < ladder.len() => ladder[idx + 1].clone(),
-            Some(_) => return,                              // already at the top tier
+            Some(_) => return, // already at the top tier
             None => ladder.last().cloned().unwrap_or_default(), // unknown start → frontier
         };
         if next.is_empty() || Some(&next) == current.as_ref() {
             return;
         }
-        narrate(sink, format!("escalating {target_id} → {name}:{next} after evaluator failure"));
+        narrate(
+            sink,
+            format!("escalating {target_id} → {name}:{next} after evaluator failure"),
+        );
         tracker.escalated_models.insert(target_id.to_string(), next);
     }
 
@@ -805,7 +869,8 @@ impl<'a> Engine<'a> {
         for n in &self.plan.nodes {
             state.ensure_node(&n.id)?;
         }
-        self.blackboard.append_progress("DAG amended by replanner")?;
+        self.blackboard
+            .append_progress("DAG amended by replanner")?;
         Ok(None)
     }
 
@@ -830,7 +895,9 @@ impl<'a> Engine<'a> {
             return Ok(None);
         };
         let kind = state.meta(&park_kind_key(&parked))?.unwrap_or_default();
-        let target = state.meta(&park_target_key(&parked))?.unwrap_or_else(|| parked.clone());
+        let target = state
+            .meta(&park_target_key(&parked))?
+            .unwrap_or_else(|| parked.clone());
 
         match input.decision {
             HumanDecision::Approve => {
@@ -944,10 +1011,13 @@ impl<'a> Engine<'a> {
         state.set_meta(&park_target_key(node_id), target)?;
         self.blackboard
             .append_progress(&format!("⏸ parked {node_id}: {question}"))?;
-        emit_engine(sink, EngineEvent::Parked {
-            id: node_id.to_string(),
-            question: question.to_string(),
-        });
+        emit_engine(
+            sink,
+            EngineEvent::Parked {
+                id: node_id.to_string(),
+                question: question.to_string(),
+            },
+        );
         Ok(())
     }
 
@@ -1087,9 +1157,7 @@ impl<'a> Engine<'a> {
         sink: &Option<EngineSink>,
     ) -> Option<String> {
         match candidate {
-            Some(m) if descriptor.models.is_empty() || descriptor.models.contains(&m) => {
-                Some(m)
-            }
+            Some(m) if descriptor.models.is_empty() || descriptor.models.contains(&m) => Some(m),
             Some(m) => {
                 narrate(
                     sink,
@@ -1186,7 +1254,10 @@ impl<'a> Engine<'a> {
         sink: &Option<EngineSink>,
         cancel: &CancellationToken,
     ) -> Result<Option<StopReason>> {
-        narrate(sink, format!("running {} evaluators concurrently", batch.len()));
+        narrate(
+            sink,
+            format!("running {} evaluators concurrently", batch.len()),
+        );
 
         // Concurrent grade (read-only borrows of &self). Scoped so the borrows
         // end before the sequential, mutating apply phase.
@@ -1258,7 +1329,8 @@ impl<'a> Engine<'a> {
                 }))
             }
             Gate::Fail { critique, policy } => {
-                self.on_fail(node, state, tracker, sink, critique, policy).await
+                self.on_fail(node, state, tracker, sink, critique, policy)
+                    .await
             }
         }
     }
@@ -1276,7 +1348,13 @@ impl<'a> Engine<'a> {
         let id = node_id.to_string();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                emit_engine(&forward_sink, EngineEvent::NodeStream { id: id.clone(), event });
+                emit_engine(
+                    &forward_sink,
+                    EngineEvent::NodeStream {
+                        id: id.clone(),
+                        event,
+                    },
+                );
             }
         });
         let result = worker.execute(request, tx, cancel.clone()).await;
@@ -1289,7 +1367,8 @@ impl<'a> Engine<'a> {
         for name in &node.outputs {
             if name == "diff" {
                 if let Some(diff) = &result.file_diff {
-                    self.blackboard.write_artifact(&format!("{}.diff", node.id), diff)?;
+                    self.blackboard
+                        .write_artifact(&format!("{}.diff", node.id), diff)?;
                 }
             } else {
                 self.blackboard.write_artifact(name, &result.result)?;
@@ -1308,7 +1387,12 @@ impl<'a> Engine<'a> {
             .plan
             .nodes
             .iter()
-            .map(|n| (n.id.clone(), state.status(&n.id).unwrap_or(NodeStatus::Pending)))
+            .map(|n| {
+                (
+                    n.id.clone(),
+                    state.status(&n.id).unwrap_or(NodeStatus::Pending),
+                )
+            })
             .collect();
         Ok(RunReport {
             completed: stop_reason == StopReason::Completed,
@@ -1335,10 +1419,13 @@ impl EvalContext for GradeCtx<'_, '_> {
     }
 
     async fn run_tool(&self, node: &Node, command: &str, must_exit: i32) -> Result<(bool, String)> {
-        emit_engine(self.sink, EngineEvent::NodeStarted {
-            id: node.id.clone(),
-            worker: format!("tool:{command}"),
-        });
+        emit_engine(
+            self.sink,
+            EngineEvent::NodeStarted {
+                id: node.id.clone(),
+                worker: format!("tool:{command}"),
+            },
+        );
         let verdict = evaluator::run_tool(
             self.engine.blackboard.workspace(),
             command,
@@ -1346,14 +1433,17 @@ impl EvalContext for GradeCtx<'_, '_> {
             Duration::from_secs(300),
         )
         .await?;
-        emit_engine(self.sink, EngineEvent::NodeStream {
-            id: node.id.clone(),
-            event: WorkerEvent::Message(format!(
-                "{} → {}",
-                command,
-                if verdict.passed { "pass" } else { "fail" }
-            )),
-        });
+        emit_engine(
+            self.sink,
+            EngineEvent::NodeStream {
+                id: node.id.clone(),
+                event: WorkerEvent::Message(format!(
+                    "{} → {}",
+                    command,
+                    if verdict.passed { "pass" } else { "fail" }
+                )),
+            },
+        );
         Ok((verdict.passed, verdict.output))
     }
 
@@ -1380,10 +1470,13 @@ impl EvalContext for GradeCtx<'_, '_> {
                     .to_string(),
             );
         }
-        emit_engine(sink, EngineEvent::NodeStarted {
-            id: node.id.clone(),
-            worker: worker_name.clone(),
-        });
+        emit_engine(
+            sink,
+            EngineEvent::NodeStarted {
+                id: node.id.clone(),
+                worker: worker_name.clone(),
+            },
+        );
 
         let assembler = ContextAssembler::new(e.blackboard, &e.plan, None);
         let mut packet = assembler.build(node, family, None)?;
@@ -1407,9 +1500,13 @@ impl EvalContext for GradeCtx<'_, '_> {
             tools: Vec::new(),
             mcp_servers: Vec::new(),
         };
-        let result = e.dispatch(worker.as_ref(), &node.id, request, sink, self.cancel).await?;
-        e.blackboard.write_transcript(&node.id, &result.transcript)?;
-        e.blackboard.record_usage(&node.id, &worker_name, &result.usage)?;
+        let result = e
+            .dispatch(worker.as_ref(), &node.id, request, sink, self.cancel)
+            .await?;
+        e.blackboard
+            .write_transcript(&node.id, &result.transcript)?;
+        e.blackboard
+            .record_usage(&node.id, &worker_name, &result.usage)?;
         Ok(Some(result.result))
     }
 }

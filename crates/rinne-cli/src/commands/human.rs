@@ -102,9 +102,7 @@ pub fn run_lines(args: &[String], cwd: &Path) -> Vec<String> {
             save(&bb_root, &session)
         }
         ["go"] | ["approve"] => {
-            vec![
-                "use `/approve` or `rinne resume --approve` while a run is parked".into(),
-            ]
+            vec!["use `/approve` or `rinne resume --approve` while a run is parked".into()]
         }
         ["fix", text @ ..] => {
             vec![format!(

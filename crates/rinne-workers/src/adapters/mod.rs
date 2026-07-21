@@ -14,8 +14,8 @@ pub mod cursor;
 pub mod discover;
 pub mod grok;
 pub mod mcp_util;
-pub mod opencode;
 pub mod openai_api;
+pub mod opencode;
 
 pub use common::HarnessAdapter;
 pub use discover::{discover_cli_models, parse_models_listing, DiscoveredModels};

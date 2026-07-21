@@ -216,7 +216,9 @@ fn parse_value(value: &serde_json::Value, out: &SubprocessOutput) -> ParsedHarne
 }
 
 fn text_from(v: &serde_json::Value) -> Option<String> {
-    const KEYS: &[&str] = &["result", "text", "message", "content", "output", "response", "data"];
+    const KEYS: &[&str] = &[
+        "result", "text", "message", "content", "output", "response", "data",
+    ];
     for k in KEYS {
         if let Some(s) = v.get(*k).and_then(|x| x.as_str()) {
             let t = s.trim();
@@ -328,7 +330,13 @@ fn map_json(v: &serde_json::Value) -> Vec<WorkerEvent> {
 }
 
 fn tool_event(name: &str, input: &serde_json::Value) -> WorkerEvent {
-    let s = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| {
+        input
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let path = {
         let p = s("path");
         if p.is_empty() {
@@ -343,11 +351,7 @@ fn tool_event(name: &str, input: &serde_json::Value) -> WorkerEvent {
         "Edit" | "edit" => WorkerEvent::Editing(format!("editing {path}")),
         "Bash" | "bash" | "shell" => {
             let cmd = s("command");
-            WorkerEvent::ToolUse(if cmd.is_empty() {
-                name.into()
-            } else {
-                cmd
-            })
+            WorkerEvent::ToolUse(if cmd.is_empty() { name.into() } else { cmd })
         }
         other => WorkerEvent::ToolUse(other.to_string()),
     }

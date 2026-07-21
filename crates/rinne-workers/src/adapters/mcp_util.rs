@@ -81,17 +81,17 @@ pub fn write_mcp_json(
         std::process::id(),
         unique_suffix()
     ));
-    std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap_or_default())
-        .map_err(|e| RinneError::Worker(format!("could not write MCP config: {e}")))?;
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&config).unwrap_or_default(),
+    )
+    .map_err(|e| RinneError::Worker(format!("could not write MCP config: {e}")))?;
 
     Ok((path, env, allowed))
 }
 
 /// Claude Code provision path — shared implementation.
-pub fn provision_claude_style(
-    servers: &[McpServerSpec],
-    scratch: &Path,
-) -> Result<Provision> {
+pub fn provision_claude_style(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
     let (path, env, allowed) = write_mcp_json(servers, scratch, "mcp")?;
     Ok(Provision {
         args: vec![
@@ -110,15 +110,9 @@ pub fn provision_claude_style(
 /// OpenCode reads MCP from its own config; many builds also honor
 /// `OPENCODE_MCP_CONFIG` or a project `.mcp.json`. We write the file and set
 /// both a well-known env and pass nothing extra on argv (safe no-op if ignored).
-pub fn provision_opencode_style(
-    servers: &[McpServerSpec],
-    scratch: &Path,
-) -> Result<Provision> {
+pub fn provision_opencode_style(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
     let (path, mut env, _allowed) = write_mcp_json(servers, scratch, "opencode-mcp")?;
-    env.push((
-        "OPENCODE_MCP_CONFIG".into(),
-        path.display().to_string(),
-    ));
+    env.push(("OPENCODE_MCP_CONFIG".into(), path.display().to_string()));
     // Some builds look for MCP_CONFIG / CLAUDE-style path.
     env.push(("MCP_CONFIG".into(), path.display().to_string()));
     Ok(Provision {
@@ -130,10 +124,7 @@ pub fn provision_opencode_style(
 
 /// Codex: write mcp.json and set `CODEX_MCP_CONFIG` / pass through if the CLI
 /// grows a flag. Codex primarily uses `~/.codex/config.toml`; env is best-effort.
-pub fn provision_codex_style(
-    servers: &[McpServerSpec],
-    scratch: &Path,
-) -> Result<Provision> {
+pub fn provision_codex_style(servers: &[McpServerSpec], scratch: &Path) -> Result<Provision> {
     let (path, mut env, _allowed) = write_mcp_json(servers, scratch, "codex-mcp")?;
     env.push(("CODEX_MCP_CONFIG".into(), path.display().to_string()));
     env.push(("MCP_CONFIG".into(), path.display().to_string()));
@@ -188,7 +179,9 @@ mod tests {
         }];
         let (path, env, allowed) = write_mcp_json(&servers, &dir, "t").unwrap();
         assert!(allowed.iter().any(|a| a == "mcp__fs"));
-        assert!(env.iter().any(|(k, v)| k.contains("FS_TOKEN") && v == "secret123"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k.contains("FS_TOKEN") && v == "secret123"));
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.contains("secret123"));
         assert!(content.contains("${RINNE_MCP_0_FS_TOKEN}"));

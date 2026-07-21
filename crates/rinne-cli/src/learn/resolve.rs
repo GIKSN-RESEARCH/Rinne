@@ -7,10 +7,9 @@ use crate::learn::{Cluster, ClusterSymbol};
 /// Stop-words and filler that carry no code meaning, so they never become
 /// match terms for a natural-language query like "what is layer 1".
 const QUERY_STOP_WORDS: &[&str] = &[
-    "the", "a", "an", "is", "are", "was", "were", "how", "does", "do", "what",
-    "why", "when", "where", "which", "who", "of", "in", "on", "to", "for",
-    "and", "or", "with", "about", "this", "that", "it", "work", "works",
-    "explain", "tell", "me", "show", "code", "here",
+    "the", "a", "an", "is", "are", "was", "were", "how", "does", "do", "what", "why", "when",
+    "where", "which", "who", "of", "in", "on", "to", "for", "and", "or", "with", "about", "this",
+    "that", "it", "work", "works", "explain", "tell", "me", "show", "code", "here",
 ];
 
 /// Minimum length for a query term to be used as a substring match. Guards
@@ -93,7 +92,8 @@ pub fn cluster_from_seeds(
     cap: usize,
 ) -> Cluster {
     let mut symbols: Vec<ClusterSymbol> = Vec::new();
-    let mut seen: std::collections::HashSet<(String, String, u32)> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(String, String, u32)> =
+        std::collections::HashSet::new();
 
     // Add seeds first, then expansion — order matters for deterministic cap truncation.
     for seed in seed_names {
@@ -159,12 +159,26 @@ mod tests {
     impl CodeGraph for G {
         fn neighborhood(&self, s: &str) -> Option<Neighborhood> {
             (s == "HarnessAdapter").then(|| Neighborhood {
-                definition: SymbolRef { name: "HarnessAdapter".into(), file: "adapters/common.rs".into(), line: 10, end_line: 10 },
-                callers: vec![SymbolRef { name: "run_node".into(), file: "engine.rs".into(), line: 5, end_line: 5 }],
-                callees: vec![], imports: vec![], stale: false,
+                definition: SymbolRef {
+                    name: "HarnessAdapter".into(),
+                    file: "adapters/common.rs".into(),
+                    line: 10,
+                    end_line: 10,
+                },
+                callers: vec![SymbolRef {
+                    name: "run_node".into(),
+                    file: "engine.rs".into(),
+                    line: 5,
+                    end_line: 5,
+                }],
+                callees: vec![],
+                imports: vec![],
+                stale: false,
             })
         }
-        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> { None }
+        fn resolve_in_file(&self, _: &str, _: &str) -> Option<SymbolRef> {
+            None
+        }
         fn symbol_names(&self) -> Vec<String> {
             vec!["HarnessAdapter".into(), "unrelated_thing".into()]
         }
@@ -174,7 +188,10 @@ mod tests {
     fn resolves_topic_by_name_and_expands_one_hop() {
         let c = resolve_cluster(&G, "harness", 40);
         assert!(c.symbols.iter().any(|s| s.name == "HarnessAdapter"));
-        assert!(c.symbols.iter().any(|s| s.name == "run_node"), "one-hop caller included");
+        assert!(
+            c.symbols.iter().any(|s| s.name == "run_node"),
+            "one-hop caller included"
+        );
         assert!(!c.symbols.iter().any(|s| s.name == "unrelated_thing"));
     }
 
@@ -248,8 +265,14 @@ mod tests {
     fn cluster_from_seeds_expands_one_hop() {
         // Explicit seed (as the AI fallback would supply) → def + one-hop caller.
         let c = cluster_from_seeds(&G, "layer 1", &["HarnessAdapter".to_string()], 40);
-        assert!(c.symbols.iter().any(|s| s.name == "HarnessAdapter"), "seed included");
-        assert!(c.symbols.iter().any(|s| s.name == "run_node"), "one-hop caller included");
+        assert!(
+            c.symbols.iter().any(|s| s.name == "HarnessAdapter"),
+            "seed included"
+        );
+        assert!(
+            c.symbols.iter().any(|s| s.name == "run_node"),
+            "one-hop caller included"
+        );
         assert_eq!(c.topic, "layer 1", "topic preserved verbatim");
     }
 

@@ -39,9 +39,10 @@ pub fn extract_branches(lang: &str, source: &str) -> Vec<Branch> {
     while let Some(node) = stack.pop() {
         // Condition-bearing node kinds across rust / python / ts-js.
         let kind = match node.kind() {
-            "if_expression" | "match_expression" | "while_expression"
-            | "if_statement" | "while_statement" | "match_statement"
-            | "switch_statement" | "ternary_expression" => Some(node.kind()),
+            "if_expression" | "match_expression" | "while_expression" | "if_statement"
+            | "while_statement" | "match_statement" | "switch_statement" | "ternary_expression" => {
+                Some(node.kind())
+            }
             _ => None,
         };
         if let Some(k) = kind {
@@ -74,7 +75,13 @@ pub fn extract_branches(lang: &str, source: &str) -> Vec<Branch> {
         if node.kind() == "try_expression" {
             out.push(Branch {
                 line: node.start_position().row as u32 + 1,
-                condition: node.utf8_text(bytes).unwrap_or("?").trim().chars().take(60).collect(),
+                condition: node
+                    .utf8_text(bytes)
+                    .unwrap_or("?")
+                    .trim()
+                    .chars()
+                    .take(60)
+                    .collect(),
                 kind: BranchKind::ErrorPath,
             });
         }
@@ -84,7 +91,11 @@ pub fn extract_branches(lang: &str, source: &str) -> Vec<Branch> {
         }
     }
     // Stable order by line; dedup identical (line, condition).
-    out.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.condition.cmp(&b.condition)));
+    out.sort_by(|a, b| {
+        a.line
+            .cmp(&b.line)
+            .then_with(|| a.condition.cmp(&b.condition))
+    });
     out.dedup_by(|a, b| a.line == b.line && a.condition == b.condition);
     out
 }
@@ -110,7 +121,9 @@ mod tests {
         let src = "def f(x):\n    if x > 10:\n        return True\n";
         let branches = extract_branches("python", src);
         assert!(
-            branches.iter().any(|b| b.kind == BranchKind::If && b.condition.contains("x > 10")),
+            branches
+                .iter()
+                .any(|b| b.kind == BranchKind::If && b.condition.contains("x > 10")),
             "python if captured: {branches:?}"
         );
     }

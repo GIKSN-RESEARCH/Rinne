@@ -40,6 +40,9 @@ async fn stdio_initialize_list_and_call() {
     assert_eq!(tools[0].name, "query");
     assert_eq!(tools[1].name, "schema");
 
-    let result = client.call_tool("query", serde_json::json!({"sql": "SELECT 1"})).await.unwrap();
+    let result = client
+        .call_tool("query", serde_json::json!({"sql": "SELECT 1"}))
+        .await
+        .unwrap();
     assert!(result.get("content").is_some());
 }

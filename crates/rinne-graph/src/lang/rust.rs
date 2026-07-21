@@ -10,8 +10,8 @@ pub struct Rust {
 impl Rust {
     pub fn new() -> Self {
         let language: Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&language, include_str!("../queries/rust.scm"))
-            .expect("valid rust query");
+        let query =
+            Query::new(&language, include_str!("../queries/rust.scm")).expect("valid rust query");
         Self { query }
     }
 }

@@ -87,7 +87,12 @@ pub async fn continue_session() -> Result<()> {
 
 /// Resume the plan already in the blackboard, optionally applying a human
 /// decision to a parked node (`CONTEXT.md` §11).
-pub async fn resume(steer: Option<String>, approve: bool, reject: bool, no_graph: bool) -> Result<()> {
+pub async fn resume(
+    steer: Option<String>,
+    approve: bool,
+    reject: bool,
+    no_graph: bool,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
     if !Blackboard::exists(&cwd) {
         return Err(no_session_err());
