@@ -91,6 +91,34 @@ fn missing_files_are_skipped_not_errors() {
     assert_eq!(cfg.conductor.backend, ConductorBackend::Cloudflare);
 }
 
+/// Every `RINNE_*` var the CLI exports for child harness processes must be in
+/// the ignore list. Figment splits on `_`, so `RINNE_HARNESS_APPROVALS` becomes
+/// `harness.approvals` — an unknown field under `deny_unknown_fields` — and
+/// every config load *inside a Stage session* fails. That breaks `doctor`,
+/// `connect`, and any test run the harness launches, which then gets blamed on
+/// whatever the harness was doing.
+#[test]
+fn stage_plumbing_env_vars_do_not_break_load() {
+    const STAGE_VARS: &[(&str, &str)] = &[
+        ("RINNE_HARNESS_STAGE_VISIBLE", "1"),
+        ("RINNE_HARNESS_STAGE_MODE", "hybrid"),
+        ("RINNE_HARNESS_STAGE_MAX", "3"),
+        ("RINNE_HARNESS_APPROVALS", "auto"),
+        ("RINNE_STAGE_TAG", "rinne-stage-1-2"),
+    ];
+    for (k, v) in STAGE_VARS {
+        std::env::set_var(k, v);
+    }
+    let result = std::panic::catch_unwind(|| load_layered(None, None, true));
+    for (k, _) in STAGE_VARS {
+        std::env::remove_var(k);
+    }
+    let cfg = result
+        .expect("load must not panic")
+        .expect("load must succeed while a Stage session is running");
+    assert_eq!(cfg.conductor.backend, ConductorBackend::Cloudflare);
+}
+
 /// Protocol flags use the RINNE_ prefix but must not enter the Config schema.
 /// Regression: macOS app always sets RINNE_STREAM_JSON=1; without an ignore
 /// list, figment maps it to unknown field `stream` and every command fails.

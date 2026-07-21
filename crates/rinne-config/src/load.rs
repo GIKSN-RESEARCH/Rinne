@@ -37,6 +37,10 @@ const NON_CONFIG_ENV_SUFFIXES: &[&str] = &[
     "HARNESS_STAGE_VISIBLE",
     "HARNESS_STAGE_MODE",
     "HARNESS_STAGE_MAX",
+    // `[harness_stage].approvals`, exported as `RINNE_HARNESS_APPROVALS` by
+    // `runner.rs` and read back by the adapters — `harness.approvals` is not a
+    // Config field, so it must be ignored like the rest of the Stage plumbing.
+    "HARNESS_APPROVALS",
     "STAGE_TAG",
 ];
 

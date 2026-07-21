@@ -112,10 +112,19 @@ fn ensure_evaluators(plan: &mut Plan, floor: ComplexityTier, workspace: Option<&
     if has_eval || floor == ComplexityTier::T0 {
         return;
     }
+    // Only code work can be verified by a test command. A node that does not
+    // ask for `CodeEdit` cannot change whether the suite passes, so attaching
+    // one asserts something it has no control over — and on a repo with any
+    // pre-existing failure it can never pass, looping the generator back to
+    // "fix the tests" when the task was to explain, summarise or research.
     let gen = plan
         .nodes
         .iter()
-        .find(|n| matches!(n.role, Role::Generator) && n.evaluator.is_none())
+        .find(|n| {
+            matches!(n.role, Role::Generator)
+                && n.evaluator.is_none()
+                && n.needs.contains(&Capability::CodeEdit)
+        })
         .map(|n| n.id.clone());
     let Some(gen_id) = gen else { return };
 
@@ -266,6 +275,64 @@ mod tests {
         fs::write(ws.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
         assert_eq!(detect_test_command(Some(ws.as_path())), "cargo test");
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    fn plan_with(node: Node) -> Plan {
+        Plan {
+            goal: "g".into(),
+            blackboard: None,
+            mentioned: Vec::new(),
+            budget: Default::default(),
+            stop_when: None,
+            nodes: vec![node],
+        }
+    }
+
+    #[test]
+    fn a_prose_node_gets_no_test_evaluator() {
+        // Asking for an explanation produced a `cargo test` evaluator, which
+        // failed on the repo's pre-existing failures and looped the generator
+        // back to "fix the tests" — work the node was explicitly told not to do.
+        let mut plan = plan_with(Node {
+            id: "n1".into(),
+            role: Role::Generator,
+            instruction: "Explain this codebase; do not modify any files.".into(),
+            needs: vec![
+                Capability::RepoAware,
+                Capability::ToolRun,
+                Capability::Reasoning,
+                Capability::Writing,
+                Capability::LongContext,
+            ],
+            complexity_tier: Some(ComplexityTier::T1),
+            ..default_node()
+        });
+
+        ensure_evaluators(&mut plan, ComplexityTier::T1, None);
+
+        assert_eq!(
+            plan.nodes.len(),
+            1,
+            "a node that cannot edit code cannot change whether tests pass: {:?}",
+            plan.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_code_editing_node_still_gets_a_test_evaluator() {
+        let mut plan = plan_with(Node {
+            id: "n1".into(),
+            role: Role::Generator,
+            instruction: "Implement the feature".into(),
+            needs: vec![Capability::CodeEdit, Capability::RepoAware],
+            complexity_tier: Some(ComplexityTier::T1),
+            ..default_node()
+        });
+
+        ensure_evaluators(&mut plan, ComplexityTier::T1, None);
+
+        assert_eq!(plan.nodes.len(), 2, "code work still needs verification");
+        assert_eq!(plan.nodes[1].role, Role::Evaluator);
     }
 
     #[test]
