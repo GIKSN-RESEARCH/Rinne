@@ -1104,11 +1104,20 @@ async fn soft_stop(pid_path: &Path, exit_path: &Path) {
     #[cfg(unix)]
     {
         unsafe {
-            // TERM the process only (not -pgid): launcher is a simple bash
-            // script without set -m; children are in the same group by default
-            // on macOS Terminal so we also signal the group gently.
+            // Leaves first. The launcher is bash blocked on the foreground
+            // harness, so its TERM trap cannot run until that harness exits —
+            // signalling bash alone is a no-op until it is too late. Killing
+            // the harness lets bash resume into `on_exit`, which resets mouse
+            // tracking and closes the window (prior failure #3 skipped that).
+            //
+            // The group is deliberately not signalled: the launcher shares the
+            // login shell's process group, so `kill(-pid)` targets a group that
+            // does not exist, and signalling the real group would hit the user's
+            // own shell.
+            for child in descendants_deepest_first(pid, &live_child_pids) {
+                libc::kill(child, libc::SIGTERM);
+            }
             libc::kill(pid, libc::SIGTERM);
-            libc::kill(-pid, libc::SIGTERM);
         }
 
         let deadline = Instant::now() + TERM_GRACE;
@@ -1132,10 +1141,13 @@ async fn soft_stop(pid_path: &Path, exit_path: &Path) {
             sleep(Duration::from_millis(100)).await;
         }
 
-        // Last resort.
+        // Last resort — again leaves first, so nothing is left reparented to
+        // init still holding the Terminal window open.
         unsafe {
+            for child in descendants_deepest_first(pid, &live_child_pids) {
+                libc::kill(child, libc::SIGKILL);
+            }
             libc::kill(pid, libc::SIGKILL);
-            libc::kill(-pid, libc::SIGKILL);
         }
         if !exit_path.exists() {
             let _ = std::fs::write(exit_path, b"137");
@@ -1175,6 +1187,54 @@ fn flush_line(
     for ev in mapper(&line) {
         emit(events, ev);
     }
+}
+
+/// Direct children of `pid`, as reported by `pgrep -P`. Empty on any failure —
+/// callers still signal the launcher itself, so a missing `pgrep` degrades to
+/// the previous behaviour rather than breaking teardown.
+fn live_child_pids(pid: i32) -> Vec<i32> {
+    let Ok(out) = StdCommand::new("pgrep")
+        .arg("-P")
+        .arg(pid.to_string())
+        .output()
+    else {
+        return Vec::new();
+    };
+    parse_pgrep(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Split `pgrep` output into PIDs, ignoring blank or malformed lines.
+fn parse_pgrep(stdout: &str) -> Vec<i32> {
+    stdout
+        .lines()
+        .filter_map(|l| l.trim().parse::<i32>().ok())
+        .filter(|p| *p > 0)
+        .collect()
+}
+
+/// Every descendant of `root`, deepest first, excluding `root` itself.
+///
+/// Signalling the launcher directly cannot work: bash defers its TERM trap
+/// until the foreground harness exits, so the trap that resets the TTY never
+/// runs. Killing the leaves instead lets the harness exit, bash resume, and
+/// `on_exit` reset mouse tracking before the window closes — which is what
+/// prior failure #3 (`kill -9` on the process group) skipped.
+fn descendants_deepest_first(root: i32, children_of: &dyn Fn(i32) -> Vec<i32>) -> Vec<i32> {
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut queue = std::collections::VecDeque::from([root]);
+    // Breadth-first yields shallow→deep; reversing gives leaves first.
+    let mut order: Vec<i32> = Vec::new();
+    while let Some(pid) = queue.pop_front() {
+        for child in children_of(pid) {
+            // PID reuse can make the walk cyclic; `seen` bounds it.
+            if child > 0 && seen.insert(child) {
+                order.push(child);
+                queue.push_back(child);
+            }
+        }
+    }
+    order.reverse();
+    order
 }
 
 /// Decide a session's terminal status from what the launcher left behind.
@@ -1258,6 +1318,54 @@ fn unique_suffix() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree<'a>(edges: &'a [(i32, &'a [i32])]) -> impl Fn(i32) -> Vec<i32> + 'a {
+        move |pid| {
+            edges
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map(|(_, kids)| kids.to_vec())
+                .unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn descendants_are_returned_leaves_before_parents() {
+        // launcher(10) → harness(20) → tool(30), plus a sibling(21).
+        let f = tree(&[(10, &[20, 21]), (20, &[30])]);
+        let got = descendants_deepest_first(10, &f);
+
+        assert!(!got.contains(&10), "root must not be signalled: {got:?}");
+        let pos = |p: i32| got.iter().position(|x| *x == p).unwrap();
+        assert!(
+            pos(30) < pos(20),
+            "a child must be signalled before its parent"
+        );
+        assert_eq!(got.len(), 3, "{got:?}");
+    }
+
+    #[test]
+    fn pgrep_output_parses_and_ignores_junk() {
+        assert_eq!(parse_pgrep("120\n131\n"), vec![120, 131]);
+        assert_eq!(parse_pgrep(""), Vec::<i32>::new());
+        assert_eq!(parse_pgrep("\n  \nnot-a-pid\n7\n"), vec![7]);
+        // A zero or negative pid would signal a process group; never emit one.
+        assert_eq!(parse_pgrep("0\n-1\n9"), vec![9]);
+    }
+
+    #[test]
+    fn descendants_of_a_leaf_is_empty() {
+        let f = tree(&[]);
+        assert!(descendants_deepest_first(99, &f).is_empty());
+    }
+
+    #[test]
+    fn descendants_terminates_on_a_cycle() {
+        // PID reuse can produce a cycle; the walk must not hang or repeat.
+        let f = tree(&[(1, &[2]), (2, &[1])]);
+        let got = descendants_deepest_first(1, &f);
+        assert_eq!(got, vec![2], "{got:?}");
+    }
 
     #[test]
     fn a_missing_deliverable_fails_even_when_the_harness_exits_clean() {
