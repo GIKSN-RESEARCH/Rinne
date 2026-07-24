@@ -234,8 +234,96 @@ fn validate_plan_routing(plan: &Plan, workers: &[WorkerDescriptor]) -> Vec<Strin
                 ));
             }
         }
+        // Every capability in `needs` must be advertised by some worker.
+        // Attaching a tool/skill does NOT change `needs` (it stays about worker
+        // capabilities), so the provider set is the worker pool alone. Catching
+        // an unsatisfiable need here — with a "did you mean" for near-miss names
+        // — turns a planner typo (e.g. `repoaware` for `repo-aware`) into an
+        // honest plan error, instead of a silent park at dispatch that asks for
+        // "a capable worker" no amount of workers can supply.
+        for need in &node.needs {
+            if workers.iter().any(|w| w.has(need)) {
+                continue;
+            }
+            let name = need.as_str();
+            let mut msg = format!(
+                "node `{}` needs capability `{name}` that no available worker advertises",
+                node.id
+            );
+            if let Some(sugg) = suggest_capability(name, workers) {
+                // A suggestion identical to the name means it is a valid
+                // capability that simply no worker provides — the message
+                // already says that; a "did you mean" would just echo it.
+                if sugg != name {
+                    msg.push_str(&format!(" — did you mean `{sugg}`?"));
+                }
+            }
+            errs.push(msg);
+        }
     }
     errs
+}
+
+/// The capability vocabulary a plan can legitimately name: the built-in variants
+/// plus every capability any available worker advertises (custom ones included).
+fn known_capability_names(workers: &[WorkerDescriptor]) -> Vec<String> {
+    const BUILTINS: [Capability; 9] = [
+        Capability::CodeEdit,
+        Capability::RepoAware,
+        Capability::WebSearch,
+        Capability::Vision,
+        Capability::LongContext,
+        Capability::ToolRun,
+        Capability::CodeReview,
+        Capability::Reasoning,
+        Capability::Writing,
+    ];
+    let mut names: Vec<String> = BUILTINS.iter().map(|c| c.as_str().to_string()).collect();
+    for w in workers {
+        for cap in &w.capabilities {
+            let n = cap.as_str().to_string();
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    names
+}
+
+/// The closest known capability name within a small edit distance, if any. Only
+/// used to enrich the error for a `need` that already failed validation, so a
+/// legitimate custom capability is never rewritten — just suggested against.
+fn suggest_capability(name: &str, workers: &[WorkerDescriptor]) -> Option<String> {
+    // Tolerate a near miss: a couple of edits covers dropped/extra separators
+    // and single typos (`repoaware`→`repo-aware`, `writingg`→`writing`) without
+    // matching unrelated names.
+    let max_distance = 2.max(name.len() / 4);
+    known_capability_names(workers)
+        .into_iter()
+        .map(|cand| {
+            let d = edit_distance(name, &cand);
+            (d, cand)
+        })
+        .filter(|(d, _)| *d <= max_distance)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, cand)| cand)
+}
+
+/// Levenshtein distance between two strings (small inputs; capability names).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 fn parse_prefer_name(prefer: &str) -> &str {
@@ -368,19 +456,139 @@ mod tests {
         });
 
         ensure_evaluators(&mut plan, ComplexityTier::T4, None);
-        let workers = vec![WorkerDescriptor {
-            name: "claude-code".into(),
+        // A harness that can actually do the prose node's work — it advertises
+        // every capability `prose_node()` declares, so the plan is satisfiable.
+        let workers = vec![worker_with(
+            "claude-code",
+            vec![
+                Capability::RepoAware,
+                Capability::ToolRun,
+                Capability::Reasoning,
+                Capability::Writing,
+                Capability::LongContext,
+            ],
+        )];
+
+        let errs = validate_plan_routing(&plan, &workers);
+        assert!(errs.is_empty(), "T4 prose plan must validate: {errs:?}");
+    }
+
+    fn worker_with(name: &str, caps: Vec<Capability>) -> WorkerDescriptor {
+        WorkerDescriptor {
+            name: name.into(),
             family: rinne_core::worker::WorkerFamily::Harness,
-            capabilities: vec![Capability::RepoAware, Capability::Writing],
+            capabilities: caps,
             auth_mode: rinne_core::worker::AuthMode::Subscription,
             quota: rinne_core::worker::QuotaModel::unlimited(),
             latency: rinne_core::worker::LatencyProfile::Medium,
             transport: rinne_core::worker::Transport::SubprocessJson,
             models: vec!["haiku".into()],
-        }];
+        }
+    }
+
+    #[test]
+    fn an_unsatisfiable_need_fails_validation_with_a_suggestion() {
+        // A planner backend emitted `"repoaware"` (no hyphen); the lenient
+        // deserializer turned it into `Custom("repoaware")`, which no worker
+        // advertises. Before this check it slipped to dispatch and parked with a
+        // misleading "add a capable worker" — an unfixable dead end. It must be a
+        // plan error at validation time, with the real name suggested.
+        let plan = plan_with(Node {
+            id: "n1".into(),
+            needs: vec![
+                Capability::Custom("repoaware".into()),
+                Capability::Reasoning,
+                Capability::Writing,
+            ],
+            complexity_tier: Some(ComplexityTier::T1),
+            ..default_node()
+        });
+        let workers = vec![worker_with(
+            "claude-code",
+            vec![
+                Capability::RepoAware,
+                Capability::Reasoning,
+                Capability::Writing,
+            ],
+        )];
 
         let errs = validate_plan_routing(&plan, &workers);
-        assert!(errs.is_empty(), "T4 prose plan must validate: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("`repoaware`") && e.contains("did you mean `repo-aware`?")),
+            "expected an unsatisfiable-capability error suggesting repo-aware: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_custom_capability_fails_without_a_bogus_suggestion() {
+        // A real MCP capability nobody advertises (`browser`) must fail, but it
+        // is not a typo of any built-in — so the error must NOT steer the
+        // planner toward a wrong "did you mean". Only near-misses get suggestions.
+        let plan = plan_with(Node {
+            id: "n1".into(),
+            needs: vec![Capability::Custom("browser".into()), Capability::Reasoning],
+            complexity_tier: Some(ComplexityTier::T1),
+            ..default_node()
+        });
+        let workers = vec![worker_with("claude-code", vec![Capability::Reasoning])];
+
+        let errs = validate_plan_routing(&plan, &workers);
+        let browser_err = errs
+            .iter()
+            .find(|e| e.contains("`browser`"))
+            .expect("browser need must be flagged");
+        assert!(
+            !browser_err.contains("did you mean"),
+            "unrelated custom capability must not get a suggestion: {browser_err}"
+        );
+    }
+
+    #[test]
+    fn a_valid_but_unadvertised_builtin_fails_without_echoing_itself() {
+        // `vision` is a real built-in, but no worker in this pool provides it.
+        // The error must say so plainly and NOT append "did you mean `vision`?"
+        // (a suggestion identical to the name is just noise).
+        let plan = plan_with(Node {
+            id: "n1".into(),
+            needs: vec![Capability::Vision, Capability::Reasoning],
+            complexity_tier: Some(ComplexityTier::T1),
+            ..default_node()
+        });
+        let workers = vec![worker_with("claude-code", vec![Capability::Reasoning])];
+
+        let errs = validate_plan_routing(&plan, &workers);
+        let vision_err = errs
+            .iter()
+            .find(|e| e.contains("`vision`"))
+            .expect("vision need must be flagged");
+        assert!(
+            !vision_err.contains("did you mean"),
+            "an unadvertised built-in must not echo itself as a suggestion: {vision_err}"
+        );
+    }
+
+    #[test]
+    fn a_legitimately_advertised_custom_capability_validates() {
+        // `Custom` is the real extension point (an MCP server advertises
+        // `database`). When a worker actually advertises it, the need is
+        // satisfiable and must not be flagged.
+        let plan = plan_with(Node {
+            id: "n1".into(),
+            needs: vec![Capability::Custom("database".into()), Capability::Reasoning],
+            complexity_tier: Some(ComplexityTier::T1),
+            ..default_node()
+        });
+        let workers = vec![worker_with(
+            "pg",
+            vec![Capability::Custom("database".into()), Capability::Reasoning],
+        )];
+
+        let errs = validate_plan_routing(&plan, &workers);
+        assert!(
+            errs.is_empty(),
+            "an advertised custom capability must validate: {errs:?}"
+        );
     }
 
     #[test]
